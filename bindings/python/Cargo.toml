@@ -1,0 +1,12 @@
+[package]
+name = "marina-python"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "marina"
+crate-type = ["cdylib"]
+
+[dependencies]
+marina = { path = "../.." }
+pyo3 = { version = "0.23", features = ["extension-module"] }
