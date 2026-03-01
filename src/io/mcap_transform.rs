@@ -191,20 +191,23 @@ pub fn compress_mcap_for_push_with_progress(
     let expected_messages = summary.stats.as_ref().map(|s| s.message_count);
     let mut loaded_chunks = 0usize;
     let pb = indexed_reader_bar(total_chunks, "pack", &input_name);
+    let bar_visible = !pb.is_hidden();
 
-    if let Some(total) = expected_messages {
-        progress.emit(
-            "pack",
-            format!(
-                "indexed reader initialized: {} chunk(s), ~{} message(s)",
-                total_chunks, total
-            ),
-        );
-    } else {
-        progress.emit(
-            "pack",
-            format!("indexed reader initialized: {} chunk(s)", total_chunks),
-        );
+    if !bar_visible {
+        if let Some(total) = expected_messages {
+            progress.emit(
+                "pack",
+                format!(
+                    "indexed reader initialized: {} chunk(s), ~{} message(s)",
+                    total_chunks, total
+                ),
+            );
+        } else {
+            progress.emit(
+                "pack",
+                format!("indexed reader initialized: {} chunk(s)", total_chunks),
+            );
+        }
     }
 
     let writer_file = File::create(output)
@@ -231,9 +234,10 @@ pub fn compress_mcap_for_push_with_progress(
                 if !pb.is_hidden() {
                     pb.inc(1);
                 }
-                if loaded_chunks == 1
-                    || loaded_chunks % CHUNK_PROGRESS_EVERY == 0
-                    || loaded_chunks == total_chunks
+                if !bar_visible
+                    && (loaded_chunks == 1
+                        || loaded_chunks % CHUNK_PROGRESS_EVERY == 0
+                        || loaded_chunks == total_chunks)
                 {
                     emit_chunk_progress(progress, "pack", loaded_chunks, total_chunks);
                 }
@@ -259,15 +263,9 @@ pub fn compress_mcap_for_push_with_progress(
                 };
 
                 stats.total_messages += 1;
-                if stats.total_messages % MESSAGE_PROGRESS_EVERY == 0 {
+                if !bar_visible && stats.total_messages % MESSAGE_PROGRESS_EVERY == 0 {
                     if let Some(total) = expected_messages {
                         let pct = (stats.total_messages as f64 / total as f64) * 100.0;
-                        if !pb.is_hidden() {
-                            pb.set_message(format!(
-                                "pack complete {} ({:.1}% messages)",
-                                input_name, pct
-                            ));
-                        }
                         progress.emit(
                             "pack",
                             format!(
@@ -318,17 +316,19 @@ pub fn compress_mcap_for_push_with_progress(
         PointCloudCompressionMode::Lossy => "lossy",
         PointCloudCompressionMode::Lossless => "lossless",
     };
-    progress.emit(
-        "pack",
-        format!(
-            "indexed reader finished: {} chunk(s) loaded; transformed {} PointCloud2 messages out of {} total MCAP messages (mode: {}, precision: {:.3} mm)",
-            loaded_chunks,
-            stats.pointcloud_messages,
-            stats.total_messages,
-            mode,
-            options.pointcloud_precision_m * 1000.0
-        ),
-    );
+    if !bar_visible {
+        progress.emit(
+            "pack",
+            format!(
+                "indexed reader finished: {} chunk(s) loaded; transformed {} PointCloud2 messages out of {} total MCAP messages (mode: {}, precision: {:.3} mm)",
+                loaded_chunks,
+                stats.pointcloud_messages,
+                stats.total_messages,
+                mode,
+                options.pointcloud_precision_m * 1000.0
+            ),
+        );
+    }
     Ok(stats)
 }
 
@@ -366,20 +366,23 @@ pub fn decompress_mcap_after_pull_with_progress(
     let expected_messages = summary.stats.as_ref().map(|s| s.message_count);
     let mut loaded_chunks = 0usize;
     let pb = indexed_reader_bar(total_chunks, "unpack", &input_name);
+    let bar_visible = !pb.is_hidden();
 
-    if let Some(total) = expected_messages {
-        progress.emit(
-            "unpack",
-            format!(
-                "indexed reader initialized: {} chunk(s), ~{} message(s)",
-                total_chunks, total
-            ),
-        );
-    } else {
-        progress.emit(
-            "unpack",
-            format!("indexed reader initialized: {} chunk(s)", total_chunks),
-        );
+    if !bar_visible {
+        if let Some(total) = expected_messages {
+            progress.emit(
+                "unpack",
+                format!(
+                    "indexed reader initialized: {} chunk(s), ~{} message(s)",
+                    total_chunks, total
+                ),
+            );
+        } else {
+            progress.emit(
+                "unpack",
+                format!("indexed reader initialized: {} chunk(s)", total_chunks),
+            );
+        }
     }
 
     let writer_file = File::create(output)
@@ -406,9 +409,10 @@ pub fn decompress_mcap_after_pull_with_progress(
                 if !pb.is_hidden() {
                     pb.inc(1);
                 }
-                if loaded_chunks == 1
-                    || loaded_chunks % CHUNK_PROGRESS_EVERY == 0
-                    || loaded_chunks == total_chunks
+                if !bar_visible
+                    && (loaded_chunks == 1
+                        || loaded_chunks % CHUNK_PROGRESS_EVERY == 0
+                        || loaded_chunks == total_chunks)
                 {
                     emit_chunk_progress(progress, "unpack", loaded_chunks, total_chunks);
                 }
@@ -434,12 +438,9 @@ pub fn decompress_mcap_after_pull_with_progress(
                 };
 
                 stats.total_messages += 1;
-                if stats.total_messages % MESSAGE_PROGRESS_EVERY == 0 {
+                if !bar_visible && stats.total_messages % MESSAGE_PROGRESS_EVERY == 0 {
                     if let Some(total) = expected_messages {
                         let pct = (stats.total_messages as f64 / total as f64) * 100.0;
-                        if !pb.is_hidden() {
-                            pb.set_message(format!("unpack {} ({:.1}% messages)", input_name, pct));
-                        }
                         progress.emit(
                             "unpack",
                             format!(
@@ -476,13 +477,15 @@ pub fn decompress_mcap_after_pull_with_progress(
             pb.finish_with_message(format!("unpack complete {}", input_name));
         }
     }
-    progress.emit(
-        "unpack",
-        format!(
-            "indexed reader finished: {} chunk(s) loaded; restored {} PointCloud2 messages out of {} total MCAP messages",
-            loaded_chunks, stats.pointcloud_messages, stats.total_messages
-        ),
-    );
+    if !bar_visible {
+        progress.emit(
+            "unpack",
+            format!(
+                "indexed reader finished: {} chunk(s) loaded; restored {} PointCloud2 messages out of {} total MCAP messages",
+                loaded_chunks, stats.pointcloud_messages, stats.total_messages
+            ),
+        );
+    }
     Ok(stats)
 }
 
