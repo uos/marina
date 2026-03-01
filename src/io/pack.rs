@@ -1,11 +1,12 @@
 use std::fs::{self, File};
-use std::io;
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
+use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
 use tar::{Archive, Builder};
 
@@ -112,12 +113,104 @@ pub fn pack_bag_with_progress_and_options(
     fs::rename(&transformed_mcap, &staged_mcap)?;
 
     progress.emit("pack", "compressing staged folder to marina archive");
+
+    let mut total_bytes = 0u64;
+    let mut total_files = 0u64;
+    for entry in walkdir::WalkDir::new(&staging_dir) {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file() {
+            total_files += 1;
+            total_bytes += fs::metadata(path)?.len();
+        }
+    }
+
+    let pb = if std::io::stderr().is_terminal() {
+        let pb = if total_bytes > 0 {
+            ProgressBar::new(total_bytes)
+        } else {
+            ProgressBar::new_spinner()
+        };
+        pb.set_style(
+            ProgressStyle::with_template(
+                "packing archive [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})",
+            )
+            .unwrap_or_else(|_| ProgressStyle::default_bar()),
+        );
+        pb.set_message(format!("packing {} file(s)", total_files));
+        if total_bytes == 0 {
+            pb.enable_steady_tick(std::time::Duration::from_millis(100));
+        }
+        pb
+    } else {
+        ProgressBar::hidden()
+    };
+
     let tar_gz = File::create(out_file)?;
     let encoder = GzEncoder::new(tar_gz, Compression::best());
     let mut builder = Builder::new(encoder);
-    builder.append_dir_all("bundle", &staging_dir)?;
+    builder.append_dir("bundle", &staging_dir)?;
+
+    let mut packed_files = 0u64;
+    let mut packed_bytes = 0u64;
+    for entry in walkdir::WalkDir::new(&staging_dir) {
+        let entry = entry?;
+        let path = entry.path();
+        let rel = path.strip_prefix(&staging_dir).with_context(|| {
+            format!(
+                "failed to strip staging prefix {} from {}",
+                staging_dir.display(),
+                path.display()
+            )
+        })?;
+
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+
+        let archive_path = Path::new("bundle").join(rel);
+        if path.is_dir() {
+            builder.append_dir(&archive_path, path)?;
+            continue;
+        }
+
+        builder.append_path_with_name(path, &archive_path)?;
+        packed_files += 1;
+        packed_bytes += fs::metadata(path)?.len();
+        if !pb.is_hidden() {
+            if total_bytes > 0 {
+                pb.set_position(packed_bytes.min(total_bytes));
+            } else {
+                pb.tick();
+            }
+        }
+
+        if pb.is_hidden()
+            && (packed_files == 1 || packed_files % 512 == 0 || packed_files == total_files)
+        {
+            progress.emit(
+                "pack",
+                format!(
+                    "archive packing progress: {}/{} file(s)",
+                    packed_files, total_files
+                ),
+            );
+        }
+    }
+
     let encoder = builder.into_inner()?;
     encoder.finish()?;
+
+    if !pb.is_hidden() {
+        if total_bytes > 0 {
+            pb.finish_with_message(format!(
+                "packing archive complete: {}/{} file(s)",
+                packed_files, total_files
+            ));
+        } else {
+            pb.finish_with_message("packing archive complete".to_string());
+        }
+    }
 
     progress.emit("pack", "cleaning temporary staging files");
     fs::remove_dir_all(staging_dir)?;
