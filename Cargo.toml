@@ -24,6 +24,7 @@ glob = "0.3"
 indicatif = "0.17"
 jsonwebtoken = "9.3"
 mcap = "0.24"
+memmap2 = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
 regex = "1.11"
 ros2-interfaces-jazzy-serde = { version = "0.0.4", features = ["sensor_msgs", "std_msgs", "builtin_interfaces"] }

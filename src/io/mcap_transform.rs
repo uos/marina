@@ -8,6 +8,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use cloudini::ros::{CompressedPointCloud2, CompressionConfig};
 use mcap::{Compression, Message, MessageStream, WriteOptions, Writer};
+use memmap2::Mmap;
 
 use crate::progress::ProgressReporter;
 
@@ -17,6 +18,14 @@ const POINTCLOUD2_SCHEMA: &str = "sensor_msgs/msg/PointCloud2";
 const CDR_ENCODING: &str = "cdr";
 const MARINA_CODEC_KEY: &str = "marina.pointcloud.codec";
 const MARINA_CODEC_VAL: &str = "cloudini";
+
+fn map_mcap_file(path: &Path) -> Result<Mmap> {
+    let file = File::open(path)
+        .with_context(|| format!("failed to open input mcap {}", path.display()))?;
+    let mapped = unsafe { Mmap::map(&file) }
+        .with_context(|| format!("failed to mmap input mcap {}", path.display()))?;
+    Ok(mapped)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McapChunkCompression {
@@ -107,8 +116,7 @@ pub fn compress_mcap_for_push_with_progress(
         ),
     );
 
-    let bytes = std::fs::read(input)
-        .with_context(|| format!("failed to read input mcap {}", input.display()))?;
+    let mapped = map_mcap_file(input)?;
 
     let writer_file = File::create(output)
         .with_context(|| format!("failed to create output mcap {}", output.display()))?;
@@ -116,7 +124,7 @@ pub fn compress_mcap_for_push_with_progress(
 
     let mut stats = TransformStats::default();
 
-    for msg in MessageStream::new(&bytes)? {
+    for msg in MessageStream::new(&mapped)? {
         let msg = msg?;
         stats.total_messages += 1;
         match options.pointcloud_mode {
@@ -183,8 +191,7 @@ pub fn decompress_mcap_after_pull_with_progress(
         ),
     );
 
-    let bytes = std::fs::read(input)
-        .with_context(|| format!("failed to read input mcap {}", input.display()))?;
+    let mapped = map_mcap_file(input)?;
 
     let writer_file = File::create(output)
         .with_context(|| format!("failed to create output mcap {}", output.display()))?;
@@ -192,7 +199,7 @@ pub fn decompress_mcap_after_pull_with_progress(
 
     let mut stats = TransformStats::default();
 
-    for msg in MessageStream::new(&bytes)? {
+    for msg in MessageStream::new(&mapped)? {
         let msg = msg?;
         stats.total_messages += 1;
         if is_cloudini_encoded_channel(&msg) {
