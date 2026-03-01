@@ -20,6 +20,8 @@ pub struct RegistryFile {
 pub fn config_dir() -> Result<PathBuf> {
     let dir = if let Some(override_dir) = std::env::var_os("MARINA_CONFIG_DIR") {
         PathBuf::from(override_dir)
+    } else if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        PathBuf::from(xdg).join("marina")
     } else if let Some(home) = std::env::var_os("HOME") {
         PathBuf::from(home).join(".config").join("marina")
     } else {
@@ -49,16 +51,31 @@ pub fn registry_file_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("registries.toml"))
 }
 
+pub const DEFAULT_REGISTRY_NAME: &str = "osnabotics-public";
+pub const DEFAULT_GDRIVE_FOLDER_ID: &str = "10hjoMIyWTOVNOo3zDOfHoSb1S55gO3rJ";
+
+fn default_registry() -> RegistryConfig {
+    RegistryConfig {
+        name: DEFAULT_REGISTRY_NAME.to_string(),
+        kind: "gdrive".to_string(),
+        uri: format!("gdrive://{}", DEFAULT_GDRIVE_FOLDER_ID),
+        auth_env: None,
+    }
+}
+
 pub fn load_registries() -> Result<RegistryFile> {
     let path = registry_file_path()?;
     if !path.exists() {
-        return Ok(RegistryFile::default());
+        let mut base = RegistryFile::default();
+        base.registry.push(default_registry());
+        return Ok(base);
     }
 
     let content =
         fs::read_to_string(&path).with_context(|| format!("failed reading {}", path.display()))?;
     let parsed: RegistryFile =
         toml::from_str(&content).with_context(|| format!("failed parsing {}", path.display()))?;
+
     Ok(parsed)
 }
 

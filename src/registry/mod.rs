@@ -1,4 +1,3 @@
-pub mod aws;
 pub mod driver;
 pub mod folder;
 pub mod gdrive;

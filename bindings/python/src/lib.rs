@@ -1,7 +1,8 @@
 use ::marina as marina_rs;
-use marina_rs::{Marina, ResolveResult};
+use marina_rs::{Marina, ProgressEvent, ProgressReporter, ProgressSink, ResolveResult, WriterProgress};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+use pyo3::types::PyAnyMethods;
 use pyo3::types::PyModuleMethods;
 
 #[pyclass]
@@ -50,6 +51,51 @@ fn pull(bag_ref: &str, registry: Option<&str>) -> PyResult<String> {
     let pulled = marina
         .pull_exact(&bag, registry)
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    Ok(pulled.display().to_string())
+}
+
+struct PyWriterProgressSink {
+    writer: Py<PyAny>,
+}
+
+impl ProgressSink for PyWriterProgressSink {
+    fn emit(&mut self, event: ProgressEvent) {
+        Python::with_gil(|py| {
+            let writer = self.writer.bind(py);
+            let line = format!("[{}] {}\n", event.phase, event.message);
+            let _ = writer.call_method1("write", (line,));
+            let _ = writer.call_method0("flush");
+        });
+    }
+}
+
+#[pyfunction]
+#[pyo3(signature = (bag_ref, registry=None, progress=false, writer=None))]
+fn pull_with_progress(
+    bag_ref: &str,
+    registry: Option<&str>,
+    progress: bool,
+    writer: Option<Py<PyAny>>,
+) -> PyResult<String> {
+    let bag = bag_ref
+        .parse::<marina_rs::BagRef>()
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    let mut marina = Marina::load().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
+    let pulled = if let Some(writer) = writer {
+        let mut sink = PyWriterProgressSink { writer };
+        let mut reporter = ProgressReporter::new(&mut sink);
+        marina.pull_exact_with_progress(&bag, registry, &mut reporter)
+    } else if progress {
+        let mut stdout = std::io::stdout();
+        let mut sink = WriterProgress::new(&mut stdout);
+        let mut reporter = ProgressReporter::new(&mut sink);
+        marina.pull_exact_with_progress(&bag, registry, &mut reporter)
+    } else {
+        marina.pull_exact(&bag, registry)
+    }
+    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+
     Ok(pulled.display().to_string())
 }
 
@@ -118,6 +164,7 @@ fn marina(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(resolve, m)?)?;
     m.add_function(wrap_pyfunction!(resolve_detailed, m)?)?;
     m.add_function(wrap_pyfunction!(pull, m)?)?;
+    m.add_function(wrap_pyfunction!(pull_with_progress, m)?)?;
     m.add_function(wrap_pyfunction!(cli_main, m)?)?;
     Ok(())
 }

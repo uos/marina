@@ -258,7 +258,11 @@ impl RegistryDriver for SshRegistry {
         packed_bytes: u64,
     ) -> Result<()> {
         let target_dir = self.object_dir(bag);
-        self.run_ssh(&format!("mkdir -p {}", shell_quote(&target_dir)))?;
+        self.run_ssh(&format!(
+            "rm -rf {} && mkdir -p {}",
+            shell_quote(&target_dir),
+            shell_quote(&target_dir)
+        ))?;
 
         self.upload_file_with_progress(packed_file, &self.data_path(bag))?;
 

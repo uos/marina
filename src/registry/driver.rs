@@ -28,4 +28,8 @@ pub trait RegistryDriver: Send + Sync {
     fn list(&self, filter: &str) -> Result<Vec<BagRef>>;
 
     fn remove(&self, bag: &BagRef) -> Result<()>;
+
+    fn check_connection(&self) -> Result<()> {
+        Ok(())
+    }
 }

@@ -4,15 +4,26 @@ use std::str::FromStr;
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
+/// Canonical dataset reference used by marina.
+///
+/// Examples:
+/// - `dlg_cut`
+/// - `stelzo/dlg_cut:ouster:1min`
+/// - `dlg_cut[traj.txt]`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct BagRef {
+    /// Optional namespace (user/project scope).
     pub namespace: Option<String>,
+    /// Base bag name.
     pub name: String,
+    /// Optional ordered tag chain.
     pub tags: Vec<String>,
+    /// Optional attachment path (for exporting/resolving a side file).
     pub attachment: Option<String>,
 }
 
 impl BagRef {
+    /// Returns a filesystem-safe key used for local cache directories.
     pub fn cache_key(&self) -> String {
         let mut key = String::new();
         if let Some(ns) = &self.namespace {
@@ -31,6 +42,7 @@ impl BagRef {
         key.replace('/', "_")
     }
 
+    /// Returns the registry object path for this bag (without attachment).
     pub fn object_path(&self) -> String {
         let mut parts = Vec::new();
         if let Some(ns) = &self.namespace {
@@ -43,12 +55,14 @@ impl BagRef {
         parts.join("/")
     }
 
+    /// Returns a clone with the given attachment.
     pub fn with_attachment(&self, attachment: Option<String>) -> Self {
         let mut next = self.clone();
         next.attachment = attachment;
         next
     }
 
+    /// Returns a clone with attachment removed.
     pub fn without_attachment(&self) -> Self {
         let mut next = self.clone();
         next.attachment = None;

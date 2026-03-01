@@ -1,12 +1,17 @@
 use std::cell::RefCell;
-use std::ffi::{CStr, CString, c_char};
+use std::ffi::{CStr, CString, c_char, c_void};
 
-use crate::{Marina, ResolveResult};
+use crate::{Marina, ProgressEvent, ProgressReporter, ProgressSink, ResolveResult, WriterProgress};
 
 pub const MARINA_RESOLVE_ERROR: i32 = -1;
 pub const MARINA_RESOLVE_LOCAL: i32 = 0;
 pub const MARINA_RESOLVE_CACHED: i32 = 1;
 pub const MARINA_RESOLVE_REMOTE_AVAILABLE: i32 = 2;
+pub const MARINA_PROGRESS_MODE_SILENT: i32 = 0;
+pub const MARINA_PROGRESS_MODE_STDOUT: i32 = 1;
+
+pub type MarinaProgressCallback =
+    Option<extern "C" fn(phase: *const c_char, message: *const c_char, user_data: *mut c_void)>;
 
 #[repr(C)]
 pub struct MarinaResolveDetailed {
@@ -60,6 +65,80 @@ fn cstring_from_opt(s: Option<String>) -> *mut c_char {
     match s {
         Some(v) => cstring_from_string(v),
         None => std::ptr::null_mut(),
+    }
+}
+
+fn parse_registry(registry: *const c_char) -> Result<Option<String>, String> {
+    if registry.is_null() {
+        Ok(None)
+    } else {
+        read_cstr(registry, "registry").map(Some)
+    }
+}
+
+fn parse_bag_ref(bag_ref: *const c_char) -> Result<crate::BagRef, String> {
+    let bag_ref = read_cstr(bag_ref, "bag_ref")?;
+    bag_ref
+        .parse()
+        .map_err(|e| format!("invalid bag reference: {e}"))
+}
+
+struct CCallbackProgress {
+    callback: extern "C" fn(*const c_char, *const c_char, *mut c_void),
+    user_data: *mut c_void,
+}
+
+impl ProgressSink for CCallbackProgress {
+    fn emit(&mut self, event: ProgressEvent) {
+        let phase = match CString::new(event.phase) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let message = match CString::new(event.message) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        (self.callback)(phase.as_ptr(), message.as_ptr(), self.user_data);
+    }
+}
+
+fn do_pull_with_progress(
+    bag: crate::BagRef,
+    registry: Option<String>,
+    progress_mode: i32,
+    callback: MarinaProgressCallback,
+    user_data: *mut c_void,
+) -> *mut c_char {
+    let mut marina = match Marina::load() {
+        Ok(v) => v,
+        Err(e) => {
+            set_last_error(format!("failed to load marina: {e}"));
+            return std::ptr::null_mut();
+        }
+    };
+
+    let path = if let Some(cb) = callback {
+        let mut sink = CCallbackProgress {
+            callback: cb,
+            user_data,
+        };
+        let mut progress = ProgressReporter::new(&mut sink);
+        marina.pull_exact_with_progress(&bag, registry.as_deref(), &mut progress)
+    } else if progress_mode == MARINA_PROGRESS_MODE_STDOUT {
+        let mut stdout = std::io::stdout();
+        let mut sink = WriterProgress::new(&mut stdout);
+        let mut progress = ProgressReporter::new(&mut sink);
+        marina.pull_exact_with_progress(&bag, registry.as_deref(), &mut progress)
+    } else {
+        marina.pull_exact(&bag, registry.as_deref())
+    };
+
+    match path {
+        Ok(v) => cstring_from_string(v.display().to_string()),
+        Err(e) => {
+            set_last_error(format!("pull failed: {e}"));
+            std::ptr::null_mut()
+        }
     }
 }
 
@@ -173,7 +252,7 @@ pub extern "C" fn marina_resolve(target: *const c_char) -> *mut c_char {
 pub extern "C" fn marina_pull(bag_ref: *const c_char, registry: *const c_char) -> *mut c_char {
     clear_last_error();
 
-    let bag_ref = match read_cstr(bag_ref, "bag_ref") {
+    let bag = match parse_bag_ref(bag_ref) {
         Ok(v) => v,
         Err(e) => {
             set_last_error(e);
@@ -181,43 +260,82 @@ pub extern "C" fn marina_pull(bag_ref: *const c_char, registry: *const c_char) -
         }
     };
 
-    let registry = if registry.is_null() {
-        None
-    } else {
-        match read_cstr(registry, "registry") {
-            Ok(v) => Some(v),
-            Err(e) => {
-                set_last_error(e);
-                return std::ptr::null_mut();
-            }
-        }
-    };
-
-    let bag = match bag_ref.parse() {
+    let registry = match parse_registry(registry) {
         Ok(v) => v,
         Err(e) => {
-            set_last_error(format!("invalid bag reference: {e}"));
+            set_last_error(e);
             return std::ptr::null_mut();
         }
     };
 
-    let mut marina = match Marina::load() {
+    do_pull_with_progress(
+        bag,
+        registry,
+        MARINA_PROGRESS_MODE_SILENT,
+        None,
+        std::ptr::null_mut(),
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn marina_pull_with_progress(
+    bag_ref: *const c_char,
+    registry: *const c_char,
+    progress_mode: i32,
+) -> *mut c_char {
+    clear_last_error();
+
+    let bag = match parse_bag_ref(bag_ref) {
         Ok(v) => v,
         Err(e) => {
-            set_last_error(format!("failed to load marina: {e}"));
+            set_last_error(e);
             return std::ptr::null_mut();
         }
     };
 
-    let path = match marina.pull_exact(&bag, registry.as_deref()) {
+    let registry = match parse_registry(registry) {
         Ok(v) => v,
         Err(e) => {
-            set_last_error(format!("pull failed: {e}"));
+            set_last_error(e);
             return std::ptr::null_mut();
         }
     };
 
-    cstring_from_string(path.display().to_string())
+    do_pull_with_progress(bag, registry, progress_mode, None, std::ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn marina_pull_with_callback(
+    bag_ref: *const c_char,
+    registry: *const c_char,
+    callback: MarinaProgressCallback,
+    user_data: *mut c_void,
+) -> *mut c_char {
+    clear_last_error();
+
+    let bag = match parse_bag_ref(bag_ref) {
+        Ok(v) => v,
+        Err(e) => {
+            set_last_error(e);
+            return std::ptr::null_mut();
+        }
+    };
+
+    let registry = match parse_registry(registry) {
+        Ok(v) => v,
+        Err(e) => {
+            set_last_error(e);
+            return std::ptr::null_mut();
+        }
+    };
+
+    do_pull_with_progress(
+        bag,
+        registry,
+        MARINA_PROGRESS_MODE_SILENT,
+        callback,
+        user_data,
+    )
 }
 
 #[unsafe(no_mangle)]

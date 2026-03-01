@@ -1,10 +1,10 @@
-use marina::{BagRef, Marina, ResolveResult};
+use marina::{BagRef, Marina, ProgressReporter, ResolveResult, WriterProgress};
 
 fn main() -> anyhow::Result<()> {
     let mut marina = Marina::load()?;
 
     // Resolve a local path or cached/remote reference.
-    match marina.resolve_target("dlg_cut")? {
+    match marina.resolve_target("tag")? {
         ResolveResult::LocalPath(path) | ResolveResult::Cached(path) => {
             println!("resolved local/cached path: {}", path.display());
         }
@@ -14,8 +14,11 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Pull a concrete bag ref.
-    let bag: BagRef = "dlg_cut:ouster".parse()?;
-    let local = marina.pull_exact(&bag, None)?;
+    let bag: BagRef = "tag:ouster".parse()?;
+    let mut out = std::io::stdout();
+    let mut sink = WriterProgress::new(&mut out);
+    let mut progress = ProgressReporter::new(&mut sink);
+    let local = marina.pull_exact_with_progress(&bag, None, &mut progress)?;
     println!("pulled to {}", local.display());
 
     // Read local catalog.

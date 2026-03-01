@@ -74,6 +74,9 @@ impl RegistryDriver for FolderRegistry {
         packed_bytes: u64,
     ) -> Result<()> {
         let target_dir = self.object_dir(bag);
+        if target_dir.exists() {
+            fs::remove_dir_all(&target_dir)?;
+        }
         fs::create_dir_all(&target_dir)?;
 
         fs::copy(packed_file, self.data_path(bag))?;

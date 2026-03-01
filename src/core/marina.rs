@@ -4,9 +4,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 
+use crate::io::mcap_transform::{McapChunkCompression, PointCloudCompressionMode};
 use crate::io::{bag, pack};
 use crate::model::bag_ref::BagRef;
-use crate::registry::aws::AwsRegistry;
+use crate::progress::ProgressReporter;
 use crate::registry::driver::RegistryDriver;
 use crate::registry::folder::FolderRegistry;
 use crate::registry::gdrive::GDriveRegistry;
@@ -15,10 +16,26 @@ use crate::registry::stub::StubRegistry;
 use crate::storage::cache::{self, CacheEntry, Catalog};
 use crate::storage::config::{self, RegistryConfig};
 
+use log::warn;
+
+pub fn connection_warning(name: &str, uri: &str, driver: &dyn RegistryDriver) -> Option<String> {
+    if let Err(e) = driver.check_connection() {
+        Some(format!(
+            "warning: default registry '{}' ({}) appears unreachable: {}",
+            name, uri, e
+        ))
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ResolveResult {
+    /// Target string resolved directly to an existing local bag directory.
     LocalPath(PathBuf),
+    /// Target resolved to an existing decompressed cache directory/file.
     Cached(PathBuf),
+    /// Target exists in a remote registry and can be pulled.
     RemoteAvailable {
         registry: String,
         bag: BagRef,
@@ -26,6 +43,7 @@ pub enum ResolveResult {
     },
 }
 
+/// Result of removing a registry configuration.
 #[derive(Debug, Clone)]
 pub struct RemovedRegistry {
     pub name: String,
@@ -34,12 +52,14 @@ pub struct RemovedRegistry {
     pub data_deleted: bool,
 }
 
+/// Size information for one cached bag entry.
 #[derive(Debug, Clone, Copy)]
 pub struct CachedSizeStats {
     pub original_bytes: u64,
     pub packed_bytes: u64,
 }
 
+/// Cached bag metadata returned by [`Marina::list_cached_bags`].
 #[derive(Debug, Clone)]
 pub struct CachedBagInfo {
     pub bag: BagRef,
@@ -48,20 +68,56 @@ pub struct CachedBagInfo {
     pub packed_bytes: u64,
 }
 
+/// A single remote search hit across configured registries.
 #[derive(Debug, Clone)]
 pub struct RemoteBagHit {
     pub registry: String,
     pub bag: BagRef,
 }
 
+/// Compression options used while pushing a bag into a packed archive.
+#[derive(Debug, Clone, Copy)]
+pub struct PushOptions {
+    pub pointcloud_mode: PointCloudCompressionMode,
+    pub pointcloud_precision_m: f64,
+    pub packed_mcap_compression: McapChunkCompression,
+}
+
+impl Default for PushOptions {
+    fn default() -> Self {
+        Self {
+            pointcloud_mode: PointCloudCompressionMode::Lossy,
+            pointcloud_precision_m: 0.001,
+            packed_mcap_compression: McapChunkCompression::Zstd,
+        }
+    }
+}
+
+/// Compression options used while unpacking a pulled archive into ready cache.
+#[derive(Debug, Clone, Copy)]
+pub struct PullOptions {
+    pub unpacked_mcap_compression: McapChunkCompression,
+}
+
+impl Default for PullOptions {
+    fn default() -> Self {
+        Self {
+            unpacked_mcap_compression: McapChunkCompression::Zstd,
+        }
+    }
+}
+
+/// High-level marina runtime that owns registry drivers and local catalog state.
 pub struct Marina {
     registries: HashMap<String, (RegistryConfig, Box<dyn RegistryDriver>)>,
     catalog: Catalog,
 }
 
 impl Marina {
+    /// Loads marina configuration, registry drivers, and local cache catalog.
     pub fn load() -> Result<Self> {
         let registry_file = config::load_registries()?;
+
         let mut registries = HashMap::new();
 
         for reg in registry_file.registry {
@@ -77,13 +133,13 @@ impl Marina {
                     &reg.uri,
                     reg.auth_env.clone(),
                 )?),
-                "aws" => Box::new(AwsRegistry::from_uri(
-                    &reg.name,
-                    &reg.uri,
-                    reg.auth_env.clone(),
-                )?),
                 other => Box::new(StubRegistry::new(other, &reg.uri, reg.auth_env.clone())),
             };
+
+            if let Some(msg) = connection_warning(&reg.name, &reg.uri, driver.as_ref()) {
+                warn!("{}", msg);
+            }
+
             registries.insert(reg.name.clone(), (reg, driver));
         }
 
@@ -94,6 +150,7 @@ impl Marina {
         })
     }
 
+    /// Adds a new registry and persists it to `registries.toml`.
     pub fn add_registry(&mut self, registry: RegistryConfig) -> Result<()> {
         let mut existing = config::load_registries()?;
         if existing.registry.iter().any(|r| r.name == registry.name) {
@@ -116,11 +173,6 @@ impl Marina {
                 &registry.uri,
                 registry.auth_env.clone(),
             )?),
-            "aws" => Box::new(AwsRegistry::from_uri(
-                &registry.name,
-                &registry.uri,
-                registry.auth_env.clone(),
-            )?),
             other => Box::new(StubRegistry::new(
                 other,
                 &registry.uri,
@@ -133,6 +185,7 @@ impl Marina {
         Ok(())
     }
 
+    /// Lists configured registry records sorted by name.
     pub fn list_registry_configs(&self) -> Vec<&RegistryConfig> {
         let mut out = self
             .registries
@@ -143,6 +196,10 @@ impl Marina {
         out
     }
 
+    /// Removes a registry configuration.
+    ///
+    /// If `delete_data` is true and the registry is local folder-based,
+    /// marina also removes the folder contents.
     pub fn remove_registry(&mut self, name: &str, delete_data: bool) -> Result<RemovedRegistry> {
         let mut existing = config::load_registries()?;
         let idx = existing
@@ -202,7 +259,10 @@ impl Marina {
         }
     }
 
-    fn ensure_auth(cfg: &RegistryConfig) -> Result<()> {
+    fn ensure_auth(cfg: &RegistryConfig, required: bool) -> Result<()> {
+        if !required {
+            return Ok(());
+        }
         if let Some(var) = &cfg.auth_env {
             if std::env::var(var).is_err() {
                 return Err(anyhow!(
@@ -216,14 +276,76 @@ impl Marina {
     }
 
     pub fn push(&mut self, bag: &BagRef, source_dir: &Path, registry: Option<&str>) -> Result<()> {
+        let mut progress = ProgressReporter::silent();
+        self.push_with_progress_and_options(
+            bag,
+            source_dir,
+            registry,
+            PushOptions::default(),
+            &mut progress,
+        )
+    }
+
+    /// Pushes a bag to a registry and emits phase progress events.
+    pub fn push_with_progress(
+        &mut self,
+        bag: &BagRef,
+        source_dir: &Path,
+        registry: Option<&str>,
+        progress: &mut ProgressReporter<'_>,
+    ) -> Result<()> {
+        self.push_with_progress_and_options(
+            bag,
+            source_dir,
+            registry,
+            PushOptions::default(),
+            progress,
+        )
+    }
+
+    /// Pushes a bag to a registry with explicit compression options.
+    pub fn push_with_progress_and_options(
+        &mut self,
+        bag: &BagRef,
+        source_dir: &Path,
+        registry: Option<&str>,
+        options: PushOptions,
+        progress: &mut ProgressReporter<'_>,
+    ) -> Result<()> {
         let source = bag::discover_bag(source_dir)?;
         let (cfg, driver) = self.choose_registry(registry)?;
-        Self::ensure_auth(cfg)?;
+        Self::ensure_auth(cfg, true)?;
+        progress.emit(
+            "push",
+            format!(
+                "preparing '{}' for registry '{}'",
+                bag.without_attachment(),
+                cfg.name
+            ),
+        );
 
         let cache_dir = cache::bag_cache_dir(&bag.without_attachment())?;
         let packed_file = cache_dir.join("bundle.marina.tar.gz");
-        let packed_meta = pack::pack_bag(&source, &packed_file)?;
+        let packed_meta = pack::pack_bag_with_progress_and_options(
+            &source,
+            &packed_file,
+            pack::PackOptions {
+                transform: crate::io::mcap_transform::PushTransformOptions {
+                    pointcloud_mode: options.pointcloud_mode,
+                    pointcloud_precision_m: options.pointcloud_precision_m,
+                    output_mcap_compression: options.packed_mcap_compression,
+                },
+            },
+            progress,
+        )?;
 
+        progress.emit(
+            "push",
+            format!(
+                "uploading packed bundle to registry '{}' ({})",
+                cfg.name, cfg.kind
+            ),
+        );
         driver.push(
             &cfg.name,
             &bag.without_attachment(),
@@ -233,7 +355,8 @@ impl Marina {
         )?;
 
         let ready_dir = cache_dir.join("ready");
-        copy_dir(source_dir, &ready_dir)?;
+        progress.emit("push", "refreshing local ready-to-use cache");
+        copy_source(source_dir, &ready_dir)?;
 
         self.catalog.entries.insert(
             bag.without_attachment().to_string(),
@@ -245,16 +368,54 @@ impl Marina {
             },
         );
         cache::save_catalog(&self.catalog)?;
+        progress.emit("push", "push complete");
         Ok(())
     }
 
+    /// Pulls all remote bags matching `pattern`.
     pub fn pull_pattern(&mut self, pattern: &str, registry: Option<&str>) -> Result<Vec<BagRef>> {
+        let mut progress = ProgressReporter::silent();
+        self.pull_pattern_with_progress_and_options(
+            pattern,
+            registry,
+            PullOptions::default(),
+            &mut progress,
+        )
+    }
+
+    /// Pulls all remote bags matching `pattern` and emits progress events.
+    pub fn pull_pattern_with_progress(
+        &mut self,
+        pattern: &str,
+        registry: Option<&str>,
+        progress: &mut ProgressReporter<'_>,
+    ) -> Result<Vec<BagRef>> {
+        self.pull_pattern_with_progress_and_options(
+            pattern,
+            registry,
+            PullOptions::default(),
+            progress,
+        )
+    }
+
+    /// Pulls all remote bags matching `pattern` and applies explicit unpack options.
+    pub fn pull_pattern_with_progress_and_options(
+        &mut self,
+        pattern: &str,
+        registry: Option<&str>,
+        options: PullOptions,
+        progress: &mut ProgressReporter<'_>,
+    ) -> Result<Vec<BagRef>> {
         let (_cfg, driver) = self.choose_registry(registry)?;
         let refs = driver.list(pattern)?;
         let mut pulled = Vec::new();
 
+        progress.emit(
+            "pull",
+            format!("found {} matching bag(s) for '{}'", refs.len(), pattern),
+        );
         for bag in refs {
-            self.pull_exact(&bag, registry)?;
+            self.pull_exact_with_progress_and_options(&bag, registry, options, progress)?;
             pulled.push(bag);
         }
 
@@ -262,8 +423,44 @@ impl Marina {
     }
 
     pub fn pull_exact(&mut self, bag: &BagRef, registry: Option<&str>) -> Result<PathBuf> {
+        let mut progress = ProgressReporter::silent();
+        self.pull_exact_with_progress_and_options(
+            bag,
+            registry,
+            PullOptions::default(),
+            &mut progress,
+        )
+    }
+
+    /// Pulls one exact bag and emits phase progress events.
+    pub fn pull_exact_with_progress(
+        &mut self,
+        bag: &BagRef,
+        registry: Option<&str>,
+        progress: &mut ProgressReporter<'_>,
+    ) -> Result<PathBuf> {
+        self.pull_exact_with_progress_and_options(bag, registry, PullOptions::default(), progress)
+    }
+
+    /// Pulls one exact bag and applies explicit unpack options.
+    pub fn pull_exact_with_progress_and_options(
+        &mut self,
+        bag: &BagRef,
+        registry: Option<&str>,
+        options: PullOptions,
+        progress: &mut ProgressReporter<'_>,
+    ) -> Result<PathBuf> {
         let (cfg, driver) = self.choose_registry(registry)?;
-        Self::ensure_auth(cfg)?;
+        Self::ensure_auth(cfg, false)?;
+        progress.emit(
+            "pull",
+            format!(
+                "downloading '{}' from registry '{}' ({})",
+                bag.without_attachment(),
+                cfg.name,
+                cfg.kind
+            ),
+        );
 
         let cache_dir = cache::bag_cache_dir(&bag.without_attachment())?;
         let packed_file = cache_dir.join("bundle.remote.tar.gz");
@@ -273,7 +470,16 @@ impl Marina {
             fs::remove_dir_all(&ready_dir)?;
         }
         fs::create_dir_all(&ready_dir)?;
-        pack::unpack_bag(&packed_file, &ready_dir)?;
+        pack::unpack_bag_with_progress_and_options(
+            &packed_file,
+            &ready_dir,
+            pack::UnpackOptions {
+                transform: crate::io::mcap_transform::PullTransformOptions {
+                    output_mcap_compression: options.unpacked_mcap_compression,
+                },
+            },
+            progress,
+        )?;
 
         self.catalog.entries.insert(
             bag.without_attachment().to_string(),
@@ -285,10 +491,10 @@ impl Marina {
             },
         );
         cache::save_catalog(&self.catalog)?;
+        progress.emit("pull", "pull complete");
 
         Ok(ready_dir)
     }
-
     pub fn resolve_target(&self, target: &str) -> Result<ResolveResult> {
         let path = Path::new(target);
         if bag::has_direct_mcap(path)? {
@@ -333,6 +539,7 @@ impl Marina {
         ))
     }
 
+    /// Exports a cached bag (or one attachment) to `out`.
     pub fn export(&self, bag: &BagRef, out: &Path) -> Result<()> {
         let key = bag.without_attachment().to_string();
         let entry = self
@@ -357,6 +564,7 @@ impl Marina {
         Ok(())
     }
 
+    /// Removes one bag from local cache and catalog.
     pub fn remove_local(&mut self, bag: &BagRef) -> Result<()> {
         let key = bag.without_attachment().to_string();
         if let Some(entry) = self.catalog.entries.remove(&key) {
@@ -372,17 +580,22 @@ impl Marina {
         Ok(())
     }
 
+    /// Removes one bag from a remote registry.
     pub fn remove_remote(&self, bag: &BagRef, registry: Option<&str>) -> Result<()> {
         let (cfg, driver) = self.choose_registry(registry)?;
-        Self::ensure_auth(cfg)?;
+        Self::ensure_auth(cfg, true)?;
         driver.remove(&bag.without_attachment())
     }
 
+    /// Searches one registry using glob-like `pattern`.
     pub fn search_remote(&self, pattern: &str, registry: Option<&str>) -> Result<Vec<BagRef>> {
         let (_cfg, driver) = self.choose_registry(registry)?;
         driver.list(pattern)
     }
 
+    /// Deletes local cache resources.
+    ///
+    /// With `all = true`, also removes local registry configuration files.
     pub fn clean(&mut self, all: bool) -> Result<()> {
         self.catalog.entries.clear();
         cache::save_catalog(&self.catalog)?;
@@ -390,6 +603,7 @@ impl Marina {
         Ok(())
     }
 
+    /// Returns a preformatted cached-size line for one bag.
     pub fn format_cached_size_line(&self, bag: &BagRef) -> Option<String> {
         self.catalog
             .entries
@@ -404,6 +618,7 @@ impl Marina {
             })
     }
 
+    /// Returns cached size stats for one bag.
     pub fn cached_size_stats(&self, bag: &BagRef) -> Option<CachedSizeStats> {
         self.catalog
             .entries
@@ -414,6 +629,7 @@ impl Marina {
             })
     }
 
+    /// Lists all locally cached bags sorted by bag reference.
     pub fn list_cached_bags(&self) -> Vec<CachedBagInfo> {
         let mut out = self
             .catalog
@@ -430,6 +646,7 @@ impl Marina {
         out
     }
 
+    /// Searches all registries and returns tagged hits with registry names.
     pub fn search_all_remotes(&self, pattern: &str) -> Vec<RemoteBagHit> {
         let mut names = self.registries.keys().cloned().collect::<Vec<_>>();
         names.sort();
@@ -469,6 +686,20 @@ fn normalize_local_registry_path(uri: &str) -> PathBuf {
     } else {
         PathBuf::from(uri)
     }
+}
+
+fn copy_source(src: &Path, dst: &Path) -> Result<()> {
+    if src.is_file() {
+        fs::create_dir_all(dst)?;
+        let name = src
+            .file_name()
+            .ok_or_else(|| anyhow!("source file has no file name: {}", src.display()))?;
+        fs::copy(src, dst.join(name))
+            .with_context(|| format!("failed copying {} into {}", src.display(), dst.display()))?;
+        return Ok(());
+    }
+
+    copy_dir(src, dst)
 }
 
 fn copy_dir(src: &Path, dst: &Path) -> Result<()> {

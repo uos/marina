@@ -13,6 +13,12 @@ enum {
   MARINA_RESOLVE_REMOTE_AVAILABLE = 2
 };
 
+// Pull progress mode values.
+enum {
+  MARINA_PROGRESS_MODE_SILENT = 0,
+  MARINA_PROGRESS_MODE_STDOUT = 1
+};
+
 typedef struct MarinaResolveDetailed {
   int kind;
   char *path;      // set when kind is LOCAL or CACHED
@@ -34,6 +40,17 @@ char *marina_resolve(const char *target);
 // Returns local path after pull (caller frees with marina_free_string) or NULL on error.
 // Pass NULL for registry to use default selection.
 char *marina_pull(const char *bag_ref, const char *registry);
+
+// Returns local path after pull with optional built-in progress mode.
+char *marina_pull_with_progress(const char *bag_ref, const char *registry, int progress_mode);
+
+typedef void (*MarinaProgressCallback)(const char *phase, const char *message, void *user_data);
+
+// Returns local path after pull and reports progress through callback if provided.
+char *marina_pull_with_callback(const char *bag_ref,
+                                const char *registry,
+                                MarinaProgressCallback callback,
+                                void *user_data);
 
 // Returns last error message (allocated string, caller frees) or NULL if none.
 char *marina_last_error_message(void);

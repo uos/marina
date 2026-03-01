@@ -11,6 +11,18 @@ use tar::{Archive, Builder};
 
 use crate::io::bag::BagSource;
 use crate::io::mcap_transform;
+use crate::io::mcap_transform::{PullTransformOptions, PushTransformOptions};
+use crate::progress::ProgressReporter;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PackOptions {
+    pub transform: PushTransformOptions,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UnpackOptions {
+    pub transform: PullTransformOptions,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackedMeta {
@@ -19,7 +31,31 @@ pub struct PackedMeta {
 }
 
 pub fn pack_bag(source: &BagSource, out_file: &Path) -> Result<PackedMeta> {
-    // Stage the bag and rewrite MCAP pointcloud payloads to cloudini-compressed messages.
+    let mut reporter = ProgressReporter::silent();
+    pack_bag_with_progress_and_options(source, out_file, PackOptions::default(), &mut reporter)
+}
+
+pub fn pack_bag_with_progress(
+    source: &BagSource,
+    out_file: &Path,
+    progress: &mut ProgressReporter<'_>,
+) -> Result<PackedMeta> {
+    pack_bag_with_progress_and_options(source, out_file, PackOptions::default(), progress)
+}
+
+pub fn pack_bag_with_progress_and_options(
+    source: &BagSource,
+    out_file: &Path,
+    options: PackOptions,
+    progress: &mut ProgressReporter<'_>,
+) -> Result<PackedMeta> {
+    progress.emit(
+        "pack",
+        format!(
+            "staging bag directory from {}",
+            source.root.as_path().display()
+        ),
+    );
     let parent = out_file
         .parent()
         .context("packed output file has no parent dir")?;
@@ -28,20 +64,54 @@ pub fn pack_bag(source: &BagSource, out_file: &Path) -> Result<PackedMeta> {
     if staging_dir.exists() {
         fs::remove_dir_all(&staging_dir)?;
     }
-    copy_dir(&source.root, &staging_dir)?;
+    fs::create_dir_all(&staging_dir)?;
+    if source.root.is_file() {
+        let file_name = source
+            .root
+            .file_name()
+            .ok_or_else(|| anyhow!("source mcap file has no file name"))?;
+        fs::copy(&source.root, staging_dir.join(file_name)).with_context(|| {
+            format!(
+                "failed to stage source mcap file {}",
+                source.root.as_path().display()
+            )
+        })?;
+    } else {
+        copy_dir(&source.root, &staging_dir)?;
+    }
 
-    let mcap_rel = source.mcap.strip_prefix(&source.root).with_context(|| {
-        format!(
-            "{} is outside {}",
-            source.mcap.display(),
-            source.root.display()
+    let mcap_rel = if source.root.is_file() {
+        PathBuf::from(
+            source
+                .mcap
+                .file_name()
+                .ok_or_else(|| anyhow!("mcap file has no file name"))?,
         )
-    })?;
+    } else {
+        source
+            .mcap
+            .strip_prefix(&source.root)
+            .with_context(|| {
+                format!(
+                    "{} is outside {}",
+                    source.mcap.display(),
+                    source.root.display()
+                )
+            })?
+            .to_path_buf()
+    };
     let staged_mcap = staging_dir.join(mcap_rel);
     let transformed_mcap = staging_dir.join(".marina_transform.mcap");
-    mcap_transform::compress_mcap_for_push(&staged_mcap, &transformed_mcap)?;
+    progress.emit("pack", "rewriting MCAP messages");
+    mcap_transform::compress_mcap_for_push_with_progress(
+        &staged_mcap,
+        &transformed_mcap,
+        options.transform,
+        progress,
+    )?;
     fs::rename(&transformed_mcap, &staged_mcap)?;
 
+    progress.emit("pack", "compressing staged folder to marina archive");
     let tar_gz = File::create(out_file)?;
     let encoder = GzEncoder::new(tar_gz, Compression::best());
     let mut builder = Builder::new(encoder);
@@ -49,6 +119,7 @@ pub fn pack_bag(source: &BagSource, out_file: &Path) -> Result<PackedMeta> {
     let encoder = builder.into_inner()?;
     encoder.finish()?;
 
+    progress.emit("pack", "cleaning temporary staging files");
     fs::remove_dir_all(staging_dir)?;
 
     let packed_bytes = fs::metadata(out_file)?.len();
@@ -59,6 +130,33 @@ pub fn pack_bag(source: &BagSource, out_file: &Path) -> Result<PackedMeta> {
 }
 
 pub fn unpack_bag(archive_path: &Path, out_dir: &Path) -> Result<()> {
+    let mut reporter = ProgressReporter::silent();
+    unpack_bag_with_progress_and_options(
+        archive_path,
+        out_dir,
+        UnpackOptions::default(),
+        &mut reporter,
+    )
+}
+
+pub fn unpack_bag_with_progress(
+    archive_path: &Path,
+    out_dir: &Path,
+    progress: &mut ProgressReporter<'_>,
+) -> Result<()> {
+    unpack_bag_with_progress_and_options(archive_path, out_dir, UnpackOptions::default(), progress)
+}
+
+pub fn unpack_bag_with_progress_and_options(
+    archive_path: &Path,
+    out_dir: &Path,
+    options: UnpackOptions,
+    progress: &mut ProgressReporter<'_>,
+) -> Result<()> {
+    progress.emit(
+        "unpack",
+        format!("extracting archive {}", archive_path.display()),
+    );
     fs::create_dir_all(out_dir)?;
     let tar_gz = File::open(archive_path)
         .with_context(|| format!("cannot open archive {}", archive_path.display()))?;
@@ -84,11 +182,17 @@ pub fn unpack_bag(archive_path: &Path, out_dir: &Path) -> Result<()> {
         fs::remove_dir_all(bundle)?;
     }
 
-    // Restore standard PointCloud2 messages from cloudini-compressed payloads.
+    progress.emit("unpack", "restoring PointCloud2 messages");
     let mcap_file = find_first_mcap(out_dir)?;
     let decoded = out_dir.join(".marina_restored.mcap");
-    mcap_transform::decompress_mcap_after_pull(&mcap_file, &decoded)?;
+    mcap_transform::decompress_mcap_after_pull_with_progress(
+        &mcap_file,
+        &decoded,
+        options.transform,
+        progress,
+    )?;
     fs::rename(decoded, mcap_file)?;
+    progress.emit("unpack", "unpack complete");
 
     Ok(())
 }

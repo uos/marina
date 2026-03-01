@@ -1,12 +1,12 @@
 use std::path::PathBuf;
-use std::time::Duration;
 
 use anyhow::Result;
-use clap::{Args, CommandFactory, Parser, Subcommand};
-use indicatif::{ProgressBar, ProgressStyle};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 
-use crate::core::{Marina, ResolveResult};
+use crate::core::{Marina, PullOptions, PushOptions, ResolveResult};
+use crate::io::mcap_transform::{McapChunkCompression, PointCloudCompressionMode};
 use crate::model::bag_ref::BagRef;
+use crate::progress::{ProgressReporter, WriterProgress};
 use crate::storage::config::{self, RegistryConfig};
 
 #[derive(Parser)]
@@ -20,6 +20,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Registry(RegistryCmd),
+    #[command(alias = "ls")]
     List(LocalListArgs),
     Search(SearchArgs),
     Push(PushArgs),
@@ -74,12 +75,34 @@ struct RemoveRegistryArgs {
     delete_data: bool,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliPointcloudMode {
+    Off,
+    Lossy,
+    Lossless,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliMcapCompression {
+    None,
+    Zstd,
+    Lz4,
+}
+
 #[derive(Args)]
 struct PushArgs {
     bag: BagRef,
     source: PathBuf,
     #[arg(long)]
     registry: Option<String>,
+    #[arg(long, value_enum, default_value_t = CliPointcloudMode::Lossy)]
+    pointcloud_mode: CliPointcloudMode,
+    #[arg(long, default_value_t = 1.0)]
+    pointcloud_accuracy_mm: f64,
+    #[arg(long, value_enum, default_value_t = CliMcapCompression::Zstd)]
+    packed_mcap_compression: CliMcapCompression,
+    #[arg(long)]
+    no_progress: bool,
 }
 
 #[derive(Args)]
@@ -87,6 +110,10 @@ struct PullArgs {
     target: String,
     #[arg(long)]
     registry: Option<String>,
+    #[arg(long, value_enum, default_value_t = CliMcapCompression::Zstd)]
+    unpacked_mcap_compression: CliMcapCompression,
+    #[arg(long)]
+    no_progress: bool,
 }
 
 #[derive(Args)]
@@ -234,10 +261,32 @@ fn run_parsed(cli: Cli) -> Result<()> {
             }
         }
         Commands::Push(args) => {
-            let spinner = make_spinner("Packing + compressing bag, then uploading...");
-            let push_result = marina.push(&args.bag, &args.source, args.registry.as_deref());
-            spinner.finish_and_clear();
-            push_result?;
+            let push_options = PushOptions {
+                pointcloud_mode: cli_pointcloud_mode_to_core(args.pointcloud_mode),
+                pointcloud_precision_m: args.pointcloud_accuracy_mm / 1000.0,
+                packed_mcap_compression: cli_mcap_compression_to_core(args.packed_mcap_compression),
+            };
+            if !args.no_progress {
+                let mut stdout = std::io::stdout();
+                let mut sink = WriterProgress::new(&mut stdout);
+                let mut progress = ProgressReporter::new(&mut sink);
+                marina.push_with_progress_and_options(
+                    &args.bag,
+                    &args.source,
+                    args.registry.as_deref(),
+                    push_options,
+                    &mut progress,
+                )?;
+            } else {
+                let mut progress = ProgressReporter::silent();
+                marina.push_with_progress_and_options(
+                    &args.bag,
+                    &args.source,
+                    args.registry.as_deref(),
+                    push_options,
+                    &mut progress,
+                )?;
+            }
             if let Some(stats) = marina.cached_size_stats(&args.bag) {
                 print_size_summary(
                     &format!("pushed {}", args.bag.without_attachment()),
@@ -249,22 +298,56 @@ fn run_parsed(cli: Cli) -> Result<()> {
             }
         }
         Commands::Pull(args) => {
+            let pull_options = PullOptions {
+                unpacked_mcap_compression: cli_mcap_compression_to_core(
+                    args.unpacked_mcap_compression,
+                ),
+            };
             if args.target.contains('*') {
-                let spinner =
-                    make_spinner("Resolving, downloading, and unpacking matching bags...");
-                let pulled_result = marina.pull_pattern(&args.target, args.registry.as_deref());
-                spinner.finish_and_clear();
-                let pulled = pulled_result?;
+                let pulled = if !args.no_progress {
+                    let mut stdout = std::io::stdout();
+                    let mut sink = WriterProgress::new(&mut stdout);
+                    let mut progress = ProgressReporter::new(&mut sink);
+                    marina.pull_pattern_with_progress_and_options(
+                        &args.target,
+                        args.registry.as_deref(),
+                        pull_options,
+                        &mut progress,
+                    )?
+                } else {
+                    let mut progress = ProgressReporter::silent();
+                    marina.pull_pattern_with_progress_and_options(
+                        &args.target,
+                        args.registry.as_deref(),
+                        pull_options,
+                        &mut progress,
+                    )?
+                };
                 for bag in &pulled {
                     println!("pulled {}", bag);
                 }
                 println!("pulled {} bag(s)", pulled.len());
             } else {
                 let bag: BagRef = args.target.parse()?;
-                let spinner = make_spinner("Downloading and unpacking bag...");
-                let pull_result = marina.pull_exact(&bag, args.registry.as_deref());
-                spinner.finish_and_clear();
-                let path = pull_result?;
+                let path = if !args.no_progress {
+                    let mut stdout = std::io::stdout();
+                    let mut sink = WriterProgress::new(&mut stdout);
+                    let mut progress = ProgressReporter::new(&mut sink);
+                    marina.pull_exact_with_progress_and_options(
+                        &bag,
+                        args.registry.as_deref(),
+                        pull_options,
+                        &mut progress,
+                    )?
+                } else {
+                    let mut progress = ProgressReporter::silent();
+                    marina.pull_exact_with_progress_and_options(
+                        &bag,
+                        args.registry.as_deref(),
+                        pull_options,
+                        &mut progress,
+                    )?
+                };
                 println!("pulled {} -> {}", bag.without_attachment(), path.display());
                 if let Some(stats) = marina.cached_size_stats(&bag) {
                     print_size_summary("cached size", stats.original_bytes, stats.packed_bytes);
@@ -326,8 +409,6 @@ fn run_parsed(cli: Cli) -> Result<()> {
 fn infer_kind_from_uri(uri: &str) -> &'static str {
     if uri.starts_with("ssh://") {
         "ssh"
-    } else if uri.starts_with("s3://") || uri.starts_with("aws://") {
-        "aws"
     } else if uri.starts_with("gdrive://") {
         "gdrive"
     } else if uri.starts_with("directory://") {
@@ -337,15 +418,20 @@ fn infer_kind_from_uri(uri: &str) -> &'static str {
     }
 }
 
-fn make_spinner(message: &str) -> ProgressBar {
-    let spinner = ProgressBar::new_spinner();
-    let style = ProgressStyle::with_template("{spinner} {msg}")
-        .unwrap_or_else(|_| ProgressStyle::default_spinner())
-        .tick_chars("|/-\\ ");
-    spinner.set_style(style);
-    spinner.set_message(message.to_string());
-    spinner.enable_steady_tick(Duration::from_millis(100));
-    spinner
+fn cli_pointcloud_mode_to_core(mode: CliPointcloudMode) -> PointCloudCompressionMode {
+    match mode {
+        CliPointcloudMode::Off => PointCloudCompressionMode::Disabled,
+        CliPointcloudMode::Lossy => PointCloudCompressionMode::Lossy,
+        CliPointcloudMode::Lossless => PointCloudCompressionMode::Lossless,
+    }
+}
+
+fn cli_mcap_compression_to_core(comp: CliMcapCompression) -> McapChunkCompression {
+    match comp {
+        CliMcapCompression::None => McapChunkCompression::None,
+        CliMcapCompression::Zstd => McapChunkCompression::Zstd,
+        CliMcapCompression::Lz4 => McapChunkCompression::Lz4,
+    }
 }
 
 fn print_size_summary(title: &str, original_bytes: u64, packed_bytes: u64) {

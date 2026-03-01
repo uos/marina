@@ -6,11 +6,12 @@ use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 pub const MCAP_CONVERSION_URL: &str = "https://mcap.dev/guides/getting-started";
+pub const MCAP_CLI_URL: &str = "https://mcap.dev/guides/cli";
+pub const MCAP_ROS2_URL: &str = "https://mcap.dev/guides/getting-started/ros-2";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BagSource {
     pub root: PathBuf,
-    pub metadata_yaml: PathBuf,
     pub mcap: PathBuf,
     pub attachments: Vec<PathBuf>,
     pub original_bytes: u64,
@@ -22,16 +23,27 @@ pub fn discover_bag(path: &Path) -> Result<BagSource> {
     }
 
     if path.is_file() {
+        if path.extension().and_then(|e| e.to_str()) == Some("mcap") {
+            let meta = fs::metadata(path)?;
+            return Ok(BagSource {
+                root: path.to_path_buf(),
+                mcap: path.to_path_buf(),
+                attachments: Vec::new(),
+                original_bytes: meta.len(),
+            });
+        }
+
         return Err(anyhow!(
-            "expected a bag directory with metadata yaml + .mcap, got file {}",
+            "expected a bag directory or .mcap file, got file {}",
             path.display()
         ));
     }
 
     let mut mcap = None;
-    let mut yaml = None;
     let mut attachments = Vec::new();
     let mut total: u64 = 0;
+    let mut saw_ros1_bag = false;
+    let mut saw_ros2_db3 = false;
 
     for entry in WalkDir::new(path) {
         let entry = entry?;
@@ -50,28 +62,40 @@ pub fn discover_bag(path: &Path) -> Result<BagSource> {
                     mcap = Some(p.to_path_buf());
                 }
             }
-            "yaml" | "yml" => {
-                if yaml.is_none() {
-                    yaml = Some(p.to_path_buf());
-                }
+            "bag" => {
+                saw_ros1_bag = true;
+                attachments.push(p.to_path_buf());
+            }
+            "db3" => {
+                saw_ros2_db3 = true;
+                attachments.push(p.to_path_buf());
             }
             _ => attachments.push(p.to_path_buf()),
         }
     }
 
     let mcap = mcap.ok_or_else(|| {
-        anyhow!(
-            "directory has no .mcap file. Convert your bag to MCAP first: {}",
-            MCAP_CONVERSION_URL
-        )
-    })?;
-    let metadata_yaml = yaml.ok_or_else(|| {
-        anyhow!("directory has no metadata yaml/yml (required for ROS bag bundle)")
+        if saw_ros2_db3 {
+            anyhow!(
+                "directory has ROS 2 sqlite3 bag files (*.db3) but no .mcap. Convert first (e.g. `mcap convert input.db3 output.mcap` or `ros2 bag convert ...`). See {} and {}",
+                MCAP_CLI_URL,
+                MCAP_ROS2_URL
+            )
+        } else if saw_ros1_bag {
+            anyhow!(
+                "directory has ROS 1 bag files (*.bag) but no .mcap. Convert first with `mcap convert input.bag output.mcap`. See {}",
+                MCAP_CLI_URL
+            )
+        } else {
+            anyhow!(
+                "directory has no .mcap file. Convert your bag to MCAP first: {}",
+                MCAP_CONVERSION_URL
+            )
+        }
     })?;
 
     Ok(BagSource {
         root: path.to_path_buf(),
-        metadata_yaml,
         mcap,
         attachments,
         original_bytes: total,
