@@ -2,14 +2,17 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::OnceLock;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::thread::sleep;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 use glob::Pattern;
 use indicatif::{ProgressBar, ProgressStyle};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use regex::Regex;
+use reqwest::StatusCode;
 use reqwest::blocking::{Body, Client};
+use reqwest::header::{CONTENT_RANGE, LOCATION, RANGE};
 use serde::{Deserialize, Serialize};
 
 use crate::model::bag_ref::BagRef;
@@ -17,6 +20,10 @@ use crate::registry::driver::{RegistryDriver, RemoteDescriptor};
 
 const DRIVE_FILES_API: &str = "https://www.googleapis.com/drive/v3/files";
 const DRIVE_UPLOAD_API: &str = "https://www.googleapis.com/upload/drive/v3/files";
+const RESUMABLE_CHUNK_MIN_BYTES: usize = 4 * 1024 * 1024;
+const RESUMABLE_CHUNK_START_BYTES: usize = 16 * 1024 * 1024;
+const RESUMABLE_CHUNK_MAX_BYTES: usize = 64 * 1024 * 1024;
+const RESUMABLE_UPLOAD_RETRIES: usize = 4;
 
 #[derive(Debug, Clone)]
 pub struct GDriveRegistry {
@@ -397,6 +404,305 @@ impl GDriveRegistry {
         Ok(())
     }
 
+    fn start_resumable_upload_session(
+        &self,
+        file_id: &str,
+        mime: &str,
+        total_bytes: u64,
+        name: &str,
+    ) -> Result<String> {
+        let auth = self.auth_header_required()?;
+        let resp = self
+            .client
+            .patch(format!("{}/{}", DRIVE_UPLOAD_API, file_id))
+            .header("Authorization", auth)
+            .header("X-Upload-Content-Type", mime)
+            .header("X-Upload-Content-Length", total_bytes.to_string())
+            .header("Content-Type", "application/json; charset=UTF-8")
+            .query(&[("uploadType", "resumable"), ("supportsAllDrives", "true")])
+            .body("{}")
+            .send()
+            .with_context(|| {
+                format!(
+                    "failed starting resumable Google Drive upload session for {}",
+                    name
+                )
+            })?
+            .error_for_status()
+            .with_context(|| {
+                format!(
+                    "Google Drive resumable session creation failed for {}",
+                    name
+                )
+            })?;
+
+        let location = resp
+            .headers()
+            .get(LOCATION)
+            .ok_or_else(|| {
+                anyhow!(
+                    "Google Drive resumable session missing Location header for {}",
+                    name
+                )
+            })?
+            .to_str()
+            .context("invalid resumable session Location header")?
+            .to_string();
+
+        Ok(location)
+    }
+
+    fn upload_file_resumable(
+        &self,
+        session_url: &str,
+        mime: &str,
+        path: &Path,
+        total_bytes: u64,
+        name: &str,
+        pb: &ProgressBar,
+    ) -> Result<()> {
+        let mut file =
+            fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+        let mut chunk_size = RESUMABLE_CHUNK_START_BYTES;
+        let mut chunk = vec![0u8; chunk_size];
+        let mut sent = 0u64;
+
+        while sent < total_bytes {
+            if chunk.len() != chunk_size {
+                chunk.resize(chunk_size, 0);
+            }
+            let n = file
+                .read(&mut chunk)
+                .with_context(|| format!("failed reading {}", path.display()))?;
+            if n == 0 {
+                break;
+            }
+
+            let end = sent + n as u64 - 1;
+            let range = format!("bytes {}-{}/{}", sent, end, total_bytes);
+            let payload = &chunk[..n];
+
+            let mut attempt = 0usize;
+            loop {
+                let started = Instant::now();
+                let resp = self
+                    .client
+                    .put(session_url)
+                    .header("Content-Type", mime)
+                    .header("Content-Length", n.to_string())
+                    .header("Content-Range", &range)
+                    .body(payload.to_vec())
+                    .send();
+
+                match resp {
+                    Ok(resp) => {
+                        let status = resp.status();
+                        if status == StatusCode::PERMANENT_REDIRECT || status.is_success() {
+                            let elapsed = started.elapsed();
+                            sent += n as u64;
+                            pb.inc(n as u64);
+
+                            if attempt == 0
+                                && elapsed < Duration::from_secs(2)
+                                && chunk_size < RESUMABLE_CHUNK_MAX_BYTES
+                            {
+                                chunk_size = (chunk_size * 2).min(RESUMABLE_CHUNK_MAX_BYTES);
+                            } else if (attempt > 0 || elapsed > Duration::from_secs(8))
+                                && chunk_size > RESUMABLE_CHUNK_MIN_BYTES
+                            {
+                                chunk_size = (chunk_size / 2).max(RESUMABLE_CHUNK_MIN_BYTES);
+                            }
+                            break;
+                        }
+
+                        if status.is_server_error() && attempt < RESUMABLE_UPLOAD_RETRIES {
+                            attempt += 1;
+                            if chunk_size > RESUMABLE_CHUNK_MIN_BYTES {
+                                chunk_size = (chunk_size / 2).max(RESUMABLE_CHUNK_MIN_BYTES);
+                            }
+                            sleep(Duration::from_millis(250 * attempt as u64));
+                            continue;
+                        }
+
+                        let body = resp.text().unwrap_or_default();
+                        return Err(anyhow!(
+                            "Google Drive resumable upload failed for {} with status {}: {}",
+                            name,
+                            status,
+                            body
+                        ));
+                    }
+                    Err(err) => {
+                        if attempt < RESUMABLE_UPLOAD_RETRIES {
+                            attempt += 1;
+                            if chunk_size > RESUMABLE_CHUNK_MIN_BYTES {
+                                chunk_size = (chunk_size / 2).max(RESUMABLE_CHUNK_MIN_BYTES);
+                            }
+                            sleep(Duration::from_millis(250 * attempt as u64));
+                            continue;
+                        }
+                        return Err(err).with_context(|| {
+                            format!("failed uploading chunk to Google Drive for {}", name)
+                        });
+                    }
+                }
+            }
+        }
+
+        if sent != total_bytes {
+            return Err(anyhow!(
+                "resumable upload finished early for {}: sent {} of {} bytes",
+                name,
+                sent,
+                total_bytes
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn build_download_request(
+        &self,
+        url: &str,
+        auth: Option<&str>,
+        api_key: Option<&str>,
+    ) -> reqwest::blocking::RequestBuilder {
+        let mut req = self.client.get(url);
+        if let Some(auth) = auth {
+            req = req.header("Authorization", auth);
+        } else if let Some(key) = api_key {
+            req = req.query(&[("key", key)]);
+        }
+        req
+    }
+
+    fn parse_content_range_total(content_range: &str) -> Option<u64> {
+        let (_range, total) = content_range.split_once('/')?;
+        total.parse::<u64>().ok()
+    }
+
+    fn download_with_adaptive_ranges(
+        &self,
+        url: &str,
+        auth: Option<&str>,
+        api_key: Option<&str>,
+        out: &Path,
+        title: &str,
+    ) -> Result<()> {
+        let probe = self
+            .build_download_request(url, auth, api_key)
+            .header(RANGE, "bytes=0-0")
+            .send()
+            .with_context(|| format!("failed probing ranged download {}", title))?;
+
+        if probe.status() != StatusCode::PARTIAL_CONTENT {
+            return self.stream_response_to_path(
+                self.build_download_request(url, auth, api_key),
+                out,
+                title,
+            );
+        }
+
+        let total = probe
+            .headers()
+            .get(CONTENT_RANGE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(Self::parse_content_range_total)
+            .unwrap_or(0);
+
+        if total == 0 {
+            return self.stream_response_to_path(
+                self.build_download_request(url, auth, api_key),
+                out,
+                title,
+            );
+        }
+
+        let pb = transfer_bar(total, title);
+        let mut file = fs::File::create(out)
+            .with_context(|| format!("failed creating output file {}", out.display()))?;
+
+        let first_bytes = probe
+            .bytes()
+            .with_context(|| format!("failed reading initial ranged response for {}", title))?;
+        file.write_all(&first_bytes)?;
+        let mut downloaded = first_bytes.len() as u64;
+        pb.set_position(downloaded.min(total));
+
+        let mut chunk_size = RESUMABLE_CHUNK_START_BYTES as u64;
+        while downloaded < total {
+            let end = (downloaded + chunk_size - 1).min(total - 1);
+            let range = format!("bytes={}-{}", downloaded, end);
+
+            let mut attempt = 0usize;
+            loop {
+                let started = Instant::now();
+                let resp = self
+                    .build_download_request(url, auth, api_key)
+                    .header(RANGE, &range)
+                    .send();
+
+                match resp {
+                    Ok(resp) => {
+                        let status = resp.status();
+                        if status == StatusCode::PARTIAL_CONTENT {
+                            let bytes = resp.bytes().with_context(|| {
+                                format!("failed reading ranged chunk {} for {}", range, title)
+                            })?;
+                            let received = bytes.len() as u64;
+                            file.write_all(&bytes)?;
+                            downloaded += received;
+                            pb.set_position(downloaded.min(total));
+
+                            let elapsed = started.elapsed();
+                            if attempt == 0
+                                && elapsed < Duration::from_secs(2)
+                                && chunk_size < RESUMABLE_CHUNK_MAX_BYTES as u64
+                            {
+                                chunk_size = (chunk_size * 2).min(RESUMABLE_CHUNK_MAX_BYTES as u64);
+                            } else if (attempt > 0 || elapsed > Duration::from_secs(8))
+                                && chunk_size > RESUMABLE_CHUNK_MIN_BYTES as u64
+                            {
+                                chunk_size = (chunk_size / 2).max(RESUMABLE_CHUNK_MIN_BYTES as u64);
+                            }
+                            break;
+                        }
+
+                        if status.is_server_error() && attempt < RESUMABLE_UPLOAD_RETRIES {
+                            attempt += 1;
+                            if chunk_size > RESUMABLE_CHUNK_MIN_BYTES as u64 {
+                                chunk_size = (chunk_size / 2).max(RESUMABLE_CHUNK_MIN_BYTES as u64);
+                            }
+                            sleep(Duration::from_millis(250 * attempt as u64));
+                            continue;
+                        }
+
+                        return Err(anyhow!(
+                            "ranged download failed for {} with status {}",
+                            title,
+                            status
+                        ));
+                    }
+                    Err(err) => {
+                        if attempt < RESUMABLE_UPLOAD_RETRIES {
+                            attempt += 1;
+                            if chunk_size > RESUMABLE_CHUNK_MIN_BYTES as u64 {
+                                chunk_size = (chunk_size / 2).max(RESUMABLE_CHUNK_MIN_BYTES as u64);
+                            }
+                            sleep(Duration::from_millis(250 * attempt as u64));
+                            continue;
+                        }
+                        return Err(err)
+                            .with_context(|| format!("ranged download failed for {}", title));
+                    }
+                }
+            }
+        }
+
+        pb.finish_and_clear();
+        Ok(())
+    }
+
     fn upload_named_bytes(&self, name: &str, mime: &str, bytes: Vec<u8>) -> Result<String> {
         let file_id = self.create_drive_file(name, mime)?;
         let total = bytes.len() as u64;
@@ -413,10 +719,8 @@ impl GDriveRegistry {
             .with_context(|| format!("failed to stat {}", path.display()))?
             .len();
         let pb = transfer_bar(size, &format!("gdrive upload {}", name));
-        let file =
-            fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-        let reader = ProgressReader::new(file, Some(pb.clone()));
-        self.upload_media(&file_id, mime, Body::new(reader), name)?;
+        let session_url = self.start_resumable_upload_session(&file_id, mime, size, name)?;
+        self.upload_file_resumable(&session_url, mime, path, size, name, &pb)?;
         pb.finish_and_clear();
         Ok(file_id)
     }
@@ -425,26 +729,25 @@ impl GDriveRegistry {
         let auth = self.auth_header_optional()?;
         let api_key = self.api_key_optional();
 
-        let mut req = if auth.is_none() && api_key.is_none() {
-            self.client.get(public_download_url(id))
-        } else {
-            self.client
-                .get(format!("{}/{}", DRIVE_FILES_API, id))
-                .query(&[("alt", "media"), ("supportsAllDrives", "true")])
-        };
-
-        if let Some(auth) = auth {
-            req = req.header("Authorization", auth);
-        } else if let Some(key) = api_key.as_deref() {
-            req = req.query(&[("key", key)]);
+        if auth.is_none() && api_key.is_none() {
+            return self.download_with_adaptive_ranges(
+                &public_download_url(id),
+                None,
+                None,
+                out,
+                title,
+            );
         }
 
-        self.stream_response_to_path(req, out, title)
+        let url = format!(
+            "{}/{}?alt=media&supportsAllDrives=true",
+            DRIVE_FILES_API, id
+        );
+        self.download_with_adaptive_ranges(&url, auth.as_deref(), api_key.as_deref(), out, title)
     }
 
     fn download_public_url_to_path(&self, url: &str, out: &Path, title: &str) -> Result<()> {
-        let req = self.client.get(url);
-        self.stream_response_to_path(req, out, title)
+        self.download_with_adaptive_ranges(url, None, None, out, title)
     }
 
     fn stream_response_to_path(
