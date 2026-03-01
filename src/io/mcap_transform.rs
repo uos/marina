@@ -33,15 +33,12 @@ fn emit_chunk_progress(
         progress.emit(
             phase,
             format!(
-                "indexed reader loaded chunk {}/{} ({:.1}%)",
+                "loaded chunk {}/{} ({:.1}%)",
                 loaded_chunks, total_chunks, pct
             ),
         );
     } else {
-        progress.emit(
-            phase,
-            format!("indexed reader loaded chunk {}", loaded_chunks),
-        );
+        progress.emit(phase, format!("loaded chunk {}", loaded_chunks));
     }
 }
 
@@ -56,7 +53,7 @@ fn indexed_reader_bar(total_chunks: usize, phase: &'static str, file_name: &str)
             ProgressStyle::with_template("{msg} [{bar:40.cyan/blue}] {pos}/{len} chunks ({eta})")
                 .unwrap_or_else(|_| ProgressStyle::default_bar()),
         );
-        pb.set_message(format!("{phase} indexed read {file_name}"));
+        pb.set_message(format!("{phase} read {file_name}"));
         pb
     } else {
         let pb = ProgressBar::new_spinner();
@@ -65,7 +62,7 @@ fn indexed_reader_bar(total_chunks: usize, phase: &'static str, file_name: &str)
                 .unwrap_or_else(|_| ProgressStyle::default_spinner())
                 .tick_chars("|/-\\ "),
         );
-        pb.set_message(format!("{phase} indexed read {file_name}"));
+        pb.set_message(format!("{phase} read {file_name}"));
         pb.enable_steady_tick(std::time::Duration::from_millis(100));
         pb
     }
@@ -198,14 +195,14 @@ pub fn compress_mcap_for_push_with_progress(
             progress.emit(
                 "pack",
                 format!(
-                    "indexed reader initialized: {} chunk(s), ~{} message(s)",
+                    "reader initialized: {} chunk(s), ~{} message(s)",
                     total_chunks, total
                 ),
             );
         } else {
             progress.emit(
                 "pack",
-                format!("indexed reader initialized: {} chunk(s)", total_chunks),
+                format!("reader initialized: {} chunk(s)", total_chunks),
             );
         }
     }
@@ -320,7 +317,7 @@ pub fn compress_mcap_for_push_with_progress(
         progress.emit(
             "pack",
             format!(
-                "indexed reader finished: {} chunk(s) loaded; transformed {} PointCloud2 messages out of {} total MCAP messages (mode: {}, precision: {:.3} mm)",
+                "reader finished: {} chunk(s) loaded; transformed {} PointCloud2 messages out of {} total MCAP messages (mode: {}, precision: {:.3} mm)",
                 loaded_chunks,
                 stats.pointcloud_messages,
                 stats.total_messages,
@@ -373,14 +370,14 @@ pub fn decompress_mcap_after_pull_with_progress(
             progress.emit(
                 "unpack",
                 format!(
-                    "indexed reader initialized: {} chunk(s), ~{} message(s)",
+                    "reader initialized: {} chunk(s), ~{} message(s)",
                     total_chunks, total
                 ),
             );
         } else {
             progress.emit(
                 "unpack",
-                format!("indexed reader initialized: {} chunk(s)", total_chunks),
+                format!("reader initialized: {} chunk(s)", total_chunks),
             );
         }
     }
@@ -481,7 +478,7 @@ pub fn decompress_mcap_after_pull_with_progress(
         progress.emit(
             "unpack",
             format!(
-                "indexed reader finished: {} chunk(s) loaded; restored {} PointCloud2 messages out of {} total MCAP messages",
+                "reader finished: {} chunk(s) loaded; restored {} PointCloud2 messages out of {} total MCAP messages",
                 loaded_chunks, stats.pointcloud_messages, stats.total_messages
             ),
         );
