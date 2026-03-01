@@ -1,12 +1,13 @@
 use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::fs::File;
-use std::io::{BufWriter, Read, Seek};
+use std::io::{BufWriter, IsTerminal, Read, Seek};
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use cloudini::ros::{CompressedPointCloud2, CompressionConfig};
+use indicatif::{ProgressBar, ProgressStyle};
 use mcap::sans_io::{IndexedReadEvent, IndexedReader, SummaryReadEvent};
 use mcap::{Compression, Message, Summary, WriteOptions, Writer};
 
@@ -18,6 +19,57 @@ const POINTCLOUD2_SCHEMA: &str = "sensor_msgs/msg/PointCloud2";
 const CDR_ENCODING: &str = "cdr";
 const MARINA_CODEC_KEY: &str = "marina.pointcloud.codec";
 const MARINA_CODEC_VAL: &str = "cloudini";
+const CHUNK_PROGRESS_EVERY: usize = 16;
+const MESSAGE_PROGRESS_EVERY: usize = 200_000;
+
+fn emit_chunk_progress(
+    progress: &mut ProgressReporter<'_>,
+    phase: &'static str,
+    loaded_chunks: usize,
+    total_chunks: usize,
+) {
+    if total_chunks > 0 {
+        let pct = (loaded_chunks as f64 / total_chunks as f64) * 100.0;
+        progress.emit(
+            phase,
+            format!(
+                "indexed reader loaded chunk {}/{} ({:.1}%)",
+                loaded_chunks, total_chunks, pct
+            ),
+        );
+    } else {
+        progress.emit(
+            phase,
+            format!("indexed reader loaded chunk {}", loaded_chunks),
+        );
+    }
+}
+
+fn indexed_reader_bar(total_chunks: usize, phase: &'static str, file_name: &str) -> ProgressBar {
+    if !std::io::stderr().is_terminal() {
+        return ProgressBar::hidden();
+    }
+
+    if total_chunks > 0 {
+        let pb = ProgressBar::new(total_chunks as u64);
+        pb.set_style(
+            ProgressStyle::with_template("{msg} [{bar:40.cyan/blue}] {pos}/{len} chunks ({eta})")
+                .unwrap_or_else(|_| ProgressStyle::default_bar()),
+        );
+        pb.set_message(format!("{phase} indexed read {file_name}"));
+        pb
+    } else {
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::with_template("{spinner} {msg}")
+                .unwrap_or_else(|_| ProgressStyle::default_spinner())
+                .tick_chars("|/-\\ "),
+        );
+        pb.set_message(format!("{phase} indexed read {file_name}"));
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+        pb
+    }
+}
 
 fn read_summary_from_file(file: &mut File) -> Result<Summary> {
     let mut summary_reader = mcap::sans_io::summary_reader::SummaryReader::new();
@@ -121,16 +173,13 @@ pub fn compress_mcap_for_push_with_progress(
     options: PushTransformOptions,
     progress: &mut ProgressReporter<'_>,
 ) -> Result<TransformStats> {
-    progress.emit(
-        "pack",
-        format!(
-            "reading MCAP file {}",
-            input
-                .file_name()
-                .unwrap_or_else(|| OsStr::new("<unknown>"))
-                .to_string_lossy()
-        ),
-    );
+    let input_name = input
+        .file_name()
+        .unwrap_or_else(|| OsStr::new("<unknown>"))
+        .to_string_lossy()
+        .to_string();
+
+    progress.emit("pack", format!("reading MCAP file {}", input_name));
 
     let mut input_file = File::open(input)
         .with_context(|| format!("failed to open input mcap {}", input.display()))?;
@@ -138,6 +187,25 @@ pub fn compress_mcap_for_push_with_progress(
     let mut reader =
         IndexedReader::new(&summary).context("failed constructing mcap indexed reader")?;
     let mut chunk_buffer = Vec::new();
+    let total_chunks = summary.chunk_indexes.len();
+    let expected_messages = summary.stats.as_ref().map(|s| s.message_count);
+    let mut loaded_chunks = 0usize;
+    let pb = indexed_reader_bar(total_chunks, "pack", &input_name);
+
+    if let Some(total) = expected_messages {
+        progress.emit(
+            "pack",
+            format!(
+                "indexed reader initialized: {} chunk(s), ~{} message(s)",
+                total_chunks, total
+            ),
+        );
+    } else {
+        progress.emit(
+            "pack",
+            format!("indexed reader initialized: {} chunk(s)", total_chunks),
+        );
+    }
 
     let writer_file = File::create(output)
         .with_context(|| format!("failed to create output mcap {}", output.display()))?;
@@ -158,6 +226,17 @@ pub fn compress_mcap_for_push_with_progress(
                 reader
                     .insert_chunk_record_data(offset, &chunk_buffer)
                     .context("failed inserting chunk data into mcap indexed reader")?;
+
+                loaded_chunks += 1;
+                if !pb.is_hidden() {
+                    pb.inc(1);
+                }
+                if loaded_chunks == 1
+                    || loaded_chunks % CHUNK_PROGRESS_EVERY == 0
+                    || loaded_chunks == total_chunks
+                {
+                    emit_chunk_progress(progress, "pack", loaded_chunks, total_chunks);
+                }
             }
             IndexedReadEvent::Message { header, data } => {
                 let channel = summary
@@ -180,6 +259,29 @@ pub fn compress_mcap_for_push_with_progress(
                 };
 
                 stats.total_messages += 1;
+                if stats.total_messages % MESSAGE_PROGRESS_EVERY == 0 {
+                    if let Some(total) = expected_messages {
+                        let pct = (stats.total_messages as f64 / total as f64) * 100.0;
+                        if !pb.is_hidden() {
+                            pb.set_message(format!(
+                                "pack complete {} ({:.1}% messages)",
+                                input_name, pct
+                            ));
+                        }
+                        progress.emit(
+                            "pack",
+                            format!(
+                                "processed {} / {} message(s) ({:.1}%)",
+                                stats.total_messages, total, pct
+                            ),
+                        );
+                    } else {
+                        progress.emit(
+                            "pack",
+                            format!("processed {} message(s)", stats.total_messages),
+                        );
+                    }
+                }
                 match options.pointcloud_mode {
                     PointCloudCompressionMode::Disabled => writer.write(&msg)?,
                     PointCloudCompressionMode::Lossy | PointCloudCompressionMode::Lossless => {
@@ -201,6 +303,16 @@ pub fn compress_mcap_for_push_with_progress(
     }
 
     writer.finish()?;
+    if !pb.is_hidden() {
+        if total_chunks > 0 {
+            pb.finish_with_message(format!(
+                "pack complete {} ({}/{})",
+                input_name, loaded_chunks, total_chunks
+            ));
+        } else {
+            pb.finish_with_message(format!("pack complete {}", input_name));
+        }
+    }
     let mode = match options.pointcloud_mode {
         PointCloudCompressionMode::Disabled => "disabled",
         PointCloudCompressionMode::Lossy => "lossy",
@@ -209,7 +321,8 @@ pub fn compress_mcap_for_push_with_progress(
     progress.emit(
         "pack",
         format!(
-            "transformed {} PointCloud2 messages out of {} total MCAP messages (mode: {}, precision: {:.3} mm)",
+            "indexed reader finished: {} chunk(s) loaded; transformed {} PointCloud2 messages out of {} total MCAP messages (mode: {}, precision: {:.3} mm)",
+            loaded_chunks,
             stats.pointcloud_messages,
             stats.total_messages,
             mode,
@@ -235,16 +348,13 @@ pub fn decompress_mcap_after_pull_with_progress(
     options: PullTransformOptions,
     progress: &mut ProgressReporter<'_>,
 ) -> Result<TransformStats> {
-    progress.emit(
-        "unpack",
-        format!(
-            "reading MCAP file {}",
-            input
-                .file_name()
-                .unwrap_or_else(|| OsStr::new("<unknown>"))
-                .to_string_lossy()
-        ),
-    );
+    let input_name = input
+        .file_name()
+        .unwrap_or_else(|| OsStr::new("<unknown>"))
+        .to_string_lossy()
+        .to_string();
+
+    progress.emit("unpack", format!("reading MCAP file {}", input_name));
 
     let mut input_file = File::open(input)
         .with_context(|| format!("failed to open input mcap {}", input.display()))?;
@@ -252,6 +362,25 @@ pub fn decompress_mcap_after_pull_with_progress(
     let mut reader =
         IndexedReader::new(&summary).context("failed constructing mcap indexed reader")?;
     let mut chunk_buffer = Vec::new();
+    let total_chunks = summary.chunk_indexes.len();
+    let expected_messages = summary.stats.as_ref().map(|s| s.message_count);
+    let mut loaded_chunks = 0usize;
+    let pb = indexed_reader_bar(total_chunks, "unpack", &input_name);
+
+    if let Some(total) = expected_messages {
+        progress.emit(
+            "unpack",
+            format!(
+                "indexed reader initialized: {} chunk(s), ~{} message(s)",
+                total_chunks, total
+            ),
+        );
+    } else {
+        progress.emit(
+            "unpack",
+            format!("indexed reader initialized: {} chunk(s)", total_chunks),
+        );
+    }
 
     let writer_file = File::create(output)
         .with_context(|| format!("failed to create output mcap {}", output.display()))?;
@@ -272,6 +401,17 @@ pub fn decompress_mcap_after_pull_with_progress(
                 reader
                     .insert_chunk_record_data(offset, &chunk_buffer)
                     .context("failed inserting chunk data into mcap indexed reader")?;
+
+                loaded_chunks += 1;
+                if !pb.is_hidden() {
+                    pb.inc(1);
+                }
+                if loaded_chunks == 1
+                    || loaded_chunks % CHUNK_PROGRESS_EVERY == 0
+                    || loaded_chunks == total_chunks
+                {
+                    emit_chunk_progress(progress, "unpack", loaded_chunks, total_chunks);
+                }
             }
             IndexedReadEvent::Message { header, data } => {
                 let channel = summary
@@ -294,6 +434,26 @@ pub fn decompress_mcap_after_pull_with_progress(
                 };
 
                 stats.total_messages += 1;
+                if stats.total_messages % MESSAGE_PROGRESS_EVERY == 0 {
+                    if let Some(total) = expected_messages {
+                        let pct = (stats.total_messages as f64 / total as f64) * 100.0;
+                        if !pb.is_hidden() {
+                            pb.set_message(format!("unpack {} ({:.1}% messages)", input_name, pct));
+                        }
+                        progress.emit(
+                            "unpack",
+                            format!(
+                                "processed {} / {} message(s) ({:.1}%)",
+                                stats.total_messages, total, pct
+                            ),
+                        );
+                    } else {
+                        progress.emit(
+                            "unpack",
+                            format!("processed {} message(s)", stats.total_messages),
+                        );
+                    }
+                }
                 if is_cloudini_encoded_channel(&msg) {
                     let transformed = decompress_pointcloud_message(msg)?;
                     writer.write(&transformed)?;
@@ -306,11 +466,21 @@ pub fn decompress_mcap_after_pull_with_progress(
     }
 
     writer.finish()?;
+    if !pb.is_hidden() {
+        if total_chunks > 0 {
+            pb.finish_with_message(format!(
+                "unpack complete {} ({}/{})",
+                input_name, loaded_chunks, total_chunks
+            ));
+        } else {
+            pb.finish_with_message(format!("unpack complete {}", input_name));
+        }
+    }
     progress.emit(
         "unpack",
         format!(
-            "restored {} PointCloud2 messages out of {} total MCAP messages",
-            stats.pointcloud_messages, stats.total_messages
+            "indexed reader finished: {} chunk(s) loaded; restored {} PointCloud2 messages out of {} total MCAP messages",
+            loaded_chunks, stats.pointcloud_messages, stats.total_messages
         ),
     );
     Ok(stats)
