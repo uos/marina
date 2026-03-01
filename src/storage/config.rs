@@ -15,6 +15,56 @@ pub struct RegistryConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RegistryFile {
     pub registry: Vec<RegistryConfig>,
+    #[serde(default)]
+    pub compression: CompressionConfig,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ConfigPointcloudMode {
+    Off,
+    #[default]
+    Lossy,
+    Lossless,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ConfigMcapCompression {
+    None,
+    #[default]
+    Zstd,
+    Lz4,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ConfigArchiveCompression {
+    #[default]
+    Gzip,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CompressionConfig {
+    pub pointcloud_mode: ConfigPointcloudMode,
+    pub pointcloud_accuracy_mm: f64,
+    pub packed_mcap_compression: ConfigMcapCompression,
+    pub packed_archive_compression: ConfigArchiveCompression,
+    pub unpacked_mcap_compression: ConfigMcapCompression,
+}
+
+impl Default for CompressionConfig {
+    fn default() -> Self {
+        Self {
+            pointcloud_mode: ConfigPointcloudMode::Lossy,
+            pointcloud_accuracy_mm: 1.0,
+            packed_mcap_compression: ConfigMcapCompression::Zstd,
+            packed_archive_compression: ConfigArchiveCompression::Gzip,
+            unpacked_mcap_compression: ConfigMcapCompression::Zstd,
+        }
+    }
 }
 
 pub fn config_dir() -> Result<PathBuf> {
@@ -84,6 +134,10 @@ pub fn save_registries(file: &RegistryFile) -> Result<()> {
     let text = toml::to_string_pretty(file)?;
     fs::write(&path, text).with_context(|| format!("failed writing {}", path.display()))?;
     Ok(())
+}
+
+pub fn load_compression_config() -> Result<CompressionConfig> {
+    Ok(load_registries()?.compression)
 }
 
 pub fn remove_local_state(all: bool) -> Result<()> {

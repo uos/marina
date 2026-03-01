@@ -20,9 +20,9 @@ use crate::registry::driver::{RegistryDriver, RemoteDescriptor};
 
 const DRIVE_FILES_API: &str = "https://www.googleapis.com/drive/v3/files";
 const DRIVE_UPLOAD_API: &str = "https://www.googleapis.com/upload/drive/v3/files";
-const RESUMABLE_CHUNK_MIN_BYTES: usize = 4 * 1024 * 1024;
-const RESUMABLE_CHUNK_START_BYTES: usize = 16 * 1024 * 1024;
-const RESUMABLE_CHUNK_MAX_BYTES: usize = 64 * 1024 * 1024;
+const RESUMABLE_CHUNK_MIN_BYTES: usize = 16 * 1024 * 1024;
+const RESUMABLE_CHUNK_START_BYTES: usize = 64 * 1024 * 1024;
+const RESUMABLE_CHUNK_MAX_BYTES: usize = 256 * 1024 * 1024;
 const RESUMABLE_UPLOAD_RETRIES: usize = 4;
 
 #[derive(Debug, Clone)]
@@ -461,6 +461,7 @@ impl GDriveRegistry {
         name: &str,
         pb: &ProgressBar,
     ) -> Result<()> {
+        let auth = self.auth_header_required()?;
         let mut file =
             fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
         let mut chunk_size = RESUMABLE_CHUNK_START_BYTES;
@@ -488,6 +489,7 @@ impl GDriveRegistry {
                 let resp = self
                     .client
                     .put(session_url)
+                    .header("Authorization", &auth)
                     .header("Content-Type", mime)
                     .header("Content-Length", n.to_string())
                     .header("Content-Range", &range)
@@ -507,9 +509,7 @@ impl GDriveRegistry {
                                 && chunk_size < RESUMABLE_CHUNK_MAX_BYTES
                             {
                                 chunk_size = (chunk_size * 2).min(RESUMABLE_CHUNK_MAX_BYTES);
-                            } else if (attempt > 0 || elapsed > Duration::from_secs(8))
-                                && chunk_size > RESUMABLE_CHUNK_MIN_BYTES
-                            {
+                            } else if attempt > 0 && chunk_size > RESUMABLE_CHUNK_MIN_BYTES {
                                 chunk_size = (chunk_size / 2).max(RESUMABLE_CHUNK_MIN_BYTES);
                             }
                             break;
@@ -660,9 +660,7 @@ impl GDriveRegistry {
                                 && chunk_size < RESUMABLE_CHUNK_MAX_BYTES as u64
                             {
                                 chunk_size = (chunk_size * 2).min(RESUMABLE_CHUNK_MAX_BYTES as u64);
-                            } else if (attempt > 0 || elapsed > Duration::from_secs(8))
-                                && chunk_size > RESUMABLE_CHUNK_MIN_BYTES as u64
-                            {
+                            } else if attempt > 0 && chunk_size > RESUMABLE_CHUNK_MIN_BYTES as u64 {
                                 chunk_size = (chunk_size / 2).max(RESUMABLE_CHUNK_MIN_BYTES as u64);
                             }
                             break;

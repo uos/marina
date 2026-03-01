@@ -8,7 +8,9 @@ use crate::io::mcap_transform::{McapChunkCompression, PointCloudCompressionMode}
 use crate::io::pack::ArchiveCompression;
 use crate::model::bag_ref::BagRef;
 use crate::progress::{ProgressReporter, WriterProgress};
-use crate::storage::config::{self, RegistryConfig};
+use crate::storage::config::{
+    self, ConfigArchiveCompression, ConfigMcapCompression, ConfigPointcloudMode, RegistryConfig,
+};
 
 #[derive(Parser)]
 #[command(name = "marina")]
@@ -102,14 +104,14 @@ struct PushArgs {
     source: PathBuf,
     #[arg(long)]
     registry: Option<String>,
-    #[arg(long, value_enum, default_value_t = CliPointcloudMode::Lossy)]
-    pointcloud_mode: CliPointcloudMode,
-    #[arg(long, default_value_t = 1.0)]
-    pointcloud_accuracy_mm: f64,
-    #[arg(long, value_enum, default_value_t = CliMcapCompression::Zstd)]
-    packed_mcap_compression: CliMcapCompression,
-    #[arg(long, value_enum, default_value_t = CliArchiveCompression::Gzip)]
-    packed_archive_compression: CliArchiveCompression,
+    #[arg(long, value_enum)]
+    pointcloud_mode: Option<CliPointcloudMode>,
+    #[arg(long)]
+    pointcloud_accuracy_mm: Option<f64>,
+    #[arg(long, value_enum)]
+    packed_mcap_compression: Option<CliMcapCompression>,
+    #[arg(long, value_enum)]
+    packed_archive_compression: Option<CliArchiveCompression>,
     #[arg(long)]
     no_progress: bool,
 }
@@ -119,8 +121,8 @@ struct PullArgs {
     target: String,
     #[arg(long)]
     registry: Option<String>,
-    #[arg(long, value_enum, default_value_t = CliMcapCompression::Zstd)]
-    unpacked_mcap_compression: CliMcapCompression,
+    #[arg(long, value_enum)]
+    unpacked_mcap_compression: Option<CliMcapCompression>,
     #[arg(long)]
     no_progress: bool,
 }
@@ -173,6 +175,7 @@ pub fn run_with_args(args: Vec<String>) -> Result<()> {
 }
 
 fn run_parsed(cli: Cli) -> Result<()> {
+    let compression = config::load_compression_config()?;
     let mut marina = Marina::load()?;
 
     match cli.cmd {
@@ -271,12 +274,26 @@ fn run_parsed(cli: Cli) -> Result<()> {
         }
         Commands::Push(args) => {
             let push_options = PushOptions {
-                pointcloud_mode: cli_pointcloud_mode_to_core(args.pointcloud_mode),
-                pointcloud_precision_m: args.pointcloud_accuracy_mm / 1000.0,
-                packed_mcap_compression: cli_mcap_compression_to_core(args.packed_mcap_compression),
-                packed_archive_compression: cli_archive_compression_to_core(
-                    args.packed_archive_compression,
-                ),
+                pointcloud_mode: args
+                    .pointcloud_mode
+                    .map(cli_pointcloud_mode_to_core)
+                    .unwrap_or_else(|| config_pointcloud_mode_to_core(compression.pointcloud_mode)),
+                pointcloud_precision_m: args
+                    .pointcloud_accuracy_mm
+                    .unwrap_or(compression.pointcloud_accuracy_mm)
+                    / 1000.0,
+                packed_mcap_compression: args
+                    .packed_mcap_compression
+                    .map(cli_mcap_compression_to_core)
+                    .unwrap_or_else(|| {
+                        config_mcap_compression_to_core(compression.packed_mcap_compression)
+                    }),
+                packed_archive_compression: args
+                    .packed_archive_compression
+                    .map(cli_archive_compression_to_core)
+                    .unwrap_or_else(|| {
+                        config_archive_compression_to_core(compression.packed_archive_compression)
+                    }),
             };
             if !args.no_progress {
                 let mut stdout = std::io::stdout();
@@ -311,9 +328,12 @@ fn run_parsed(cli: Cli) -> Result<()> {
         }
         Commands::Pull(args) => {
             let pull_options = PullOptions {
-                unpacked_mcap_compression: cli_mcap_compression_to_core(
-                    args.unpacked_mcap_compression,
-                ),
+                unpacked_mcap_compression: args
+                    .unpacked_mcap_compression
+                    .map(cli_mcap_compression_to_core)
+                    .unwrap_or_else(|| {
+                        config_mcap_compression_to_core(compression.unpacked_mcap_compression)
+                    }),
             };
             if args.target.contains('*') {
                 let pulled = if !args.no_progress {
@@ -450,6 +470,29 @@ fn cli_archive_compression_to_core(comp: CliArchiveCompression) -> ArchiveCompre
     match comp {
         CliArchiveCompression::Gzip => ArchiveCompression::Gzip,
         CliArchiveCompression::None => ArchiveCompression::None,
+    }
+}
+
+fn config_pointcloud_mode_to_core(mode: ConfigPointcloudMode) -> PointCloudCompressionMode {
+    match mode {
+        ConfigPointcloudMode::Off => PointCloudCompressionMode::Disabled,
+        ConfigPointcloudMode::Lossy => PointCloudCompressionMode::Lossy,
+        ConfigPointcloudMode::Lossless => PointCloudCompressionMode::Lossless,
+    }
+}
+
+fn config_mcap_compression_to_core(comp: ConfigMcapCompression) -> McapChunkCompression {
+    match comp {
+        ConfigMcapCompression::None => McapChunkCompression::None,
+        ConfigMcapCompression::Zstd => McapChunkCompression::Zstd,
+        ConfigMcapCompression::Lz4 => McapChunkCompression::Lz4,
+    }
+}
+
+fn config_archive_compression_to_core(comp: ConfigArchiveCompression) -> ArchiveCompression {
+    match comp {
+        ConfigArchiveCompression::Gzip => ArchiveCompression::Gzip,
+        ConfigArchiveCompression::None => ArchiveCompression::None,
     }
 }
 

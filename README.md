@@ -32,6 +32,25 @@ During push, marina rewrites MCAP:
 
 During pull, marina rewrites MCAP back to standard PointCloud2 and writes the local ready MCAP with `--unpacked-mcap-compression` (`zstd` default).
 
+Archive bundling always stays enabled (tar bundle). The outer archive compression is configurable with `--packed-archive-compression` (`gzip` default, `none` optional).
+
+### Compression config in `registries.toml`
+
+Compression defaults can be configured globally in `~/.config/marina/registries.toml`:
+
+```toml
+registry = []
+
+[compression]
+pointcloud_mode = "lossy"                # off | lossy | lossless
+pointcloud_accuracy_mm = 1.0              # float
+packed_mcap_compression = "zstd"         # none | zstd | lz4
+packed_archive_compression = "gzip"      # gzip | none
+unpacked_mcap_compression = "zstd"       # none | zstd | lz4
+```
+
+If `push`/`pull` compression flags are provided on the CLI, those values override the config for that command only.
+
 Images are not transformed.
 
 ## CLI examples
