@@ -27,6 +27,20 @@ fn map_mcap_file(path: &Path) -> Result<Mmap> {
     Ok(mapped)
 }
 
+#[cfg(unix)]
+fn advise_sequential(mapped: &Mmap) {
+    let _ = mapped.advise(memmap2::Advice::Sequential);
+}
+
+#[cfg(not(unix))]
+fn advise_sequential(_mapped: &Mmap) {}
+
+#[cfg(unix)]
+fn advise_release(_mapped: &Mmap) {}
+
+#[cfg(not(unix))]
+fn advise_release(_mapped: &Mmap) {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McapChunkCompression {
     None,
@@ -117,6 +131,7 @@ pub fn compress_mcap_for_push_with_progress(
     );
 
     let mapped = map_mcap_file(input)?;
+    advise_sequential(&mapped);
 
     let writer_file = File::create(output)
         .with_context(|| format!("failed to create output mcap {}", output.display()))?;
@@ -144,6 +159,8 @@ pub fn compress_mcap_for_push_with_progress(
             }
         }
     }
+
+    advise_release(&mapped);
 
     writer.finish()?;
     let mode = match options.pointcloud_mode {
@@ -192,6 +209,7 @@ pub fn decompress_mcap_after_pull_with_progress(
     );
 
     let mapped = map_mcap_file(input)?;
+    advise_sequential(&mapped);
 
     let writer_file = File::create(output)
         .with_context(|| format!("failed to create output mcap {}", output.display()))?;
@@ -210,6 +228,8 @@ pub fn decompress_mcap_after_pull_with_progress(
             writer.write(&msg)?;
         }
     }
+
+    advise_release(&mapped);
 
     writer.finish()?;
     progress.emit(
