@@ -1,14 +1,14 @@
 use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::fs::File;
-use std::io::BufWriter;
+use std::io::{BufWriter, Read, Seek};
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use cloudini::ros::{CompressedPointCloud2, CompressionConfig};
-use mcap::{Compression, Message, MessageStream, WriteOptions, Writer};
-use memmap2::Mmap;
+use mcap::sans_io::{IndexedReadEvent, IndexedReader, SummaryReadEvent};
+use mcap::{Compression, Message, Summary, WriteOptions, Writer};
 
 use crate::progress::ProgressReporter;
 
@@ -19,27 +19,29 @@ const CDR_ENCODING: &str = "cdr";
 const MARINA_CODEC_KEY: &str = "marina.pointcloud.codec";
 const MARINA_CODEC_VAL: &str = "cloudini";
 
-fn map_mcap_file(path: &Path) -> Result<Mmap> {
-    let file = File::open(path)
-        .with_context(|| format!("failed to open input mcap {}", path.display()))?;
-    let mapped = unsafe { Mmap::map(&file) }
-        .with_context(|| format!("failed to mmap input mcap {}", path.display()))?;
-    Ok(mapped)
+fn read_summary_from_file(file: &mut File) -> Result<Summary> {
+    let mut summary_reader = mcap::sans_io::summary_reader::SummaryReader::new();
+    while let Some(event) = summary_reader.next_event() {
+        match event.context("failed while reading mcap summary")? {
+            SummaryReadEvent::ReadRequest(need) => {
+                let written = file
+                    .read(summary_reader.insert(need))
+                    .context("failed reading mcap summary bytes")?;
+                summary_reader.notify_read(written);
+            }
+            SummaryReadEvent::SeekRequest(to) => {
+                let pos = file
+                    .seek(to)
+                    .context("failed seeking while reading mcap summary")?;
+                summary_reader.notify_seeked(pos);
+            }
+        }
+    }
+
+    summary_reader
+        .finish()
+        .ok_or_else(|| anyhow!("mcap file has no summary; indexed streaming requires summary"))
 }
-
-#[cfg(unix)]
-fn advise_sequential(mapped: &Mmap) {
-    let _ = mapped.advise(memmap2::Advice::Sequential);
-}
-
-#[cfg(not(unix))]
-fn advise_sequential(_mapped: &Mmap) {}
-
-#[cfg(unix)]
-fn advise_release(_mapped: &Mmap) {}
-
-#[cfg(not(unix))]
-fn advise_release(_mapped: &Mmap) {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McapChunkCompression {
@@ -130,8 +132,12 @@ pub fn compress_mcap_for_push_with_progress(
         ),
     );
 
-    let mapped = map_mcap_file(input)?;
-    advise_sequential(&mapped);
+    let mut input_file = File::open(input)
+        .with_context(|| format!("failed to open input mcap {}", input.display()))?;
+    let summary = read_summary_from_file(&mut input_file)?;
+    let mut reader =
+        IndexedReader::new(&summary).context("failed constructing mcap indexed reader")?;
+    let mut chunk_buffer = Vec::new();
 
     let writer_file = File::create(output)
         .with_context(|| format!("failed to create output mcap {}", output.display()))?;
@@ -139,28 +145,60 @@ pub fn compress_mcap_for_push_with_progress(
 
     let mut stats = TransformStats::default();
 
-    for msg in MessageStream::new(&mapped)? {
-        let msg = msg?;
-        stats.total_messages += 1;
-        match options.pointcloud_mode {
-            PointCloudCompressionMode::Disabled => writer.write(&msg)?,
-            PointCloudCompressionMode::Lossy | PointCloudCompressionMode::Lossless => {
-                if should_transform_channel(&msg) {
-                    let transformed = compress_pointcloud_message(
-                        msg,
-                        options.pointcloud_mode,
-                        options.pointcloud_precision_m,
-                    )?;
-                    writer.write(&transformed)?;
-                    stats.pointcloud_messages += 1;
-                } else {
-                    writer.write(&msg)?;
+    while let Some(event) = reader.next_event() {
+        match event.context("failed reading indexed mcap events")? {
+            IndexedReadEvent::ReadChunkRequest { offset, length } => {
+                input_file
+                    .seek(std::io::SeekFrom::Start(offset))
+                    .with_context(|| format!("failed seeking to chunk at offset {}", offset))?;
+                chunk_buffer.resize(length, 0);
+                input_file.read_exact(&mut chunk_buffer).with_context(|| {
+                    format!("failed reading chunk payload at offset {}", offset)
+                })?;
+                reader
+                    .insert_chunk_record_data(offset, &chunk_buffer)
+                    .context("failed inserting chunk data into mcap indexed reader")?;
+            }
+            IndexedReadEvent::Message { header, data } => {
+                let channel = summary
+                    .channels
+                    .get(&header.channel_id)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "mcap message references unknown channel {}",
+                            header.channel_id
+                        )
+                    })?
+                    .clone();
+
+                let msg = Message {
+                    channel,
+                    sequence: header.sequence,
+                    log_time: header.log_time,
+                    publish_time: header.publish_time,
+                    data: Cow::Borrowed(data),
+                };
+
+                stats.total_messages += 1;
+                match options.pointcloud_mode {
+                    PointCloudCompressionMode::Disabled => writer.write(&msg)?,
+                    PointCloudCompressionMode::Lossy | PointCloudCompressionMode::Lossless => {
+                        if should_transform_channel(&msg) {
+                            let transformed = compress_pointcloud_message(
+                                msg,
+                                options.pointcloud_mode,
+                                options.pointcloud_precision_m,
+                            )?;
+                            writer.write(&transformed)?;
+                            stats.pointcloud_messages += 1;
+                        } else {
+                            writer.write(&msg)?;
+                        }
+                    }
                 }
             }
         }
     }
-
-    advise_release(&mapped);
 
     writer.finish()?;
     let mode = match options.pointcloud_mode {
@@ -208,8 +246,12 @@ pub fn decompress_mcap_after_pull_with_progress(
         ),
     );
 
-    let mapped = map_mcap_file(input)?;
-    advise_sequential(&mapped);
+    let mut input_file = File::open(input)
+        .with_context(|| format!("failed to open input mcap {}", input.display()))?;
+    let summary = read_summary_from_file(&mut input_file)?;
+    let mut reader =
+        IndexedReader::new(&summary).context("failed constructing mcap indexed reader")?;
+    let mut chunk_buffer = Vec::new();
 
     let writer_file = File::create(output)
         .with_context(|| format!("failed to create output mcap {}", output.display()))?;
@@ -217,19 +259,51 @@ pub fn decompress_mcap_after_pull_with_progress(
 
     let mut stats = TransformStats::default();
 
-    for msg in MessageStream::new(&mapped)? {
-        let msg = msg?;
-        stats.total_messages += 1;
-        if is_cloudini_encoded_channel(&msg) {
-            let transformed = decompress_pointcloud_message(msg)?;
-            writer.write(&transformed)?;
-            stats.pointcloud_messages += 1;
-        } else {
-            writer.write(&msg)?;
+    while let Some(event) = reader.next_event() {
+        match event.context("failed reading indexed mcap events")? {
+            IndexedReadEvent::ReadChunkRequest { offset, length } => {
+                input_file
+                    .seek(std::io::SeekFrom::Start(offset))
+                    .with_context(|| format!("failed seeking to chunk at offset {}", offset))?;
+                chunk_buffer.resize(length, 0);
+                input_file.read_exact(&mut chunk_buffer).with_context(|| {
+                    format!("failed reading chunk payload at offset {}", offset)
+                })?;
+                reader
+                    .insert_chunk_record_data(offset, &chunk_buffer)
+                    .context("failed inserting chunk data into mcap indexed reader")?;
+            }
+            IndexedReadEvent::Message { header, data } => {
+                let channel = summary
+                    .channels
+                    .get(&header.channel_id)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "mcap message references unknown channel {}",
+                            header.channel_id
+                        )
+                    })?
+                    .clone();
+
+                let msg = Message {
+                    channel,
+                    sequence: header.sequence,
+                    log_time: header.log_time,
+                    publish_time: header.publish_time,
+                    data: Cow::Borrowed(data),
+                };
+
+                stats.total_messages += 1;
+                if is_cloudini_encoded_channel(&msg) {
+                    let transformed = decompress_pointcloud_message(msg)?;
+                    writer.write(&transformed)?;
+                    stats.pointcloud_messages += 1;
+                } else {
+                    writer.write(&msg)?;
+                }
+            }
         }
     }
-
-    advise_release(&mapped);
 
     writer.finish()?;
     progress.emit(
@@ -271,11 +345,11 @@ fn is_cloudini_encoded_channel(msg: &Message<'_>) -> bool {
         .is_some_and(|v| v.starts_with(MARINA_CODEC_VAL))
 }
 
-fn compress_pointcloud_message(
-    msg: Message<'static>,
+fn compress_pointcloud_message<'a>(
+    msg: Message<'a>,
     mode: PointCloudCompressionMode,
     precision_m: f64,
-) -> Result<Message<'static>> {
+) -> Result<Message<'a>> {
     let pointcloud: ros2_interfaces_jazzy_serde::sensor_msgs::msg::PointCloud2 =
         cdr::deserialize(&msg.data)
             .context("failed to CDR-decode PointCloud2 while preparing push")?;
@@ -323,7 +397,7 @@ fn compress_pointcloud_message(
     })
 }
 
-fn decompress_pointcloud_message(msg: Message<'static>) -> Result<Message<'static>> {
+fn decompress_pointcloud_message<'a>(msg: Message<'a>) -> Result<Message<'a>> {
     let compressed: CompressedPointCloud2 = cdr::deserialize(&msg.data)
         .context("failed to CDR-decode compressed pointcloud while pulling")?;
     let restored = compressed
