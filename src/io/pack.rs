@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
@@ -12,12 +12,13 @@ use tar::{Archive, Builder};
 
 use crate::io::bag::BagSource;
 use crate::io::mcap_transform;
-use crate::io::mcap_transform::{PullTransformOptions, PushTransformOptions};
+use crate::io::mcap_transform::{McapChunkCompression, PullTransformOptions, PushTransformOptions};
 use crate::progress::ProgressReporter;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PackOptions {
     pub transform: PushTransformOptions,
+    pub archive_compression: ArchiveCompression,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -25,10 +26,119 @@ pub struct UnpackOptions {
     pub transform: PullTransformOptions,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ArchiveCompression {
+    #[default]
+    Gzip,
+    None,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackedMeta {
     pub original_bytes: u64,
     pub packed_bytes: u64,
+}
+
+struct ProgressReader<R: Read> {
+    inner: R,
+    progress: ProgressBar,
+}
+
+impl<R: Read> ProgressReader<R> {
+    fn new(inner: R, progress: ProgressBar) -> Self {
+        Self { inner, progress }
+    }
+}
+
+impl<R: Read> Read for ProgressReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let read = self.inner.read(buf)?;
+        if read > 0 {
+            self.progress.inc(read as u64);
+        }
+        Ok(read)
+    }
+}
+
+fn is_gzip_archive(path: &Path) -> Result<bool> {
+    let mut file =
+        File::open(path).with_context(|| format!("cannot open archive {}", path.display()))?;
+    let mut magic = [0u8; 2];
+    let read = file
+        .read(&mut magic)
+        .with_context(|| format!("cannot read archive header {}", path.display()))?;
+    if read < 2 {
+        return Ok(false);
+    }
+    Ok(magic == [0x1f, 0x8b])
+}
+
+fn append_staging_bundle<W: Write>(
+    builder: &mut Builder<W>,
+    staging_dir: &Path,
+    pb: &ProgressBar,
+    total_bytes: u64,
+    total_files: u64,
+    progress: &mut ProgressReporter<'_>,
+) -> Result<u64> {
+    builder.append_dir("bundle", staging_dir)?;
+
+    let mut packed_files = 0u64;
+    for entry in walkdir::WalkDir::new(staging_dir) {
+        let entry = entry?;
+        let path = entry.path();
+        let rel = path.strip_prefix(staging_dir).with_context(|| {
+            format!(
+                "failed to strip staging prefix {} from {}",
+                staging_dir.display(),
+                path.display()
+            )
+        })?;
+
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+
+        let archive_path = Path::new("bundle").join(rel);
+        if path.is_dir() {
+            builder.append_dir(&archive_path, path)?;
+            continue;
+        }
+
+        let metadata = fs::metadata(path)?;
+        let mut header = tar::Header::new_gnu();
+        header.set_metadata(&metadata);
+        header.set_cksum();
+
+        let mut file = File::open(path)?;
+        if !pb.is_hidden() && total_bytes > 0 {
+            let mut reader = ProgressReader::new(file, pb.clone());
+            builder.append_data(&mut header, &archive_path, &mut reader)?;
+        } else {
+            builder.append_data(&mut header, &archive_path, &mut file)?;
+        }
+
+        packed_files += 1;
+        if !pb.is_hidden() {
+            if total_bytes == 0 {
+                pb.tick();
+            }
+        }
+
+        if pb.is_hidden()
+            && (packed_files == 1 || packed_files % 512 == 0 || packed_files == total_files)
+        {
+            progress.emit(
+                "pack",
+                format!(
+                    "archive packing progress: {}/{} file(s)",
+                    packed_files, total_files
+                ),
+            );
+        }
+    }
+
+    Ok(packed_files)
 }
 
 pub fn pack_bag(source: &BagSource, out_file: &Path) -> Result<PackedMeta> {
@@ -103,14 +213,25 @@ pub fn pack_bag_with_progress_and_options(
     };
     let staged_mcap = staging_dir.join(mcap_rel);
     let transformed_mcap = staging_dir.join(".marina_transform.mcap");
-    progress.emit("pack", "rewriting MCAP messages");
-    mcap_transform::compress_mcap_for_push_with_progress(
-        &staged_mcap,
-        &transformed_mcap,
-        options.transform,
-        progress,
-    )?;
-    fs::rename(&transformed_mcap, &staged_mcap)?;
+    let skip_push_transform = options.transform.pointcloud_mode
+        == mcap_transform::PointCloudCompressionMode::Disabled
+        && options.transform.output_mcap_compression == McapChunkCompression::None;
+
+    if skip_push_transform {
+        progress.emit(
+            "pack",
+            "skipping MCAP rewrite (pointcloud + chunk compression disabled)",
+        );
+    } else {
+        progress.emit("pack", "rewriting MCAP messages");
+        mcap_transform::compress_mcap_for_push_with_progress(
+            &staged_mcap,
+            &transformed_mcap,
+            options.transform,
+            progress,
+        )?;
+        fs::rename(&transformed_mcap, &staged_mcap)?;
+    }
 
     progress.emit("pack", "compressing staged folder to marina archive");
 
@@ -146,60 +267,38 @@ pub fn pack_bag_with_progress_and_options(
         ProgressBar::hidden()
     };
 
-    let tar_gz = File::create(out_file)?;
-    let encoder = GzEncoder::new(tar_gz, Compression::best());
-    let mut builder = Builder::new(encoder);
-    builder.append_dir("bundle", &staging_dir)?;
-
-    let mut packed_files = 0u64;
-    let mut packed_bytes = 0u64;
-    for entry in walkdir::WalkDir::new(&staging_dir) {
-        let entry = entry?;
-        let path = entry.path();
-        let rel = path.strip_prefix(&staging_dir).with_context(|| {
-            format!(
-                "failed to strip staging prefix {} from {}",
-                staging_dir.display(),
-                path.display()
-            )
-        })?;
-
-        if rel.as_os_str().is_empty() {
-            continue;
+    let packed_files = match options.archive_compression {
+        ArchiveCompression::Gzip => {
+            let tar_gz = File::create(out_file)?;
+            let encoder = GzEncoder::new(tar_gz, Compression::best());
+            let mut builder = Builder::new(encoder);
+            let packed_files = append_staging_bundle(
+                &mut builder,
+                &staging_dir,
+                &pb,
+                total_bytes,
+                total_files,
+                progress,
+            )?;
+            let encoder = builder.into_inner()?;
+            encoder.finish()?;
+            packed_files
         }
-
-        let archive_path = Path::new("bundle").join(rel);
-        if path.is_dir() {
-            builder.append_dir(&archive_path, path)?;
-            continue;
+        ArchiveCompression::None => {
+            let tar_file = File::create(out_file)?;
+            let mut builder = Builder::new(tar_file);
+            let packed_files = append_staging_bundle(
+                &mut builder,
+                &staging_dir,
+                &pb,
+                total_bytes,
+                total_files,
+                progress,
+            )?;
+            let _file = builder.into_inner()?;
+            packed_files
         }
-
-        builder.append_path_with_name(path, &archive_path)?;
-        packed_files += 1;
-        packed_bytes += fs::metadata(path)?.len();
-        if !pb.is_hidden() {
-            if total_bytes > 0 {
-                pb.set_position(packed_bytes.min(total_bytes));
-            } else {
-                pb.tick();
-            }
-        }
-
-        if pb.is_hidden()
-            && (packed_files == 1 || packed_files % 512 == 0 || packed_files == total_files)
-        {
-            progress.emit(
-                "pack",
-                format!(
-                    "archive packing progress: {}/{} file(s)",
-                    packed_files, total_files
-                ),
-            );
-        }
-    }
-
-    let encoder = builder.into_inner()?;
-    encoder.finish()?;
+    };
 
     if !pb.is_hidden() {
         if total_bytes > 0 {
@@ -251,11 +350,19 @@ pub fn unpack_bag_with_progress_and_options(
         format!("extracting archive {}", archive_path.display()),
     );
     fs::create_dir_all(out_dir)?;
-    let tar_gz = File::open(archive_path)
-        .with_context(|| format!("cannot open archive {}", archive_path.display()))?;
-    let decoder = GzDecoder::new(tar_gz);
-    let mut archive = Archive::new(decoder);
-    archive.unpack(out_dir)?;
+    let archive_is_gzip = is_gzip_archive(archive_path)?;
+    if archive_is_gzip {
+        let tar_gz = File::open(archive_path)
+            .with_context(|| format!("cannot open archive {}", archive_path.display()))?;
+        let decoder = GzDecoder::new(tar_gz);
+        let mut archive = Archive::new(decoder);
+        archive.unpack(out_dir)?;
+    } else {
+        let tar_file = File::open(archive_path)
+            .with_context(|| format!("cannot open archive {}", archive_path.display()))?;
+        let mut archive = Archive::new(tar_file);
+        archive.unpack(out_dir)?;
+    }
 
     let bundle = out_dir.join("bundle");
     if bundle.exists() {
@@ -277,14 +384,26 @@ pub fn unpack_bag_with_progress_and_options(
 
     progress.emit("unpack", "restoring PointCloud2 messages");
     let mcap_file = find_first_mcap(out_dir)?;
-    let decoded = out_dir.join(".marina_restored.mcap");
-    mcap_transform::decompress_mcap_after_pull_with_progress(
-        &mcap_file,
-        &decoded,
-        options.transform,
-        progress,
-    )?;
-    fs::rename(decoded, mcap_file)?;
+    let has_cloudini_channels = mcap_transform::has_cloudini_pointcloud_metadata(&mcap_file)?;
+    let skip_pull_transform = options.transform.output_mcap_compression
+        == McapChunkCompression::None
+        && !has_cloudini_channels;
+
+    if skip_pull_transform {
+        progress.emit(
+            "unpack",
+            "skipping MCAP restore (no cloudini metadata and chunk compression unchanged)",
+        );
+    } else {
+        let decoded = out_dir.join(".marina_restored.mcap");
+        mcap_transform::decompress_mcap_after_pull_with_progress(
+            &mcap_file,
+            &decoded,
+            options.transform,
+            progress,
+        )?;
+        fs::rename(decoded, mcap_file)?;
+    }
     progress.emit("unpack", "unpack complete");
 
     Ok(())

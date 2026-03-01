@@ -329,6 +329,17 @@ pub fn compress_mcap_for_push_with_progress(
     Ok(stats)
 }
 
+pub fn has_cloudini_pointcloud_metadata(input: &Path) -> Result<bool> {
+    let mut input_file = File::open(input)
+        .with_context(|| format!("failed to open input mcap {}", input.display()))?;
+    let summary = read_summary_from_file(&mut input_file)?;
+
+    Ok(summary
+        .channels
+        .values()
+        .any(|channel| channel.metadata.contains_key(MARINA_CODEC_KEY)))
+}
+
 pub fn decompress_mcap_after_pull(input: &Path, output: &Path) -> Result<TransformStats> {
     let mut reporter = ProgressReporter::silent();
     decompress_mcap_after_pull_with_progress(

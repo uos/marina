@@ -5,6 +5,7 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 
 use crate::core::{Marina, PullOptions, PushOptions, ResolveResult};
 use crate::io::mcap_transform::{McapChunkCompression, PointCloudCompressionMode};
+use crate::io::pack::ArchiveCompression;
 use crate::model::bag_ref::BagRef;
 use crate::progress::{ProgressReporter, WriterProgress};
 use crate::storage::config::{self, RegistryConfig};
@@ -89,6 +90,12 @@ enum CliMcapCompression {
     Lz4,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliArchiveCompression {
+    Gzip,
+    None,
+}
+
 #[derive(Args)]
 struct PushArgs {
     bag: BagRef,
@@ -101,6 +108,8 @@ struct PushArgs {
     pointcloud_accuracy_mm: f64,
     #[arg(long, value_enum, default_value_t = CliMcapCompression::Zstd)]
     packed_mcap_compression: CliMcapCompression,
+    #[arg(long, value_enum, default_value_t = CliArchiveCompression::Gzip)]
+    packed_archive_compression: CliArchiveCompression,
     #[arg(long)]
     no_progress: bool,
 }
@@ -265,6 +274,9 @@ fn run_parsed(cli: Cli) -> Result<()> {
                 pointcloud_mode: cli_pointcloud_mode_to_core(args.pointcloud_mode),
                 pointcloud_precision_m: args.pointcloud_accuracy_mm / 1000.0,
                 packed_mcap_compression: cli_mcap_compression_to_core(args.packed_mcap_compression),
+                packed_archive_compression: cli_archive_compression_to_core(
+                    args.packed_archive_compression,
+                ),
             };
             if !args.no_progress {
                 let mut stdout = std::io::stdout();
@@ -431,6 +443,13 @@ fn cli_mcap_compression_to_core(comp: CliMcapCompression) -> McapChunkCompressio
         CliMcapCompression::None => McapChunkCompression::None,
         CliMcapCompression::Zstd => McapChunkCompression::Zstd,
         CliMcapCompression::Lz4 => McapChunkCompression::Lz4,
+    }
+}
+
+fn cli_archive_compression_to_core(comp: CliArchiveCompression) -> ArchiveCompression {
+    match comp {
+        CliArchiveCompression::Gzip => ArchiveCompression::Gzip,
+        CliArchiveCompression::None => ArchiveCompression::None,
     }
 }
 

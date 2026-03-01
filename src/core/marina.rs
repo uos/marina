@@ -81,6 +81,7 @@ pub struct PushOptions {
     pub pointcloud_mode: PointCloudCompressionMode,
     pub pointcloud_precision_m: f64,
     pub packed_mcap_compression: McapChunkCompression,
+    pub packed_archive_compression: pack::ArchiveCompression,
 }
 
 impl Default for PushOptions {
@@ -89,6 +90,7 @@ impl Default for PushOptions {
             pointcloud_mode: PointCloudCompressionMode::Lossy,
             pointcloud_precision_m: 0.001,
             packed_mcap_compression: McapChunkCompression::Zstd,
+            packed_archive_compression: pack::ArchiveCompression::Gzip,
         }
     }
 }
@@ -335,6 +337,7 @@ impl Marina {
                     pointcloud_precision_m: options.pointcloud_precision_m,
                     output_mcap_compression: options.packed_mcap_compression,
                 },
+                archive_compression: options.packed_archive_compression,
             },
             progress,
         )?;
