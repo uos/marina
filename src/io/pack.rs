@@ -10,7 +10,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
 use tar::{Archive, Builder};
 
-use crate::io::bag::BagSource;
+use crate::io::bag::{BagSource, MCAP_CLI_URL, MCAP_ROS2_URL};
 use crate::io::mcap_transform;
 use crate::io::mcap_transform::{McapChunkCompression, PullTransformOptions, PushTransformOptions};
 use crate::progress::ProgressReporter;
@@ -191,46 +191,54 @@ pub fn pack_bag_with_progress_and_options(
         copy_dir(&source.root, &staging_dir)?;
     }
 
-    let mcap_rel = if source.root.is_file() {
-        PathBuf::from(
-            source
-                .mcap
-                .file_name()
-                .ok_or_else(|| anyhow!("mcap file has no file name"))?,
-        )
-    } else {
-        source
-            .mcap
-            .strip_prefix(&source.root)
-            .with_context(|| {
-                format!(
-                    "{} is outside {}",
-                    source.mcap.display(),
-                    source.root.display()
-                )
-            })?
-            .to_path_buf()
-    };
-    let staged_mcap = staging_dir.join(mcap_rel);
-    let transformed_mcap = staging_dir.join(".marina_transform.mcap");
-    let skip_push_transform = options.transform.pointcloud_mode
-        == mcap_transform::PointCloudCompressionMode::Disabled
-        && options.transform.output_mcap_compression == McapChunkCompression::None;
+    if let Some(source_mcap) = source.mcap.as_ref() {
+        let mcap_rel = if source.root.is_file() {
+            PathBuf::from(
+                source_mcap
+                    .file_name()
+                    .ok_or_else(|| anyhow!("mcap file has no file name"))?,
+            )
+        } else {
+            source_mcap
+                .strip_prefix(&source.root)
+                .with_context(|| {
+                    format!(
+                        "{} is outside {}",
+                        source_mcap.display(),
+                        source.root.display()
+                    )
+                })?
+                .to_path_buf()
+        };
+        let staged_mcap = staging_dir.join(mcap_rel);
+        let transformed_mcap = staging_dir.join(".marina_transform.mcap");
+        let skip_push_transform = options.transform.pointcloud_mode
+            == mcap_transform::PointCloudCompressionMode::Disabled
+            && options.transform.output_mcap_compression == McapChunkCompression::None;
 
-    if skip_push_transform {
+        if skip_push_transform {
+            progress.emit(
+                "pack",
+                "skipping MCAP rewrite (pointcloud + chunk compression disabled)",
+            );
+        } else {
+            progress.emit("pack", "rewriting MCAP messages");
+            mcap_transform::compress_mcap_for_push_with_progress(
+                &staged_mcap,
+                &transformed_mcap,
+                options.transform,
+                progress,
+            )?;
+            fs::rename(&transformed_mcap, &staged_mcap)?;
+        }
+    } else if source.has_db3 {
         progress.emit(
             "pack",
-            "skipping MCAP rewrite (pointcloud + chunk compression disabled)",
+            format!(
+                "WARNING: ROS2 .db3 source detected; skipping MCAP optimization pipeline. This is supported but significantly less efficient than MCAP for transfer/storage/playback. Strongly recommended: convert to MCAP first ({} / {}).",
+                MCAP_CLI_URL, MCAP_ROS2_URL
+            ),
         );
-    } else {
-        progress.emit("pack", "rewriting MCAP messages");
-        mcap_transform::compress_mcap_for_push_with_progress(
-            &staged_mcap,
-            &transformed_mcap,
-            options.transform,
-            progress,
-        )?;
-        fs::rename(&transformed_mcap, &staged_mcap)?;
     }
 
     progress.emit("pack", "compressing staged folder to marina archive");
@@ -382,27 +390,38 @@ pub fn unpack_bag_with_progress_and_options(
         fs::remove_dir_all(bundle)?;
     }
 
-    progress.emit("unpack", "restoring PointCloud2 messages");
-    let mcap_file = find_first_mcap(out_dir)?;
-    let has_cloudini_channels = mcap_transform::has_cloudini_pointcloud_metadata(&mcap_file)?;
-    let skip_pull_transform = options.transform.output_mcap_compression
-        == McapChunkCompression::None
-        && !has_cloudini_channels;
+    if let Some(mcap_file) = find_first_mcap(out_dir)? {
+        progress.emit("unpack", "restoring PointCloud2 messages");
+        let has_cloudini_channels = mcap_transform::has_cloudini_pointcloud_metadata(&mcap_file)?;
+        let skip_pull_transform = options.transform.output_mcap_compression
+            == McapChunkCompression::None
+            && !has_cloudini_channels;
 
-    if skip_pull_transform {
+        if skip_pull_transform {
+            progress.emit("unpack", "skipping MCAP restore");
+        } else {
+            let decoded = out_dir.join(".marina_restored.mcap");
+            mcap_transform::decompress_mcap_after_pull_with_progress(
+                &mcap_file,
+                &decoded,
+                options.transform,
+                progress,
+            )?;
+            fs::rename(decoded, mcap_file)?;
+        }
+    } else if has_any_db3(out_dir)? {
         progress.emit(
             "unpack",
-            "skipping MCAP restore (no cloudini metadata and chunk compression unchanged)",
+            format!(
+                "WARNING: pulled .db3 bag. Skipping restore and compression. MCAP is strongly recommended! ({} / {}).",
+                MCAP_CLI_URL, MCAP_ROS2_URL
+            ),
         );
     } else {
-        let decoded = out_dir.join(".marina_restored.mcap");
-        mcap_transform::decompress_mcap_after_pull_with_progress(
-            &mcap_file,
-            &decoded,
-            options.transform,
-            progress,
-        )?;
-        fs::rename(decoded, mcap_file)?;
+        return Err(anyhow!(
+            "no .mcap or .db3 file found in {}",
+            out_dir.display()
+        ));
     }
     progress.emit("unpack", "unpack complete");
 
@@ -461,13 +480,24 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-fn find_first_mcap(root: &Path) -> Result<PathBuf> {
+fn find_first_mcap(root: &Path) -> Result<Option<PathBuf>> {
     for entry in walkdir::WalkDir::new(root) {
         let entry = entry?;
         let p = entry.path();
         if p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("mcap") {
-            return Ok(p.to_path_buf());
+            return Ok(Some(p.to_path_buf()));
         }
     }
-    Err(anyhow!("no .mcap file found in {}", root.display()))
+    Ok(None)
+}
+
+fn has_any_db3(root: &Path) -> Result<bool> {
+    for entry in walkdir::WalkDir::new(root) {
+        let entry = entry?;
+        let p = entry.path();
+        if p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("db3") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
