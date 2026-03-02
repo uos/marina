@@ -113,6 +113,8 @@ struct PushArgs {
     #[arg(long, value_enum)]
     packed_archive_compression: Option<CliArchiveCompression>,
     #[arg(long)]
+    write_http_index: bool,
+    #[arg(long)]
     no_progress: bool,
 }
 
@@ -294,6 +296,7 @@ fn run_parsed(cli: Cli) -> Result<()> {
                     .unwrap_or_else(|| {
                         config_archive_compression_to_core(compression.packed_archive_compression)
                     }),
+                write_http_index: args.write_http_index,
             };
             if !args.no_progress {
                 let mut stdout = std::io::stdout();
@@ -443,6 +446,8 @@ fn infer_kind_from_uri(uri: &str) -> &'static str {
         "ssh"
     } else if uri.starts_with("gdrive://") {
         "gdrive"
+    } else if uri.starts_with("http://") || uri.starts_with("https://") {
+        "http"
     } else if uri.starts_with("directory://") {
         "directory"
     } else {

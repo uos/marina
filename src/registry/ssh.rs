@@ -33,6 +33,18 @@ struct MetaFile {
     packed_bytes: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct HttpIndexEntry {
+    bag: BagRef,
+    original_bytes: u64,
+    packed_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct HttpIndexFile {
+    bags: Vec<HttpIndexEntry>,
+}
+
 impl SshRegistry {
     pub fn from_uri(name: &str, uri: &str, auth_env: Option<String>) -> Result<Self> {
         let endpoint = SshEndpoint::parse(uri)?;
@@ -328,6 +340,39 @@ impl RegistryDriver for SshRegistry {
     fn remove(&self, bag: &BagRef) -> Result<()> {
         let target_dir = self.object_dir(bag);
         self.run_ssh(&format!("rm -rf {}", shell_quote(&target_dir)))
+    }
+
+    fn write_http_index(&self) -> Result<()> {
+        let output = self.run_ssh_capture(&format!(
+            "find {} -type f -name metadata.json",
+            shell_quote(&self.endpoint.root)
+        ))?;
+
+        let mut bags = Vec::new();
+        for line in output.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let meta_json = self.run_ssh_capture(&format!("cat {}", shell_quote(line)))?;
+            let meta: MetaFile = serde_json::from_str(&meta_json)
+                .with_context(|| format!("failed to parse metadata at remote path {}", line))?;
+            bags.push(HttpIndexEntry {
+                bag: meta.bag.without_attachment(),
+                original_bytes: meta.original_bytes,
+                packed_bytes: meta.packed_bytes,
+            });
+        }
+        bags.sort_by_key(|e| e.bag.to_string());
+        bags.dedup_by(|a, b| a.bag == b.bag);
+
+        let index = HttpIndexFile { bags };
+        let tmp = std::env::temp_dir().join(format!("marina_http_index_{}.json", self.name));
+        fs::write(&tmp, serde_json::to_vec_pretty(&index)?)?;
+        let remote = format!("{}/index.json", self.endpoint.root);
+        self.upload_file_with_progress(&tmp, &remote)?;
+        let _ = fs::remove_file(tmp);
+        Ok(())
     }
 }
 

@@ -22,6 +22,18 @@ struct MetaFile {
     packed_bytes: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct HttpIndexEntry {
+    bag: BagRef,
+    original_bytes: u64,
+    packed_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct HttpIndexFile {
+    bags: Vec<HttpIndexEntry>,
+}
+
 impl FolderRegistry {
     pub fn from_uri(name: &str, uri: &str) -> Result<Self> {
         let root = if let Some(rest) = uri.strip_prefix("folder://") {
@@ -140,6 +152,35 @@ impl RegistryDriver for FolderRegistry {
         if dir.exists() {
             fs::remove_dir_all(dir)?;
         }
+        Ok(())
+    }
+
+    fn write_http_index(&self) -> Result<()> {
+        let mut bags = Vec::new();
+        for entry in WalkDir::new(&self.root) {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() || path.file_name().and_then(|n| n.to_str()) != Some("metadata.json")
+            {
+                continue;
+            }
+            let text = fs::read_to_string(path)
+                .with_context(|| format!("failed reading {}", path.display()))?;
+            let meta: MetaFile = serde_json::from_str(&text)
+                .with_context(|| format!("failed parsing {}", path.display()))?;
+            bags.push(HttpIndexEntry {
+                bag: meta.bag.without_attachment(),
+                original_bytes: meta.original_bytes,
+                packed_bytes: meta.packed_bytes,
+            });
+        }
+        bags.sort_by_key(|e| e.bag.to_string());
+        bags.dedup_by(|a, b| a.bag == b.bag);
+
+        let index = HttpIndexFile { bags };
+        let path = self.root.join("index.json");
+        fs::write(&path, serde_json::to_vec_pretty(&index)?)
+            .with_context(|| format!("failed writing {}", path.display()))?;
         Ok(())
     }
 }

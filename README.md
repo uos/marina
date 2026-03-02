@@ -61,6 +61,7 @@ Add registries:
 marina registry add folder://./local-reg --name local
 marina registry add ssh://user@registry.uos.de:/srv/marina --name ssh-main --kind ssh --auth-env MARINA_SSH_KEY
 marina registry add gdrive://<folder_id> --name drive-main --kind gdrive --auth-env GOOGLE_DRIVE_TOKEN
+marina registry add https://datasets.example.org/marina --name web-main --kind http
 ```
 
 Auth notes:
@@ -78,6 +79,16 @@ Auth notes:
   - without auth and without API key, marina falls back to the public folder endpoint + per-bag `.public.json` manifest uploaded during `push`
   - `GOOGLE_DRIVE_TOKEN` is also supported as default auth token env
   - URI format: `gdrive://<drive_folder_id>`
+- `http` (read-only):
+  - supports `pull` (exact bag) and `search/list` when an `index.json` is available
+  - does not support `push` or `rm`
+  - URI format: `http(s)://<base_url>`
+  - default pull layout under base URL:
+    - `/<bag_object_path>/bundle.marina.tar.gz`
+    - `/<bag_object_path>/metadata.json` (optional, but recommended)
+  - optional `index.json` at base URL for search/list:
+    - either `[{ ...entry... }]` or `{ "bags": [{ ...entry... }] }`
+    - entry fields: `bag` (required), optional `bundle_url`, `metadata_url`, `original_bytes`, `packed_bytes`
 
 Find data to pull:
 
@@ -107,6 +118,9 @@ marina push tag ./tag_bag --registry local --pointcloud-mode lossless
 
 # Keep pulled MCAP uncompressed for lower playback CPU
 marina pull tag --registry local --unpacked-mcap-compression none
+
+# After push, write/refresh registry root index.json for http read-only serving
+marina push tag ./tag_bag --registry ssh-main --write-http-index
 ```
 
 ## Library usage

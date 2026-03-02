@@ -11,6 +11,7 @@ use crate::progress::ProgressReporter;
 use crate::registry::driver::RegistryDriver;
 use crate::registry::folder::FolderRegistry;
 use crate::registry::gdrive::GDriveRegistry;
+use crate::registry::http::HttpRegistry;
 use crate::registry::ssh::SshRegistry;
 use crate::registry::stub::StubRegistry;
 use crate::storage::cache::{self, CacheEntry, Catalog};
@@ -82,6 +83,7 @@ pub struct PushOptions {
     pub pointcloud_precision_m: f64,
     pub packed_mcap_compression: McapChunkCompression,
     pub packed_archive_compression: pack::ArchiveCompression,
+    pub write_http_index: bool,
 }
 
 impl Default for PushOptions {
@@ -91,6 +93,7 @@ impl Default for PushOptions {
             pointcloud_precision_m: 0.001,
             packed_mcap_compression: McapChunkCompression::Zstd,
             packed_archive_compression: pack::ArchiveCompression::Gzip,
+            write_http_index: false,
         }
     }
 }
@@ -135,6 +138,7 @@ impl Marina {
                     &reg.uri,
                     reg.auth_env.clone(),
                 )?),
+                "http" => Box::new(HttpRegistry::from_uri(&reg.name, &reg.uri)?),
                 other => Box::new(StubRegistry::new(other, &reg.uri, reg.auth_env.clone())),
             };
 
@@ -175,6 +179,7 @@ impl Marina {
                 &registry.uri,
                 registry.auth_env.clone(),
             )?),
+            "http" => Box::new(HttpRegistry::from_uri(&registry.name, &registry.uri)?),
             other => Box::new(StubRegistry::new(
                 other,
                 &registry.uri,
@@ -356,6 +361,14 @@ impl Marina {
             packed_meta.original_bytes,
             packed_meta.packed_bytes,
         )?;
+
+        if options.write_http_index {
+            progress.emit(
+                "push",
+                format!("writing http index.json for registry '{}'", cfg.name),
+            );
+            driver.write_http_index()?;
+        }
 
         let ready_dir = cache_dir.join("ready");
         progress.emit("push", "refreshing local ready-to-use cache");

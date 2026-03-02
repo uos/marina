@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 use crate::model::bag_ref::BagRef;
@@ -28,6 +28,12 @@ pub trait RegistryDriver: Send + Sync {
     fn list(&self, filter: &str) -> Result<Vec<BagRef>>;
 
     fn remove(&self, bag: &BagRef) -> Result<()>;
+
+    fn write_http_index(&self) -> Result<()> {
+        Err(anyhow!(
+            "http index generation is not supported for this registry type"
+        ))
+    }
 
     fn check_connection(&self) -> Result<()> {
         Ok(())
