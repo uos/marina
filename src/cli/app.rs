@@ -332,22 +332,39 @@ fn run_parsed(cli: Cli) -> Result<()> {
                 if all.is_empty() {
                     println!("no remote bags found");
                 } else {
-                    println!(
-                        "{:<40} {:<16} {:<14} {:<12} {:<12} {:<10} MCAP",
-                        "BAG", "REGISTRY", "HASH", "ORIGINAL", "PACKED", "CLOUDS"
-                    );
-                    for (registry, bag, info) in all {
-                        let (hash, orig, packed, clouds, mcap) = format_bag_info(info.as_ref());
-                        println!(
-                            "{:<40} {:<16} {:<14} {:<12} {:<12} {:<10} {}",
-                            bag.to_string(),
-                            registry,
-                            hash,
-                            orig,
-                            packed,
-                            clouds,
-                            mcap,
-                        );
+                    let rows: Vec<[String; 7]> = all
+                        .into_iter()
+                        .map(|(registry, bag, info)| {
+                            let (hash, orig, packed, clouds, mcap) = format_bag_info(info.as_ref());
+                            [bag.to_string(), registry, hash, orig, packed, clouds, mcap]
+                        })
+                        .collect();
+                    let headers = [
+                        "BAG", "REGISTRY", "HASH", "ORIGINAL", "PACKED", "CLOUDS", "MCAP",
+                    ];
+                    let mut widths = headers.map(|h| h.len());
+                    for row in &rows {
+                        for (i, cell) in row.iter().enumerate() {
+                            widths[i] = widths[i].max(cell.len());
+                        }
+                    }
+                    let fmt_row = |cols: &[&str; 7]| {
+                        let mut s = String::new();
+                        for (i, col) in cols.iter().enumerate() {
+                            if i > 0 {
+                                s.push_str("  ");
+                            }
+                            if i + 1 < cols.len() {
+                                s.push_str(&format!("{:<width$}", col, width = widths[i]));
+                            } else {
+                                s.push_str(col);
+                            }
+                        }
+                        s
+                    };
+                    println!("{}", fmt_row(&headers));
+                    for row in &rows {
+                        println!("{}", fmt_row(&row.each_ref().map(|s| s.as_str())));
                     }
                 }
             } else {
