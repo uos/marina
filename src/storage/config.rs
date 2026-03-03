@@ -12,11 +12,29 @@ pub struct RegistryConfig {
     pub auth_env: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TimeDisplay {
+    /// Show time as "3 days ago", "2 hours ago", etc.
+    #[default]
+    Relative,
+    /// Show time as a date: "2024-01-15".
+    Absolute,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RegistryFile {
     pub registry: Vec<RegistryConfig>,
     #[serde(default)]
     pub compression: CompressionConfig,
+    #[serde(default)]
+    pub settings: Settings,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+pub struct Settings {
+    #[serde(default)]
+    pub time_display: TimeDisplay,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]

@@ -45,6 +45,8 @@ struct MetaFile {
     pointcloud: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     mcap_compression: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pushed_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -863,6 +865,7 @@ impl RegistryDriver for GDriveRegistry {
             bundle_hash: Some(meta.bundle_hash.clone()),
             pointcloud: Some(meta.pointcloud.clone()),
             mcap_compression: Some(meta.mcap_compression.clone()),
+            pushed_at: Some(meta.pushed_at),
         };
         let metadata_bytes = serde_json::to_vec_pretty(&metadata)?;
         let metadata_id =
@@ -897,6 +900,7 @@ impl RegistryDriver for GDriveRegistry {
             packed_bytes: meta.packed_bytes,
             pointcloud: meta.pointcloud,
             mcap_compression: meta.mcap_compression,
+            pushed_at: meta.pushed_at,
         }))
     }
 
@@ -1034,6 +1038,7 @@ impl RegistryDriver for GDriveRegistry {
                 packed_bytes: meta.packed_bytes,
                 pointcloud: meta.pointcloud,
                 mcap_compression: meta.mcap_compression,
+                pushed_at: meta.pushed_at,
             };
             result.push((bag, Some(info)));
         }

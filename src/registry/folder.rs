@@ -26,6 +26,8 @@ struct MetaFile {
     pointcloud: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     mcap_compression: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pushed_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -105,6 +107,7 @@ impl RegistryDriver for FolderRegistry {
             bundle_hash: Some(meta.bundle_hash.clone()),
             pointcloud: Some(meta.pointcloud.clone()),
             mcap_compression: Some(meta.mcap_compression.clone()),
+            pushed_at: Some(meta.pushed_at),
         };
         fs::write(
             self.meta_path(bag),
@@ -121,6 +124,7 @@ impl RegistryDriver for FolderRegistry {
             packed_bytes: meta.packed_bytes,
             pointcloud: meta.pointcloud,
             mcap_compression: meta.mcap_compression,
+            pushed_at: meta.pushed_at,
         }))
     }
 

@@ -24,6 +24,8 @@ pub struct PushMeta {
     pub pointcloud: String,
     /// MCAP chunk compression: "none", "zstd", or "lz4".
     pub mcap_compression: String,
+    /// Unix timestamp (seconds) when this bundle was pushed.
+    pub pushed_at: u64,
 }
 
 /// Per-bag information readable from a remote registry.
@@ -34,6 +36,7 @@ pub struct BagInfo {
     pub packed_bytes: u64,
     pub pointcloud: Option<String>,
     pub mcap_compression: Option<String>,
+    pub pushed_at: Option<u64>,
 }
 
 pub trait RegistryDriver: Send + Sync {

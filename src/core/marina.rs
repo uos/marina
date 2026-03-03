@@ -375,6 +375,7 @@ impl Marina {
             bundle_hash,
             pointcloud: pointcloud_mode_label(options.pointcloud_mode).to_string(),
             mcap_compression: mcap_compression_label(options.packed_mcap_compression).to_string(),
+            pushed_at: now_unix_secs(),
         };
         driver.push(
             &cfg.name,
@@ -896,6 +897,7 @@ impl Marina {
                 bundle_hash,
                 pointcloud: source_info.pointcloud.unwrap_or_default(),
                 mcap_compression: source_info.mcap_compression.unwrap_or_default(),
+                pushed_at: now_unix_secs(),
             };
 
             progress.emit("mirror", format!("uploading {} to '{}'", bag, target_name));
@@ -924,6 +926,13 @@ impl Marina {
             .and_then(|(_, drv)| drv.list_with_info(pattern).ok())
             .unwrap_or_default()
     }
+}
+
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn compute_bundle_hash(path: &Path) -> Result<String> {

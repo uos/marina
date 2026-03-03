@@ -12,6 +12,7 @@ use crate::registry::driver::BagInfo;
 use crate::registry::gdrive_auth;
 use crate::storage::config::{
     self, ConfigArchiveCompression, ConfigMcapCompression, ConfigPointcloudMode, RegistryConfig,
+    TimeDisplay,
 };
 
 #[derive(Parser)]
@@ -350,15 +351,28 @@ fn run_parsed(cli: Cli) -> Result<()> {
                 if all.is_empty() {
                     println!("no remote bags found");
                 } else {
-                    let rows: Vec<[String; 7]> = all
+                    let time_display = config::load_registries()
+                        .map(|f| f.settings.time_display)
+                        .unwrap_or_default();
+                    let rows: Vec<[String; 8]> = all
                         .into_iter()
                         .map(|(registry, bag, info)| {
-                            let (hash, orig, packed, clouds, mcap) = format_bag_info(info.as_ref());
-                            [bag.to_string(), registry, hash, orig, packed, clouds, mcap]
+                            let (hash, orig, packed, clouds, mcap, pushed) =
+                                format_bag_info(info.as_ref(), time_display);
+                            [
+                                bag.to_string(),
+                                registry,
+                                hash,
+                                orig,
+                                packed,
+                                clouds,
+                                mcap,
+                                pushed,
+                            ]
                         })
                         .collect();
                     let headers = [
-                        "BAG", "REGISTRY", "HASH", "ORIGINAL", "PACKED", "CLOUDS", "MCAP",
+                        "BAG", "REGISTRY", "HASH", "ORIGINAL", "PACKED", "CLOUDS", "MCAP", "PUSHED",
                     ];
                     let mut widths = headers.map(|h| h.len());
                     for row in &rows {
@@ -366,7 +380,7 @@ fn run_parsed(cli: Cli) -> Result<()> {
                             widths[i] = widths[i].max(cell.len());
                         }
                     }
-                    let fmt_row = |cols: &[&str; 7]| {
+                    let fmt_row = |cols: &[&str; 8]| {
                         let mut s = String::new();
                         for (i, col) in cols.iter().enumerate() {
                             if i > 0 {
@@ -746,15 +760,93 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
-fn format_bag_info(info: Option<&BagInfo>) -> (String, String, String, String, String) {
+fn format_pushed_at(pushed_at: Option<u64>, display: TimeDisplay) -> String {
+    let Some(ts) = pushed_at else {
+        return "-".into();
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    if display == TimeDisplay::Absolute {
+        // Format as YYYY-MM-DD using only the timestamp
+        let secs_per_day = 86400u64;
+        let days_since_epoch = ts / secs_per_day;
+        // Compute Gregorian date from days since 1970-01-01
+        let mut y = 1970u32;
+        let mut d = days_since_epoch as u32;
+        loop {
+            let days_in_year =
+                if y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400)) {
+                    366
+                } else {
+                    365
+                };
+            if d < days_in_year {
+                break;
+            }
+            d -= days_in_year;
+            y += 1;
+        }
+        let leap = y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400));
+        let month_days = [
+            31u32,
+            if leap { 29 } else { 28 },
+            31,
+            30,
+            31,
+            30,
+            31,
+            31,
+            30,
+            31,
+            30,
+            31,
+        ];
+        let mut m = 1u32;
+        for md in &month_days {
+            if d < *md {
+                break;
+            }
+            d -= md;
+            m += 1;
+        }
+        return format!("{:04}-{:02}-{:02}", y, m, d + 1);
+    }
+
+    let elapsed = now.saturating_sub(ts);
+    match elapsed {
+        0..=59 => format!("{}s ago", elapsed),
+        60..=3599 => format!("{}m ago", elapsed / 60),
+        3600..=86399 => format!("{}h ago", elapsed / 3600),
+        86400..=604799 => format!("{}d ago", elapsed / 86400),
+        604800..=2591999 => format!("{}w ago", elapsed / 604800),
+        2592000..=31535999 => format!("{}mo ago", elapsed / 2592000),
+        _ => format!("{}y ago", elapsed / 31536000),
+    }
+}
+
+fn format_bag_info(
+    info: Option<&BagInfo>,
+    time_display: TimeDisplay,
+) -> (String, String, String, String, String, String) {
     match info {
-        None => ("-".into(), "-".into(), "-".into(), "-".into(), "-".into()),
+        None => (
+            "-".into(),
+            "-".into(),
+            "-".into(),
+            "-".into(),
+            "-".into(),
+            "-".into(),
+        ),
         Some(i) => (
             i.bundle_hash.clone().unwrap_or_else(|| "-".into()),
             human_bytes(i.original_bytes),
             human_bytes(i.packed_bytes),
             i.pointcloud.clone().unwrap_or_else(|| "-".into()),
             i.mcap_compression.clone().unwrap_or_else(|| "-".into()),
+            format_pushed_at(i.pushed_at, time_display),
         ),
     }
 }
