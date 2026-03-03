@@ -284,6 +284,29 @@ impl SshRegistry {
         pb.finish_and_clear();
         Ok(())
     }
+
+    /// Fetch all MetaFile records from the registry in a single SSH command.
+    ///
+    /// Uses ASCII record separator (0x1e) as delimiter between files —
+    /// it cannot appear in valid JSON text.
+    fn fetch_all_meta(&self) -> Result<Vec<MetaFile>> {
+        let cmd = format!(
+            "find {} -type f -name metadata.json -exec sh -c 'printf \"\\x1e\"; cat \"$1\"' _ {{}} \\;",
+            shell_quote(&self.endpoint.root)
+        );
+        let output = self.run_ssh_capture(&cmd)?;
+        let mut metas = Vec::new();
+        for chunk in output.split('\x1e') {
+            let chunk = chunk.trim();
+            if chunk.is_empty() {
+                continue;
+            }
+            if let Ok(meta) = serde_json::from_str::<MetaFile>(chunk) {
+                metas.push(meta);
+            }
+        }
+        Ok(metas)
+    }
 }
 
 impl RegistryDriver for SshRegistry {
@@ -355,27 +378,32 @@ impl RegistryDriver for SshRegistry {
 
     fn list(&self, filter: &str) -> Result<Vec<BagRef>> {
         let pattern = Pattern::new(filter).or_else(|_| Pattern::new("*"))?;
-        let output = self.run_ssh_capture(&format!(
-            "find {} -type f -name metadata.json",
-            shell_quote(&self.endpoint.root)
-        ))?;
+        Ok(self
+            .fetch_all_meta()?
+            .into_iter()
+            .map(|m| m.bag.without_attachment())
+            .filter(|b: &BagRef| pattern.matches(&b.to_string()))
+            .collect())
+    }
 
-        let mut out = Vec::new();
-        for line in output.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let meta_json = self.run_ssh_capture(&format!("cat {}", shell_quote(line)))?;
-            let meta: MetaFile = serde_json::from_str(&meta_json)
-                .with_context(|| format!("failed to parse metadata at remote path {}", line))?;
-            let bag = meta.bag.without_attachment();
-            if pattern.matches(&bag.to_string()) {
-                out.push(bag);
-            }
-        }
-
-        Ok(out)
+    fn list_with_info(&self, filter: &str) -> Result<Vec<(BagRef, Option<BagInfo>)>> {
+        let pattern = Pattern::new(filter).or_else(|_| Pattern::new("*"))?;
+        Ok(self
+            .fetch_all_meta()?
+            .into_iter()
+            .map(|meta| {
+                let bag = meta.bag.without_attachment();
+                let info = BagInfo {
+                    bundle_hash: meta.bundle_hash,
+                    original_bytes: meta.original_bytes,
+                    packed_bytes: meta.packed_bytes,
+                    pointcloud: meta.pointcloud,
+                    mcap_compression: meta.mcap_compression,
+                };
+                (bag, Some(info))
+            })
+            .filter(|(b, _): &(BagRef, Option<BagInfo>)| pattern.matches(&b.to_string()))
+            .collect())
     }
 
     fn remove(&self, bag: &BagRef) -> Result<()> {

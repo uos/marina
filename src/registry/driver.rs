@@ -56,6 +56,18 @@ pub trait RegistryDriver: Send + Sync {
         Ok(None)
     }
 
+    /// List all matching bags together with their metadata in one operation.
+    /// Drivers that can batch this more efficiently should override the default.
+    fn list_with_info(&self, filter: &str) -> Result<Vec<(BagRef, Option<BagInfo>)>> {
+        let bags = self.list(filter)?;
+        bags.into_iter()
+            .map(|bag| {
+                let info = self.bag_info(&bag).ok().flatten();
+                Ok((bag, info))
+            })
+            .collect()
+    }
+
     fn write_http_index(&self) -> Result<()> {
         Err(anyhow!(
             "http index generation is not supported for this registry type"

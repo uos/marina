@@ -315,12 +315,10 @@ fn run_parsed(cli: Cli) -> Result<()> {
         Commands::List(args) => {
             if args.remote {
                 let all = if let Some(reg) = args.registry.as_deref() {
-                    let hits = marina.search_remote("*", Some(reg))?;
-                    hits.into_iter()
-                        .map(|bag| {
-                            let info = marina.bag_info(reg, &bag);
-                            (reg.to_string(), bag, info)
-                        })
+                    marina
+                        .search_remote_with_info(reg, "*")
+                        .into_iter()
+                        .map(|(bag, info)| (reg.to_string(), bag, info))
                         .collect::<Vec<_>>()
                 } else {
                     marina

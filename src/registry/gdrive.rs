@@ -1004,6 +1004,72 @@ impl RegistryDriver for GDriveRegistry {
         Ok(out)
     }
 
+    fn list_with_info(&self, filter: &str) -> Result<Vec<(BagRef, Option<BagInfo>)>> {
+        let pattern = Pattern::new(filter).or_else(|_| Pattern::new("*"))?;
+
+        // Query metadata files once — each one contains both bag identity and encoding info.
+        let q = format!(
+            "'{}' in parents and trashed = false and name contains '.metadata.json'",
+            self.folder_id
+        );
+        let files = self.query_files(&q)?;
+
+        let mut result: Vec<(BagRef, Option<BagInfo>)> = Vec::new();
+        for file in files {
+            let bytes = match self.download_file_bytes(&file.id) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let meta: MetaFile = match serde_json::from_slice(&bytes) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let bag = meta.bag.without_attachment();
+            if !pattern.matches(&bag.to_string()) {
+                continue;
+            }
+            let info = BagInfo {
+                bundle_hash: meta.bundle_hash,
+                original_bytes: meta.original_bytes,
+                packed_bytes: meta.packed_bytes,
+                pointcloud: meta.pointcloud,
+                mcap_compression: meta.mcap_compression,
+            };
+            result.push((bag, Some(info)));
+        }
+
+        if !result.is_empty() {
+            result.sort_by_key(|(b, _)| b.to_string());
+            result.dedup_by_key(|(b, _)| b.to_string());
+            return Ok(result);
+        }
+
+        // Fall back to public manifest files for old-style public registries.
+        let manifest_query = format!(
+            "'{}' in parents and trashed = false and name contains '.public.json'",
+            self.folder_id
+        );
+        let manifest_files = self.query_files(&manifest_query)?;
+        for file in manifest_files {
+            let bytes = match self.download_file_bytes(&file.id) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let manifest: PublicManifest = match serde_json::from_slice(&bytes) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let bag = manifest.bag.without_attachment();
+            if pattern.matches(&bag.to_string()) {
+                result.push((bag, None));
+            }
+        }
+
+        result.sort_by_key(|(b, _)| b.to_string());
+        result.dedup_by_key(|(b, _)| b.to_string());
+        Ok(result)
+    }
+
     fn remove(&self, bag: &BagRef) -> Result<()> {
         self.delete_by_name(&self.bundle_name(bag))?;
         self.delete_by_name(&self.metadata_name(bag))?;

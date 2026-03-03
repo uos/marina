@@ -550,14 +550,37 @@ impl Marina {
         let mut names: Vec<_> = self.registries.keys().cloned().collect();
         names.sort();
         let mut matches: Vec<(String, BagRef)> = Vec::new();
-        for name in names {
-            if let Some((_cfg, drv)) = self.registries.get(&name)
-                && let Ok(list) = drv.list(&bag_ref.without_attachment().to_string())
-                && list.iter().any(|b| b == &bag_ref.without_attachment())
-            {
-                matches.push((name, bag_ref.without_attachment()));
+        let exact = bag_ref.without_attachment().to_string();
+        std::thread::scope(|s| {
+            let handles: Vec<_> = names
+                .iter()
+                .filter_map(|name| {
+                    self.registries.get(name).map(|(_, drv)| {
+                        let name = name.clone();
+                        let exact = exact.clone();
+                        let bag_ref = bag_ref.without_attachment();
+                        s.spawn(move || {
+                            if drv
+                                .list(&exact)
+                                .ok()
+                                .is_some_and(|list| list.iter().any(|b| b == &bag_ref))
+                            {
+                                Some((name, bag_ref))
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                })
+                .collect();
+
+            for handle in handles {
+                if let Some(hit) = handle.join().ok().flatten() {
+                    matches.push(hit);
+                }
             }
-        }
+        });
+        matches.sort_by_key(|(name, _)| name.clone());
 
         match matches.len() {
             0 => Err(anyhow!(
@@ -683,23 +706,39 @@ impl Marina {
     }
 
     /// Searches all registries and returns tagged hits with registry names.
+    /// Queries all registries concurrently.
     pub fn search_all_remotes(&self, pattern: &str) -> Vec<RemoteBagHit> {
         let mut names = self.registries.keys().cloned().collect::<Vec<_>>();
         names.sort();
-        let mut hits = Vec::new();
 
-        for name in names {
-            if let Some((_, driver)) = self.registries.get(&name)
-                && let Ok(items) = driver.list(pattern)
-            {
-                for bag in items {
-                    hits.push(RemoteBagHit {
-                        registry: name.clone(),
-                        bag,
-                    });
-                }
+        let mut hits: Vec<RemoteBagHit> = Vec::new();
+        std::thread::scope(|s| {
+            let handles: Vec<_> = names
+                .iter()
+                .filter_map(|name| {
+                    self.registries.get(name).map(|(_, driver)| {
+                        let name = name.clone();
+                        let pattern = pattern.to_string();
+                        s.spawn(move || {
+                            driver
+                                .list(&pattern)
+                                .ok()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .map(|bag| RemoteBagHit {
+                                    registry: name.clone(),
+                                    bag,
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                })
+                .collect();
+
+            for handle in handles {
+                hits.extend(handle.join().unwrap_or_default());
             }
-        }
+        });
 
         hits.sort_by(|a, b| {
             a.registry
@@ -717,14 +756,62 @@ impl Marina {
     }
 
     /// List all bags across all registries with their stored metadata.
+    /// Queries all registries concurrently.
     pub fn list_all_remotes_with_info(&self) -> Vec<(RemoteBagHit, Option<BagInfo>)> {
-        self.search_all_remotes("*")
-            .into_iter()
-            .map(|hit| {
-                let info = self.bag_info(&hit.registry, &hit.bag);
-                (hit, info)
-            })
-            .collect()
+        let mut names = self.registries.keys().cloned().collect::<Vec<_>>();
+        names.sort();
+
+        let mut result: Vec<(RemoteBagHit, Option<BagInfo>)> = Vec::new();
+        std::thread::scope(|s| {
+            let handles: Vec<_> = names
+                .iter()
+                .filter_map(|name| {
+                    self.registries.get(name).map(|(_, driver)| {
+                        let name = name.clone();
+                        s.spawn(move || {
+                            driver
+                                .list_with_info("*")
+                                .ok()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .map(|(bag, info)| {
+                                    (
+                                        RemoteBagHit {
+                                            registry: name.clone(),
+                                            bag,
+                                        },
+                                        info,
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                })
+                .collect();
+
+            for handle in handles {
+                result.extend(handle.join().unwrap_or_default());
+            }
+        });
+
+        result.sort_by(|(a, _), (b, _)| {
+            a.registry
+                .cmp(&b.registry)
+                .then_with(|| a.bag.to_string().cmp(&b.bag.to_string()))
+        });
+        result
+    }
+
+    /// List bags in a specific registry with their stored metadata.
+    pub fn search_remote_with_info(
+        &self,
+        registry: &str,
+        pattern: &str,
+    ) -> Vec<(BagRef, Option<BagInfo>)> {
+        self.registries
+            .get(registry)
+            .and_then(|(_, drv)| drv.list_with_info(pattern).ok())
+            .unwrap_or_default()
     }
 }
 
