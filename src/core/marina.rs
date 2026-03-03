@@ -20,6 +20,17 @@ use crate::storage::config::{self, RegistryConfig};
 
 use log::warn;
 
+/// Statistics returned by [`Marina::mirror_registry`].
+#[derive(Debug, Default, Clone)]
+pub struct MirrorStats {
+    /// Bags pushed to target for the first time.
+    pub pushed: u32,
+    /// Bags replaced in target because the source hash changed.
+    pub updated: u32,
+    /// Bags skipped because they were already up to date (or not comparable).
+    pub skipped: u32,
+}
+
 pub fn connection_warning(name: &str, uri: &str, driver: &dyn RegistryDriver) -> Option<String> {
     if let Err(e) = driver.check_connection() {
         Some(format!(
@@ -800,6 +811,106 @@ impl Marina {
                 .then_with(|| a.bag.to_string().cmp(&b.bag.to_string()))
         });
         result
+    }
+
+    /// Mirror all bags from `source` registry into `target` registry.
+    ///
+    /// - Bags absent from target are pushed.
+    /// - Bags present in both with matching hashes are skipped.
+    /// - Bags present in both with different hashes are replaced.
+    /// - Missing metadata or hash on either side is treated as an error.
+    pub fn mirror_registry(
+        &self,
+        source_name: &str,
+        target_name: &str,
+        progress: &mut ProgressReporter<'_>,
+    ) -> Result<MirrorStats> {
+        let (_, source_drv) = self
+            .registries
+            .get(source_name)
+            .ok_or_else(|| anyhow!("source registry '{}' not found", source_name))?;
+        let (_, target_drv) = self
+            .registries
+            .get(target_name)
+            .ok_or_else(|| anyhow!("target registry '{}' not found", target_name))?;
+
+        progress.emit(
+            "mirror",
+            format!("listing source registry '{}'", source_name),
+        );
+        let source_items = source_drv.list_with_info("*")?;
+
+        progress.emit(
+            "mirror",
+            format!("listing target registry '{}'", target_name),
+        );
+        let target_map: HashMap<String, String> = target_drv
+            .list_with_info("*")?
+            .into_iter()
+            .map(|(bag, info)| {
+                let hash = info
+                    .and_then(|i| i.bundle_hash)
+                    .ok_or_else(|| anyhow!("target bag '{}' has no hash", bag))?;
+                Ok((bag.to_string(), hash))
+            })
+            .collect::<Result<_>>()?;
+
+        let mut stats = MirrorStats::default();
+
+        for (bag, source_info) in source_items {
+            let source_info =
+                source_info.ok_or_else(|| anyhow!("source bag '{}' has no metadata", bag))?;
+            let source_hash = source_info
+                .bundle_hash
+                .ok_or_else(|| anyhow!("source bag '{}' has no hash", bag))?;
+            let bag_key = bag.to_string();
+
+            if let Some(target_hash) = target_map.get(&bag_key) {
+                if *target_hash == source_hash {
+                    progress.emit("mirror", format!("skip {} (up to date)", bag));
+                    stats.skipped += 1;
+                    continue;
+                }
+                progress.emit("mirror", format!("update {} (hash changed)", bag));
+            } else {
+                progress.emit("mirror", format!("push {} (not in target)", bag));
+            }
+
+            let tmp_dir = tempfile::tempdir().context("failed to create temp dir for mirror")?;
+            let tmp_bundle = tmp_dir.path().join("bundle.marina");
+
+            progress.emit(
+                "mirror",
+                format!("downloading {} from '{}'", bag, source_name),
+            );
+            source_drv
+                .pull(&bag, &tmp_bundle)
+                .with_context(|| format!("failed to pull '{}' from '{}'", bag, source_name))?;
+
+            let bundle_hash = compute_bundle_hash(&tmp_bundle)?;
+            let packed_bytes = fs::metadata(&tmp_bundle)?.len();
+
+            let push_meta = PushMeta {
+                original_bytes: source_info.original_bytes,
+                packed_bytes,
+                bundle_hash,
+                pointcloud: source_info.pointcloud.unwrap_or_default(),
+                mcap_compression: source_info.mcap_compression.unwrap_or_default(),
+            };
+
+            progress.emit("mirror", format!("uploading {} to '{}'", bag, target_name));
+            target_drv
+                .push(target_name, &bag, &tmp_bundle, &push_meta)
+                .with_context(|| format!("failed to push '{}' to '{}'", bag, target_name))?;
+
+            if target_map.contains_key(&bag_key) {
+                stats.updated += 1;
+            } else {
+                stats.pushed += 1;
+            }
+        }
+
+        Ok(stats)
     }
 
     /// List bags in a specific registry with their stored metadata.

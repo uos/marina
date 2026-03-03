@@ -69,6 +69,16 @@ enum RegistrySub {
     Rm(RemoveRegistryArgs),
     /// Authenticate a gdrive registry via browser OAuth flow
     Auth(AuthRegistryArgs),
+    /// Mirror all bags from one registry into another
+    Mirror(MirrorRegistryArgs),
+}
+
+#[derive(Args)]
+struct MirrorRegistryArgs {
+    /// Source registry name
+    source: String,
+    /// Target registry name
+    target: String,
 }
 
 #[derive(Args)]
@@ -293,6 +303,16 @@ fn run_parsed(cli: Cli) -> Result<()> {
                 let (client_id, client_secret) =
                     gdrive_auth::resolve_client_credentials(args.client_id, args.client_secret)?;
                 gdrive_auth::run_oauth_flow(&args.name, &client_id, &client_secret)?;
+            }
+            RegistrySub::Mirror(args) => {
+                let mut out = std::io::stdout();
+                let mut sink = WriterProgress::new(&mut out);
+                let mut progress = ProgressReporter::new(&mut sink);
+                let stats = marina.mirror_registry(&args.source, &args.target, &mut progress)?;
+                println!(
+                    "mirror complete: {} pushed, {} updated, {} skipped",
+                    stats.pushed, stats.updated, stats.skipped
+                );
             }
             RegistrySub::Rm(args) => {
                 let removed = marina.remove_registry(&args.name, args.delete_data)?;

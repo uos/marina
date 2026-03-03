@@ -117,6 +117,7 @@ pub fn load_registries() -> Result<RegistryFile> {
     let path = registry_file_path()?;
     if !path.exists() {
         let mut base = RegistryFile::default();
+        #[cfg(feature = "osnabotics-default-registry")]
         base.registry.push(default_registry());
         return Ok(base);
     }
