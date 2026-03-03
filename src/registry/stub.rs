@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::{Result, anyhow};
 
 use crate::model::bag_ref::BagRef;
-use crate::registry::driver::{RegistryDriver, RemoteDescriptor};
+use crate::registry::driver::{PushMeta, RegistryDriver, RemoteDescriptor};
 
 pub struct StubRegistry {
     kind: String,
@@ -38,8 +38,7 @@ impl RegistryDriver for StubRegistry {
         _registry_name: &str,
         _bag: &BagRef,
         _packed_file: &Path,
-        _original_bytes: u64,
-        _packed_bytes: u64,
+        _meta: &PushMeta,
     ) -> Result<()> {
         Err(self.unsupported())
     }

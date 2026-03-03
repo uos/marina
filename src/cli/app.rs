@@ -8,6 +8,8 @@ use crate::io::mcap_transform::{McapChunkCompression, PointCloudCompressionMode}
 use crate::io::pack::ArchiveCompression;
 use crate::model::bag_ref::BagRef;
 use crate::progress::{ProgressReporter, WriterProgress};
+use crate::registry::driver::BagInfo;
+use crate::registry::gdrive_auth;
 use crate::storage::config::{
     self, ConfigArchiveCompression, ConfigMcapCompression, ConfigPointcloudMode, RegistryConfig,
 };
@@ -16,6 +18,9 @@ use crate::storage::config::{
 #[command(name = "marina")]
 #[command(about = "Dataset-style ROS bag manager for MCAP bags")]
 struct Cli {
+    /// Auto-accept the first match instead of prompting when multiple registries contain the same bag
+    #[arg(short = 'y', long = "yes", global = true)]
+    yes: bool,
     #[command(subcommand)]
     cmd: Commands,
 }
@@ -37,7 +42,14 @@ enum Commands {
 }
 
 #[derive(Args)]
-struct LocalListArgs {}
+struct LocalListArgs {
+    /// List bags available in all remote registries instead of the local cache
+    #[arg(long)]
+    remote: bool,
+    /// Filter to a specific registry (only with --remote)
+    #[arg(long)]
+    registry: Option<String>,
+}
 
 #[derive(Args)]
 struct SearchArgs {
@@ -52,6 +64,8 @@ enum RegistrySub {
     #[command(alias = "ls")]
     List,
     Rm(RemoveRegistryArgs),
+    /// Authenticate a gdrive registry via browser OAuth flow
+    Auth(AuthRegistryArgs),
 }
 
 #[derive(Args)]
@@ -76,6 +90,18 @@ struct RemoveRegistryArgs {
     name: String,
     #[arg(long)]
     delete_data: bool,
+}
+
+#[derive(Args)]
+struct AuthRegistryArgs {
+    /// Name of the registry to authenticate
+    name: String,
+    /// OAuth client ID (or set MARINA_GDRIVE_CLIENT_ID env var)
+    #[arg(long)]
+    client_id: Option<String>,
+    /// OAuth client secret (or set MARINA_GDRIVE_CLIENT_SECRET env var)
+    #[arg(long)]
+    client_secret: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -176,7 +202,35 @@ pub fn run_with_args(args: Vec<String>) -> Result<()> {
     run_parsed(cli)
 }
 
+/// Prompt the user to pick one registry from a list, or auto-accept the first if `yes` is set.
+/// `items` is a list of `(registry_name, display_label)` pairs.
+fn pick_registry(prompt: &str, items: &[(String, String)], yes: bool) -> Result<String> {
+    if yes || items.len() == 1 {
+        return Ok(items[0].0.clone());
+    }
+    eprintln!("{}:", prompt);
+    for (i, (name, label)) in items.iter().enumerate() {
+        eprintln!("  [{}] {}  ({})", i + 1, label, name);
+    }
+    eprint!("Select [1]: ");
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let input = input.trim();
+    let idx: usize = if input.is_empty() {
+        1
+    } else {
+        input
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid selection"))?
+    };
+    if idx == 0 || idx > items.len() {
+        return Err(anyhow::anyhow!("selection out of range"));
+    }
+    Ok(items[idx - 1].0.clone())
+}
+
 fn run_parsed(cli: Cli) -> Result<()> {
+    let yes = cli.yes;
     let compression = config::load_compression_config()?;
     let mut marina = Marina::load()?;
 
@@ -219,6 +273,24 @@ fn run_parsed(cli: Cli) -> Result<()> {
                     }
                 }
             }
+            RegistrySub::Auth(args) => {
+                let cfg = marina
+                    .list_registry_configs()
+                    .into_iter()
+                    .find(|c| c.name == args.name)
+                    .ok_or_else(|| anyhow::anyhow!("registry '{}' not found", args.name))?
+                    .clone();
+                if cfg.kind != "gdrive" {
+                    return Err(anyhow::anyhow!(
+                        "registry '{}' is kind '{}', only gdrive registries support OAuth auth",
+                        args.name,
+                        cfg.kind
+                    ));
+                }
+                let (client_id, client_secret) =
+                    gdrive_auth::resolve_client_credentials(args.client_id, args.client_secret)?;
+                gdrive_auth::run_oauth_flow(&args.name, &client_id, &client_secret)?;
+            }
             RegistrySub::Rm(args) => {
                 let removed = marina.remove_registry(&args.name, args.delete_data)?;
                 println!("removed registry '{}' ({})", removed.name, removed.kind);
@@ -237,19 +309,58 @@ fn run_parsed(cli: Cli) -> Result<()> {
                 }
             }
         },
-        Commands::List(_args) => {
-            let items = marina.list_cached_bags();
-            if items.is_empty() {
-                println!("no local bagfiles cached");
-            } else {
-                for item in items {
-                    println!("{}", item.bag);
-                    println!("  path: {}", item.local_dir.display());
+        Commands::List(args) => {
+            if args.remote {
+                let all = if let Some(reg) = args.registry.as_deref() {
+                    let hits = marina.search_remote("*", Some(reg))?;
+                    hits.into_iter()
+                        .map(|bag| {
+                            let info = marina.bag_info(reg, &bag);
+                            (reg.to_string(), bag, info)
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    marina
+                        .list_all_remotes_with_info()
+                        .into_iter()
+                        .map(|(hit, info)| (hit.registry, hit.bag, info))
+                        .collect()
+                };
+                if all.is_empty() {
+                    println!("no remote bags found");
+                } else {
                     println!(
-                        "  size: {} -> {}",
-                        human_bytes(item.original_bytes),
-                        human_bytes(item.packed_bytes)
+                        "{:<40} {:<16} {:<14} {:<12} {:<12} {:<10} MCAP",
+                        "BAG", "REGISTRY", "HASH", "ORIGINAL", "PACKED", "CLOUDS"
                     );
+                    for (registry, bag, info) in all {
+                        let (hash, orig, packed, clouds, mcap) = format_bag_info(info.as_ref());
+                        println!(
+                            "{:<40} {:<16} {:<14} {:<12} {:<12} {:<10} {}",
+                            bag.to_string(),
+                            registry,
+                            hash,
+                            orig,
+                            packed,
+                            clouds,
+                            mcap,
+                        );
+                    }
+                }
+            } else {
+                let items = marina.list_cached_bags();
+                if items.is_empty() {
+                    println!("no local bagfiles cached");
+                } else {
+                    for item in items {
+                        println!("{}", item.bag);
+                        println!("  path: {}", item.local_dir.display());
+                        println!(
+                            "  size: {} -> {}",
+                            human_bytes(item.original_bytes),
+                            human_bytes(item.packed_bytes)
+                        );
+                    }
                 }
             }
         }
@@ -275,6 +386,25 @@ fn run_parsed(cli: Cli) -> Result<()> {
             }
         }
         Commands::Push(args) => {
+            let registry = match args.registry.clone() {
+                Some(r) => Some(r),
+                None => {
+                    let cfgs = marina.list_registry_configs();
+                    if cfgs.len() > 1 {
+                        let items: Vec<(String, String)> = cfgs
+                            .iter()
+                            .map(|c| (c.name.clone(), format!("{} {}", c.kind, c.uri)))
+                            .collect();
+                        Some(pick_registry(
+                            "Multiple registries configured, pick one to push to",
+                            &items,
+                            yes,
+                        )?)
+                    } else {
+                        None
+                    }
+                }
+            };
             let push_options = PushOptions {
                 pointcloud_mode: args
                     .pointcloud_mode
@@ -305,7 +435,7 @@ fn run_parsed(cli: Cli) -> Result<()> {
                 marina.push_with_progress_and_options(
                     &args.bag,
                     &args.source,
-                    args.registry.as_deref(),
+                    registry.as_deref(),
                     push_options,
                     &mut progress,
                 )?;
@@ -314,7 +444,7 @@ fn run_parsed(cli: Cli) -> Result<()> {
                 marina.push_with_progress_and_options(
                     &args.bag,
                     &args.source,
-                    args.registry.as_deref(),
+                    registry.as_deref(),
                     push_options,
                     &mut progress,
                 )?;
@@ -338,6 +468,37 @@ fn run_parsed(cli: Cli) -> Result<()> {
                         config_mcap_compression_to_core(compression.unpacked_mcap_compression)
                     }),
             };
+            // Resolve which registry to use, disambiguating if needed
+            let registry: Option<String> = match args.registry.clone() {
+                Some(r) => Some(r),
+                None => {
+                    let hits = marina.search_all_remotes(&args.target);
+                    // Deduplicate by registry, keeping one entry per registry
+                    let mut seen_registries = std::collections::HashSet::new();
+                    let mut unique: Vec<(String, String)> = hits
+                        .iter()
+                        .filter(|h| seen_registries.insert(h.registry.clone()))
+                        .map(|h| {
+                            let hash = marina
+                                .bag_info(&h.registry, &h.bag)
+                                .and_then(|i| i.bundle_hash)
+                                .map(|hx| format!("hash:{hx}"))
+                                .unwrap_or_default();
+                            (h.registry.clone(), format!("{} {}", h.registry, hash))
+                        })
+                        .collect();
+                    unique.sort_by(|a, b| a.0.cmp(&b.0));
+                    if unique.len() > 1 {
+                        Some(pick_registry(
+                            &format!("'{}' found in multiple registries, pick one", args.target),
+                            &unique,
+                            yes,
+                        )?)
+                    } else {
+                        None
+                    }
+                }
+            };
             if args.target.contains('*') {
                 let pulled = if !args.no_progress {
                     let mut stdout = std::io::stdout();
@@ -345,7 +506,7 @@ fn run_parsed(cli: Cli) -> Result<()> {
                     let mut progress = ProgressReporter::new(&mut sink);
                     marina.pull_pattern_with_progress_and_options(
                         &args.target,
-                        args.registry.as_deref(),
+                        registry.as_deref(),
                         pull_options,
                         &mut progress,
                     )?
@@ -353,7 +514,7 @@ fn run_parsed(cli: Cli) -> Result<()> {
                     let mut progress = ProgressReporter::silent();
                     marina.pull_pattern_with_progress_and_options(
                         &args.target,
-                        args.registry.as_deref(),
+                        registry.as_deref(),
                         pull_options,
                         &mut progress,
                     )?
@@ -370,7 +531,7 @@ fn run_parsed(cli: Cli) -> Result<()> {
                     let mut progress = ProgressReporter::new(&mut sink);
                     marina.pull_exact_with_progress_and_options(
                         &bag,
-                        args.registry.as_deref(),
+                        registry.as_deref(),
                         pull_options,
                         &mut progress,
                     )?
@@ -378,7 +539,7 @@ fn run_parsed(cli: Cli) -> Result<()> {
                     let mut progress = ProgressReporter::silent();
                     marina.pull_exact_with_progress_and_options(
                         &bag,
-                        args.registry.as_deref(),
+                        registry.as_deref(),
                         pull_options,
                         &mut progress,
                     )?
@@ -402,6 +563,17 @@ fn run_parsed(cli: Cli) -> Result<()> {
                         "{} available in registry '{}'; run: marina pull {} --registry {}",
                         bag, registry, bag, registry
                     );
+                }
+            }
+            ResolveResult::Ambiguous { candidates } => {
+                println!("'{}' found in multiple registries:", args.target);
+                for (registry, bag) in &candidates {
+                    let hash = marina
+                        .bag_info(registry, bag)
+                        .and_then(|i| i.bundle_hash)
+                        .map(|h| format!("  [hash:{h}]"))
+                        .unwrap_or_default();
+                    println!("  marina pull {} --registry {}{}", bag, registry, hash);
                 }
             }
         },
@@ -507,11 +679,7 @@ fn print_size_summary(title: &str, original_bytes: u64, packed_bytes: u64) {
     } else {
         0.0
     };
-    let saved = if original_bytes > packed_bytes {
-        original_bytes - packed_bytes
-    } else {
-        0
-    };
+    let saved = original_bytes.saturating_sub(packed_bytes);
     println!("{}", title);
     println!("  original: {}", human_bytes(original_bytes));
     println!(
@@ -534,6 +702,19 @@ fn human_bytes(bytes: u64) -> String {
         format!("{} {}", bytes, UNITS[unit])
     } else {
         format!("{:.2} {}", value, UNITS[unit])
+    }
+}
+
+fn format_bag_info(info: Option<&BagInfo>) -> (String, String, String, String, String) {
+    match info {
+        None => ("-".into(), "-".into(), "-".into(), "-".into(), "-".into()),
+        Some(i) => (
+            i.bundle_hash.clone().unwrap_or_else(|| "-".into()),
+            human_bytes(i.original_bytes),
+            human_bytes(i.packed_bytes),
+            i.pointcloud.clone().unwrap_or_else(|| "-".into()),
+            i.mcap_compression.clone().unwrap_or_else(|| "-".into()),
+        ),
     }
 }
 

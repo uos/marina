@@ -4,13 +4,14 @@ use std::net::TcpStream;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
+use dirs;
 use glob::Pattern;
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
 use ssh2::Session;
 
 use crate::model::bag_ref::BagRef;
-use crate::registry::driver::{RegistryDriver, RemoteDescriptor};
+use crate::registry::driver::{BagInfo, PushMeta, RegistryDriver, RemoteDescriptor};
 
 #[derive(Debug, Clone)]
 pub struct SshRegistry {
@@ -31,6 +32,12 @@ struct MetaFile {
     bag: BagRef,
     original_bytes: u64,
     packed_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bundle_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pointcloud: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mcap_compression: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -105,26 +112,45 @@ impl SshRegistry {
                 }
             }
             None => {
-                let mut agent = session.agent().context("failed to initialize ssh agent")?;
-                agent.connect().context("failed to connect ssh agent")?;
-                agent
-                    .list_identities()
-                    .context("failed to list ssh identities")?;
-                let identities = agent
-                    .identities()
-                    .context("failed reading ssh identities")?;
+                // 1. Try ssh-agent
                 let mut authed = false;
-                for identity in identities {
-                    if agent.userauth(&user, &identity).is_ok() {
-                        authed = true;
-                        break;
+                if let Ok(mut agent) = session.agent()
+                    && agent.connect().is_ok()
+                    && agent.list_identities().is_ok()
+                    && let Ok(identities) = agent.identities()
+                {
+                    for identity in identities {
+                        if agent.userauth(&user, &identity).is_ok() {
+                            authed = true;
+                            break;
+                        }
                     }
                 }
+
+                // 2. Try default key files
+                if !authed && let Some(home) = dirs::home_dir() {
+                    let ssh_dir = home.join(".ssh");
+                    for key_name in ["id_ed25519", "id_rsa", "id_ecdsa", "id_dsa"] {
+                        let key_path = ssh_dir.join(key_name);
+                        if key_path.exists()
+                            && session
+                                .userauth_pubkey_file(&user, None, &key_path, None)
+                                .is_ok()
+                        {
+                            authed = true;
+                            break;
+                        }
+                    }
+                }
+
+                // 3. Fall back to interactive password prompt
                 if !authed {
-                    return Err(anyhow!(
-                        "ssh auth failed for user '{}' using ssh-agent; set --auth-env for key/password auth",
-                        user
-                    ));
+                    let password =
+                        rpassword::prompt_password(format!("Password for {}@{}: ", user, host))
+                            .context("failed reading password")?;
+                    session
+                        .userauth_password(&user, &password)
+                        .with_context(|| format!("ssh password auth failed for user '{}'", user))?;
                 }
             }
         }
@@ -266,8 +292,7 @@ impl RegistryDriver for SshRegistry {
         _registry_name: &str,
         bag: &BagRef,
         packed_file: &Path,
-        original_bytes: u64,
-        packed_bytes: u64,
+        meta: &PushMeta,
     ) -> Result<()> {
         let target_dir = self.object_dir(bag);
         self.run_ssh(&format!(
@@ -279,15 +304,31 @@ impl RegistryDriver for SshRegistry {
         self.upload_file_with_progress(packed_file, &self.data_path(bag))?;
 
         let tmp = std::env::temp_dir().join(format!("marina_meta_{}.json", bag.cache_key()));
-        let meta = MetaFile {
+        let meta_file = MetaFile {
             bag: bag.clone().without_attachment(),
-            original_bytes,
-            packed_bytes,
+            original_bytes: meta.original_bytes,
+            packed_bytes: meta.packed_bytes,
+            bundle_hash: Some(meta.bundle_hash.clone()),
+            pointcloud: Some(meta.pointcloud.clone()),
+            mcap_compression: Some(meta.mcap_compression.clone()),
         };
-        fs::write(&tmp, serde_json::to_vec_pretty(&meta)?)?;
+        fs::write(&tmp, serde_json::to_vec_pretty(&meta_file)?)?;
         self.upload_file_with_progress(&tmp, &self.meta_path(bag))?;
         let _ = fs::remove_file(tmp);
         Ok(())
+    }
+
+    fn bag_info(&self, bag: &BagRef) -> Result<Option<BagInfo>> {
+        let meta_text =
+            self.run_ssh_capture(&format!("cat {}", shell_quote(&self.meta_path(bag))))?;
+        let meta: MetaFile = serde_json::from_str(&meta_text)?;
+        Ok(Some(BagInfo {
+            bundle_hash: meta.bundle_hash,
+            original_bytes: meta.original_bytes,
+            packed_bytes: meta.packed_bytes,
+            pointcloud: meta.pointcloud,
+            mcap_compression: meta.mcap_compression,
+        }))
     }
 
     fn pull(&self, bag: &BagRef, out_packed_file: &Path) -> Result<RemoteDescriptor> {
@@ -410,11 +451,15 @@ impl SshEndpoint {
 
 fn parse_authority(authority: &str) -> Result<(String, u16)> {
     if let Some((left, right)) = authority.rsplit_once(':') {
-        if !left.is_empty() && right.chars().all(|c| c.is_ascii_digit()) {
+        if !left.is_empty() && !right.is_empty() && right.chars().all(|c| c.is_ascii_digit()) {
             let port: u16 = right
                 .parse()
                 .with_context(|| format!("invalid ssh port '{}'", right))?;
             return Ok((left.to_string(), port));
+        }
+        // Trailing colon with no port (e.g. "host:/path") — strip the colon
+        if right.is_empty() {
+            return Ok((left.to_string(), 22));
         }
     }
     Ok((authority.to_string(), 22))

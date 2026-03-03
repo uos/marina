@@ -3,12 +3,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
+use sha2::{Digest, Sha256};
 
 use crate::io::mcap_transform::{McapChunkCompression, PointCloudCompressionMode};
 use crate::io::{bag, pack};
 use crate::model::bag_ref::BagRef;
 use crate::progress::ProgressReporter;
-use crate::registry::driver::RegistryDriver;
+use crate::registry::driver::{BagInfo, PushMeta, RegistryDriver};
 use crate::registry::folder::FolderRegistry;
 use crate::registry::gdrive::GDriveRegistry;
 use crate::registry::http::HttpRegistry;
@@ -42,6 +43,8 @@ pub enum ResolveResult {
         bag: BagRef,
         needs_pull: bool,
     },
+    /// Target found in multiple registries; caller must pick one.
+    Ambiguous { candidates: Vec<(String, BagRef)> },
 }
 
 /// Result of removing a registry configuration.
@@ -270,14 +273,14 @@ impl Marina {
         if !required {
             return Ok(());
         }
-        if let Some(var) = &cfg.auth_env {
-            if std::env::var(var).is_err() {
-                return Err(anyhow!(
-                    "registry '{}' requires auth env var '{}'",
-                    cfg.name,
-                    var
-                ));
-            }
+        if let Some(var) = &cfg.auth_env
+            && std::env::var(var).is_err()
+        {
+            return Err(anyhow!(
+                "registry '{}' requires auth env var '{}'",
+                cfg.name,
+                var
+            ));
         }
         Ok(())
     }
@@ -354,12 +357,19 @@ impl Marina {
                 cfg.name, cfg.kind
             ),
         );
+        let bundle_hash = compute_bundle_hash(&packed_file)?;
+        let push_meta = PushMeta {
+            original_bytes: packed_meta.original_bytes,
+            packed_bytes: packed_meta.packed_bytes,
+            bundle_hash,
+            pointcloud: pointcloud_mode_label(options.pointcloud_mode).to_string(),
+            mcap_compression: mcap_compression_label(options.packed_mcap_compression).to_string(),
+        };
         driver.push(
             &cfg.name,
             &bag.without_attachment(),
             &packed_file,
-            packed_meta.original_bytes,
-            packed_meta.packed_bytes,
+            &push_meta,
         )?;
 
         if options.write_http_index {
@@ -537,22 +547,32 @@ impl Marina {
             }
         }
 
-        for (name, (_cfg, drv)) in &self.registries {
-            if let Ok(list) = drv.list(&bag_ref.without_attachment().to_string()) {
-                if list.iter().any(|b| b == &bag_ref.without_attachment()) {
-                    return Ok(ResolveResult::RemoteAvailable {
-                        registry: name.clone(),
-                        bag: bag_ref.without_attachment(),
-                        needs_pull: true,
-                    });
-                }
+        let mut names: Vec<_> = self.registries.keys().cloned().collect();
+        names.sort();
+        let mut matches: Vec<(String, BagRef)> = Vec::new();
+        for name in names {
+            if let Some((_cfg, drv)) = self.registries.get(&name)
+                && let Ok(list) = drv.list(&bag_ref.without_attachment().to_string())
+                && list.iter().any(|b| b == &bag_ref.without_attachment())
+            {
+                matches.push((name, bag_ref.without_attachment()));
             }
         }
 
-        Err(anyhow!(
-            "target '{}' is neither a local mcap bag directory nor known in cache/registries",
-            target
-        ))
+        match matches.len() {
+            0 => Err(anyhow!(
+                "target '{}' is neither a local mcap bag directory nor known in cache/registries",
+                target
+            )),
+            1 => Ok(ResolveResult::RemoteAvailable {
+                registry: matches.remove(0).0,
+                bag: bag_ref.without_attachment(),
+                needs_pull: true,
+            }),
+            _ => Ok(ResolveResult::Ambiguous {
+                candidates: matches,
+            }),
+        }
     }
 
     /// Exports a cached bag (or one attachment) to `out`.
@@ -687,6 +707,61 @@ impl Marina {
                 .then_with(|| a.bag.to_string().cmp(&b.bag.to_string()))
         });
         hits
+    }
+
+    /// Fetch lightweight metadata for a bag in a specific registry.
+    pub fn bag_info(&self, registry: &str, bag: &BagRef) -> Option<BagInfo> {
+        self.registries
+            .get(registry)
+            .and_then(|(_, drv)| drv.bag_info(bag).ok().flatten())
+    }
+
+    /// List all bags across all registries with their stored metadata.
+    pub fn list_all_remotes_with_info(&self) -> Vec<(RemoteBagHit, Option<BagInfo>)> {
+        self.search_all_remotes("*")
+            .into_iter()
+            .map(|hit| {
+                let info = self.bag_info(&hit.registry, &hit.bag);
+                (hit, info)
+            })
+            .collect()
+    }
+}
+
+fn compute_bundle_hash(path: &Path) -> Result<String> {
+    use std::io::Read as _;
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("failed to open bundle for hashing: {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let hash: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+    Ok(hash[..12].to_string())
+}
+
+fn pointcloud_mode_label(mode: PointCloudCompressionMode) -> &'static str {
+    match mode {
+        PointCloudCompressionMode::Lossless => "lossless",
+        PointCloudCompressionMode::Lossy => "lossy",
+        PointCloudCompressionMode::Disabled => "disabled",
+    }
+}
+
+fn mcap_compression_label(c: McapChunkCompression) -> &'static str {
+    match c {
+        McapChunkCompression::None => "none",
+        McapChunkCompression::Zstd => "zstd",
+        McapChunkCompression::Lz4 => "lz4",
     }
 }
 

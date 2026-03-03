@@ -7,6 +7,7 @@ pub const MARINA_RESOLVE_ERROR: i32 = -1;
 pub const MARINA_RESOLVE_LOCAL: i32 = 0;
 pub const MARINA_RESOLVE_CACHED: i32 = 1;
 pub const MARINA_RESOLVE_REMOTE_AVAILABLE: i32 = 2;
+pub const MARINA_RESOLVE_AMBIGUOUS: i32 = 3;
 pub const MARINA_PROGRESS_MODE_SILENT: i32 = 0;
 pub const MARINA_PROGRESS_MODE_STDOUT: i32 = 1;
 
@@ -191,12 +192,27 @@ pub extern "C" fn marina_resolve_detailed(target: *const c_char) -> MarinaResolv
                 "remote bag available; call marina_pull(...) to fetch".to_string(),
             ),
         },
+        Ok(ResolveResult::Ambiguous { mut candidates }) => {
+            candidates.sort_by(|a, b| a.0.cmp(&b.0));
+            let (registry, bag) = candidates.remove(0);
+            MarinaResolveDetailed {
+                kind: MARINA_RESOLVE_AMBIGUOUS,
+                path: std::ptr::null_mut(),
+                bag: cstring_from_string(bag.to_string()),
+                registry: cstring_from_string(registry),
+                message: cstring_from_string(
+                    "bag found in multiple registries; first registry selected".to_string(),
+                ),
+            }
+        }
         Err(e) => detailed_error(format!("resolve failed: {e}")),
     }
 }
 
+/// # Safety
+/// `result` must be a pointer obtained from `marina_resolve_detailed`, or null.
 #[unsafe(no_mangle)]
-pub extern "C" fn marina_free_resolve_detailed(result: *mut MarinaResolveDetailed) {
+pub unsafe extern "C" fn marina_free_resolve_detailed(result: *mut MarinaResolveDetailed) {
     if result.is_null() {
         return;
     }
@@ -244,7 +260,8 @@ pub extern "C" fn marina_resolve(target: *const c_char) -> *mut c_char {
     } else {
         std::ptr::null_mut()
     };
-    marina_free_resolve_detailed(&mut detailed);
+    // SAFETY: detailed was allocated by marina_resolve_detailed above.
+    unsafe { marina_free_resolve_detailed(&mut detailed) };
     out
 }
 
@@ -349,8 +366,10 @@ pub extern "C" fn marina_last_error_message() -> *mut c_char {
     })
 }
 
+/// # Safety
+/// `ptr` must be a pointer obtained from a marina string-returning function, or null.
 #[unsafe(no_mangle)]
-pub extern "C" fn marina_free_string(ptr: *mut c_char) {
+pub unsafe extern "C" fn marina_free_string(ptr: *mut c_char) {
     if ptr.is_null() {
         return;
     }

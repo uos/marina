@@ -11,6 +11,11 @@ fn main() -> anyhow::Result<()> {
         ResolveResult::RemoteAvailable { registry, bag, .. } => {
             println!("remote available: {} in {}", bag, registry);
         }
+        ResolveResult::Ambiguous { candidates } => {
+            for (registry, bag) in candidates {
+                println!("ambiguous: {} in {}", bag, registry);
+            }
+        }
     }
 
     // Pull a concrete bag ref.

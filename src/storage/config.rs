@@ -58,7 +58,7 @@ pub struct CompressionConfig {
 impl Default for CompressionConfig {
     fn default() -> Self {
         Self {
-            pointcloud_mode: ConfigPointcloudMode::Lossy,
+            pointcloud_mode: ConfigPointcloudMode::Lossless,
             pointcloud_accuracy_mm: 1.0,
             packed_mcap_compression: ConfigMcapCompression::Zstd,
             packed_archive_compression: ConfigArchiveCompression::Gzip,

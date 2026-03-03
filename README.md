@@ -1,40 +1,10 @@
 # marina
 
-`marina` is a ROS bag manager to organize, share, and discover ROS bags across storage backends so you can finally stop emailing download links around.
+`marina` is a bagfile manager to organize, share, and discover ROS bags across storage backends so you can finally stop emailing download links around.
 
-- Shared local state:
-  - Config: `~/.config/marina/registries.toml`
-  - Cache: `~/.cache/marina/bags/...`
-  - Catalog: `~/.config/marina/catalog.json`
+## Compression
 
-## MCAP policy
-
-Pushing requires a directory that contains both:
-
-- at least one `.mcap`
-- at least one `metadata.yaml` or `metadata.yml`
-
-Using MCAP is a strong requirement. Convert your legacy bags with [this tutorial](https://mcap.dev/guides/getting-started).
-
-### Converting Old Bags
-
-- https://mcap.dev/guides/getting-started/ros-2
-- https://mcap.dev/guides/cli
-
-## Compression notes
-
-During push, marina rewrites MCAP:
-  - CDR-decodes `sensor_msgs/msg/PointCloud2`
-  - Compresses with `cloudini` (default: `--pointcloud-mode lossy --pointcloud-accuracy-mm 1`)
-  - Supports `--pointcloud-mode lossless` for zero accuracy loss
-  - Supports `--pointcloud-mode off` to skip pointcloud transform
-  - Writes output MCAP chunks with `--packed-mcap-compression` (`zstd` default)
-
-During pull, marina rewrites MCAP back to standard PointCloud2 and writes the local ready MCAP with `--unpacked-mcap-compression` (`zstd` default).
-
-Archive bundling always stays enabled (tar bundle). The outer archive compression is configurable with `--packed-archive-compression` (`gzip` default, `none` optional).
-
-### Compression config in `registries.toml`
+Marina compresses PointCloud2 messages in MCAP bags for more efficient storage and transfer. To avoid unexpected data loss, the default compression mode is `lossless`, which is a reversible encoding that preserves all original data. If you want to achieve higher compression ratios at the cost of some mm accuracy, you can choose `lossy` mode, which we recommend for most use cases.
 
 Compression defaults can be configured globally in `~/.config/marina/registries.toml`:
 
@@ -42,8 +12,8 @@ Compression defaults can be configured globally in `~/.config/marina/registries.
 registry = []
 
 [compression]
-pointcloud_mode = "lossy"                # off | lossy | lossless
-pointcloud_accuracy_mm = 1.0              # float
+pointcloud_mode = "lossless"             # off | lossy | lossless
+pointcloud_accuracy_mm = 1.0             # float
 packed_mcap_compression = "zstd"         # none | zstd | lz4
 packed_archive_compression = "gzip"      # gzip | none
 unpacked_mcap_compression = "zstd"       # none | zstd | lz4
@@ -51,77 +21,73 @@ unpacked_mcap_compression = "zstd"       # none | zstd | lz4
 
 If `push`/`pull` compression flags are provided on the CLI, those values override the config for that command only.
 
-Images are not transformed.
+## Registries
 
-## CLI examples
+We support multiple registries to organize bags across different storage backends. Each registry has a unique name and URI, and may have optional auth config.
 
-Add registries:
+Every installation already comes with a default `osnabotics-public` registry for public read-only access to the shared datasets of our organization. You can add your own registries for private storage and sharing.
+
+If you want to have your bagfile available in the `osnabotics-public` registry, please contact `info@osnabotics.org` and send us a publicly accessible Google Drive folder ID to a registry with the name of your bagfile and a reason why we should host it.
+
+Now we will cover how to setup your own registries for private storage and sharing.
+
+## SSH
+
+Use `ssh-copy-id` to set up passwordless SSH key auth for your registry server. Password auth is supported but we need to ask for the password on every command, so SSH keys are highly recommended for a smooth experience.
+
+```bash
+ssh-copy-id -i ~/.ssh/<key_name>.pub <user>@your-registry-server.org
+```
+
+Alternatively, set key auth env `--auth-env MARINA_SSH_KEY` to the path of your private key instead of relying on SSH agent to pick the correct key.
+
+Then add the registry:
+
+```bash
+marina registry add ssh://<user>@your-registry-server.org:/path/to/registry --name my-ssh
+```
+
+## HTTP
+
+For simple public, read-only HTTP serving, add an `http://` or `https://` registry:
+
+```bash
+marina registry add https://datasets.example.org/marina --name web-main
+```
+
+You won't be able to run `push` or `remove` commands on HTTP registries because we expect them to be pushed to via a separate `ssh` registry with `--write-http-index` for running search/list.
+
+## Google Drive
+
+Google Drive registries support both public and private folders.
+
+If the folder is publicly shared, you can add it without auth. But you won't be able to push or remove bags without auth.
+
+```bash
+marina registry add gdrive://<folder_id> --name public-drive
+```
+
+To push or remove bags, you must authenticate with your Google account. A good default is to create a new folder (e.g. `marina`) in Google Drive, share it publicly for read access, and then authenticate your user so you can push to it.
+
+> [!WARNING]
+> If the data is sensitive, you can also create a private folder but due to our current scope being very restricted, Marina cannot access privately shared folders to your user. On the other hand, you probably shouldn't be uploading sensitive data on Google Drive in the first place. Use a private SSH registry instead.
+
+You will need the folder ID, which is the part after `folders/` in the folder URL. For example, in `https://drive.google.com/drive/folders/10hjoMIyWTOVNOo3zDOfHoSb1S55gO3rJ`, the folder ID is `10hjoMIyWTOVNOo3zDOfHoSb1S55gO3rJ`.
+
+```bash
+marina registry add gdrive://<folder-id> --name myregistry
+marina registry auth myregistry
+```
+
+## Local Directory
+
+For mounted network filesystems (e.g. NFS, SMB) or local disk storage, add a `folder://` registry:
 
 ```bash
 marina registry add folder://./local-reg --name local
-marina registry add ssh://user@registry.uos.de:/srv/marina --name ssh-main --kind ssh --auth-env MARINA_SSH_KEY
-marina registry add gdrive://<folder_id> --name drive-main --kind gdrive --auth-env GOOGLE_DRIVE_TOKEN
-marina registry add https://datasets.example.org/marina --name web-main --kind http
 ```
 
-Auth notes:
-
-- `ssh`:
-  - default: SSH agent auth
-  - with `--auth-env VAR`: `VAR` value can be password or private-key path
-  - optional key passphrase: `${VAR}_PASSPHRASE`
-- `gdrive`:
-  - with `--auth-env VAR`: `VAR` may be
-    - an OAuth access token string, or
-    - a path to a Google service-account JSON key, or
-    - the full service-account JSON content
-  - without `--auth-env`: auth is optional for reads (`search`/`pull`) and required for writes (`push`/`rm`)
-  - without auth and without API key, marina falls back to the public folder endpoint + per-bag `.public.json` manifest uploaded during `push`
-  - `GOOGLE_DRIVE_TOKEN` is also supported as default auth token env
-  - URI format: `gdrive://<drive_folder_id>`
-- `http` (read-only):
-  - supports `pull` (exact bag) and `search/list` when an `index.json` is available
-  - does not support `push` or `rm`
-  - URI format: `http(s)://<base_url>`
-  - default pull layout under base URL:
-    - `/<bag_object_path>/bundle.marina.tar.gz`
-    - `/<bag_object_path>/metadata.json` (optional, but recommended)
-  - optional `index.json` at base URL for search/list:
-    - either `[{ ...entry... }]` or `{ "bags": [{ ...entry... }] }`
-    - entry fields: `bag` (required), optional `bundle_url`, `metadata_url`, `original_bytes`, `packed_bytes`
-
-Find data to pull:
-
-```bash
-marina search "tag*"
-marina search "team/tag:ouster*" --registry drive-main
-```
-
-See local cache:
-
-```bash
-marina list
-```
-
-Push/pull/export/remove:
-
-```bash
-marina push tag ./tag_bag --registry local
-marina pull tag:ouster --registry local
-marina pull "tag:*" --registry local
-marina export "tag[traj.txt]" ./traj.txt
-marina rm tag:ouster
-marina rm tag:ouster --remote --registry local
-
-# Lossless pointcloud packing
-marina push tag ./tag_bag --registry local --pointcloud-mode lossless
-
-# Keep pulled MCAP uncompressed for lower playback CPU
-marina pull tag --registry local --unpacked-mcap-compression none
-
-# After push, write/refresh registry root index.json for http read-only serving
-marina push tag ./tag_bag --registry ssh-main --write-http-index
-```
+Auth is handled by the underlying filesystem permissions, so no additional config is needed.
 
 ## Library usage
 

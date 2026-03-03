@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 use crate::model::bag_ref::BagRef;
-use crate::registry::driver::{RegistryDriver, RemoteDescriptor};
+use crate::registry::driver::{BagInfo, PushMeta, RegistryDriver, RemoteDescriptor};
 
 #[derive(Debug, Clone)]
 pub struct FolderRegistry {
@@ -20,6 +20,12 @@ struct MetaFile {
     bag: BagRef,
     original_bytes: u64,
     packed_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bundle_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pointcloud: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mcap_compression: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -82,8 +88,7 @@ impl RegistryDriver for FolderRegistry {
         _registry_name: &str,
         bag: &BagRef,
         packed_file: &Path,
-        original_bytes: u64,
-        packed_bytes: u64,
+        meta: &PushMeta,
     ) -> Result<()> {
         let target_dir = self.object_dir(bag);
         if target_dir.exists() {
@@ -93,14 +98,30 @@ impl RegistryDriver for FolderRegistry {
 
         fs::copy(packed_file, self.data_path(bag))?;
 
-        let meta = MetaFile {
+        let meta_file = MetaFile {
             bag: bag.clone().without_attachment(),
-            original_bytes,
-            packed_bytes,
+            original_bytes: meta.original_bytes,
+            packed_bytes: meta.packed_bytes,
+            bundle_hash: Some(meta.bundle_hash.clone()),
+            pointcloud: Some(meta.pointcloud.clone()),
+            mcap_compression: Some(meta.mcap_compression.clone()),
         };
-        let meta_text = serde_json::to_string_pretty(&meta)?;
-        fs::write(self.meta_path(bag), meta_text)?;
+        fs::write(
+            self.meta_path(bag),
+            serde_json::to_string_pretty(&meta_file)?,
+        )?;
         Ok(())
+    }
+
+    fn bag_info(&self, bag: &BagRef) -> Result<Option<BagInfo>> {
+        let meta = self.read_meta(bag)?;
+        Ok(Some(BagInfo {
+            bundle_hash: meta.bundle_hash,
+            original_bytes: meta.original_bytes,
+            packed_bytes: meta.packed_bytes,
+            pointcloud: meta.pointcloud,
+            mcap_compression: meta.mcap_compression,
+        }))
     }
 
     fn pull(&self, bag: &BagRef, out_packed_file: &Path) -> Result<RemoteDescriptor> {

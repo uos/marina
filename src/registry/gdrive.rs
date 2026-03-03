@@ -16,7 +16,8 @@ use reqwest::header::{CONTENT_RANGE, LOCATION, RANGE};
 use serde::{Deserialize, Serialize};
 
 use crate::model::bag_ref::BagRef;
-use crate::registry::driver::{RegistryDriver, RemoteDescriptor};
+use crate::registry::driver::{BagInfo, PushMeta, RegistryDriver, RemoteDescriptor};
+use crate::registry::gdrive_auth;
 
 const DRIVE_FILES_API: &str = "https://www.googleapis.com/drive/v3/files";
 const DRIVE_UPLOAD_API: &str = "https://www.googleapis.com/upload/drive/v3/files";
@@ -38,6 +39,12 @@ struct MetaFile {
     bag: BagRef,
     original_bytes: u64,
     packed_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bundle_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pointcloud: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mcap_compression: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,25 +148,29 @@ impl GDriveRegistry {
     }
 
     fn auth_header_optional(&self) -> Result<Option<String>> {
-        let raw = if let Some(var) = &self.token_env {
-            std::env::var(var).ok()
-        } else {
-            std::env::var("GOOGLE_DRIVE_TOKEN").ok()
-        };
-
-        match raw {
-            Some(secret) => Ok(Some(format!(
-                "Bearer {}",
-                self.resolve_access_token(secret.trim())?
-            ))),
-            None => Ok(None),
+        // 1. Stored OAuth token from `marina registry auth`
+        if let Some(token) = gdrive_auth::get_access_token(&self.name)? {
+            return Ok(Some(format!("Bearer {}", token)));
         }
+
+        // 2. Service-account JSON via auth_env (for CI/server environments)
+        if let Some(var) = &self.token_env
+            && let Ok(secret) = std::env::var(var)
+        {
+            return Ok(Some(format!(
+                "Bearer {}",
+                self.service_account_access_token_from_secret(secret.trim())?
+            )));
+        }
+
+        Ok(None)
     }
 
     fn auth_header_required(&self) -> Result<String> {
         self.auth_header_optional()?.ok_or_else(|| {
             anyhow!(
-                "gdrive auth missing: set registry auth_env (token/service-account json) or GOOGLE_DRIVE_TOKEN"
+                "gdrive auth missing: run `marina registry auth {}` or set auth_env to a service-account JSON path",
+                self.name
             )
         })
     }
@@ -168,16 +179,14 @@ impl GDriveRegistry {
         std::env::var("GOOGLE_DRIVE_API_KEY").ok()
     }
 
-    fn resolve_access_token(&self, secret: &str) -> Result<String> {
+    fn service_account_access_token_from_secret(&self, secret: &str) -> Result<String> {
         if secret.is_empty() {
-            return Err(anyhow!("empty gdrive auth secret"));
+            return Err(anyhow!("empty gdrive auth_env value"));
         }
-
-        if let Some(sa) = self.try_load_service_account(secret)? {
-            return self.service_account_access_token(&sa);
-        }
-
-        Ok(secret.to_string())
+        let sa = self.try_load_service_account(secret)?.ok_or_else(|| {
+            anyhow!("auth_env value is not a valid service-account JSON file path or JSON string")
+        })?;
+        self.service_account_access_token(&sa)
     }
 
     fn try_load_service_account(&self, secret: &str) -> Result<Option<ServiceAccountKey>> {
@@ -839,8 +848,7 @@ impl RegistryDriver for GDriveRegistry {
         _registry_name: &str,
         bag: &BagRef,
         packed_file: &Path,
-        original_bytes: u64,
-        packed_bytes: u64,
+        meta: &PushMeta,
     ) -> Result<()> {
         let bundle_name = self.bundle_name(bag);
         let metadata_name = self.metadata_name(bag);
@@ -850,8 +858,11 @@ impl RegistryDriver for GDriveRegistry {
 
         let metadata = MetaFile {
             bag: bag.clone().without_attachment(),
-            original_bytes,
-            packed_bytes,
+            original_bytes: meta.original_bytes,
+            packed_bytes: meta.packed_bytes,
+            bundle_hash: Some(meta.bundle_hash.clone()),
+            pointcloud: Some(meta.pointcloud.clone()),
+            mcap_compression: Some(meta.mcap_compression.clone()),
         };
         let metadata_bytes = serde_json::to_vec_pretty(&metadata)?;
         let metadata_id =
@@ -859,8 +870,8 @@ impl RegistryDriver for GDriveRegistry {
 
         let manifest = PublicManifest {
             bag: bag.clone().without_attachment(),
-            original_bytes,
-            packed_bytes,
+            original_bytes: meta.original_bytes,
+            packed_bytes: meta.packed_bytes,
             bundle_file_id: bundle_id.clone(),
             metadata_file_id: metadata_id.clone(),
             bundle_url: public_download_url(&bundle_id),
@@ -870,6 +881,23 @@ impl RegistryDriver for GDriveRegistry {
         self.upload_named_bytes(&manifest_name, "application/json", manifest_bytes)?;
 
         Ok(())
+    }
+
+    fn bag_info(&self, bag: &BagRef) -> Result<Option<BagInfo>> {
+        let metadata_name = self.metadata_name(bag);
+        let file = match self.find_single_by_name(&metadata_name) {
+            Ok(f) => f,
+            Err(_) => return Ok(None),
+        };
+        let bytes = self.download_file_bytes(&file.id)?;
+        let meta: MetaFile = serde_json::from_slice(&bytes)?;
+        Ok(Some(BagInfo {
+            bundle_hash: meta.bundle_hash,
+            original_bytes: meta.original_bytes,
+            packed_bytes: meta.packed_bytes,
+            pointcloud: meta.pointcloud,
+            mcap_compression: meta.mcap_compression,
+        }))
     }
 
     fn pull(&self, bag: &BagRef, out_packed_file: &Path) -> Result<RemoteDescriptor> {
