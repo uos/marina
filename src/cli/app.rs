@@ -17,6 +17,7 @@ use crate::storage::config::{
 #[derive(Parser)]
 #[command(name = "marina")]
 #[command(about = "Dataset-style ROS bag manager for MCAP bags")]
+#[command(version)]
 struct Cli {
     /// Auto-accept the first match instead of prompting when multiple registries contain the same bag
     #[arg(short = 'y', long = "yes", global = true)]
@@ -39,6 +40,8 @@ enum Commands {
     Clean(CleanArgs),
     Complete(CompleteArgs),
     Completions(CompletionsArgs),
+    /// Print the current version
+    Version,
 }
 
 #[derive(Args)]
@@ -607,6 +610,9 @@ fn run_parsed(cli: Cli) -> Result<()> {
         Commands::Completions(args) => {
             let mut cmd = Cli::command();
             clap_complete::generate(args.shell, &mut cmd, "marina", &mut std::io::stdout());
+        }
+        Commands::Version => {
+            println!("{}", env!("CARGO_PKG_VERSION"));
         }
     }
 
