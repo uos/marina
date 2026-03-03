@@ -92,30 +92,20 @@ fn read_summary_from_file(file: &mut File) -> Result<Summary> {
         .ok_or_else(|| anyhow!("mcap file has no summary; indexed streaming requires summary"))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum McapChunkCompression {
     None,
+    #[default]
     Zstd,
     Lz4,
 }
 
-impl Default for McapChunkCompression {
-    fn default() -> Self {
-        Self::Zstd
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PointCloudCompressionMode {
     Disabled,
+    #[default]
     Lossy,
     Lossless,
-}
-
-impl Default for PointCloudCompressionMode {
-    fn default() -> Self {
-        Self::Lossy
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -233,7 +223,7 @@ pub fn compress_mcap_for_push_with_progress(
                 }
                 if !bar_visible
                     && (loaded_chunks == 1
-                        || loaded_chunks % CHUNK_PROGRESS_EVERY == 0
+                        || loaded_chunks.is_multiple_of(CHUNK_PROGRESS_EVERY)
                         || loaded_chunks == total_chunks)
                 {
                     emit_chunk_progress(progress, "pack", loaded_chunks, total_chunks);
@@ -419,7 +409,7 @@ pub fn decompress_mcap_after_pull_with_progress(
                 }
                 if !bar_visible
                     && (loaded_chunks == 1
-                        || loaded_chunks % CHUNK_PROGRESS_EVERY == 0
+                        || loaded_chunks.is_multiple_of(CHUNK_PROGRESS_EVERY)
                         || loaded_chunks == total_chunks)
                 {
                     emit_chunk_progress(progress, "unpack", loaded_chunks, total_chunks);

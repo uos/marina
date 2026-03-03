@@ -3,7 +3,7 @@ use std::env;
 
 use marina::core::marina::connection_warning;
 use marina::model::bag_ref::BagRef;
-use marina::registry::driver::RegistryDriver;
+use marina::registry::driver::{PushMeta, RegistryDriver};
 use marina::storage::config;
 use tempfile::tempdir;
 
@@ -15,8 +15,7 @@ impl RegistryDriver for FailingDriver {
         _registry_name: &str,
         _bag: &BagRef,
         _packed_file: &std::path::Path,
-        _original_bytes: u64,
-        _packed_bytes: u64,
+        _meta: &PushMeta,
     ) -> Result<()> {
         Err(anyhow::anyhow!("unexpected"))
     }

@@ -119,14 +119,14 @@ fn append_staging_bundle<W: Write>(
         }
 
         packed_files += 1;
-        if !pb.is_hidden() {
-            if total_bytes == 0 {
-                pb.tick();
-            }
+        if !pb.is_hidden() && total_bytes == 0 {
+            pb.tick();
         }
 
         if pb.is_hidden()
-            && (packed_files == 1 || packed_files % 512 == 0 || packed_files == total_files)
+            && (packed_files == 1
+                || packed_files.is_multiple_of(512)
+                || packed_files == total_files)
         {
             progress.emit(
                 "pack",
