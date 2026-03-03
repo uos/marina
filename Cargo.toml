@@ -2,6 +2,7 @@
 name = "marina"
 version = "0.0.1"
 edition = "2024"
+rust-version = "1.85"
 
 [lib]
 name = "marina"
@@ -47,3 +48,9 @@ env_logger = "0.10"
 
 [dependencies.tempfile]
 version = "3.5"
+
+[lints.clippy]
+manual_is_multiple_of = "allow"
+
+[profile.colcon]
+inherits = "release"

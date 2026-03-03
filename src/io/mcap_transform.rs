@@ -223,7 +223,7 @@ pub fn compress_mcap_for_push_with_progress(
                 }
                 if !bar_visible
                     && (loaded_chunks == 1
-                        || loaded_chunks.is_multiple_of(CHUNK_PROGRESS_EVERY)
+                        || loaded_chunks % CHUNK_PROGRESS_EVERY == 0
                         || loaded_chunks == total_chunks)
                 {
                     emit_chunk_progress(progress, "pack", loaded_chunks, total_chunks);
@@ -409,7 +409,7 @@ pub fn decompress_mcap_after_pull_with_progress(
                 }
                 if !bar_visible
                     && (loaded_chunks == 1
-                        || loaded_chunks.is_multiple_of(CHUNK_PROGRESS_EVERY)
+                        || loaded_chunks % CHUNK_PROGRESS_EVERY == 0
                         || loaded_chunks == total_chunks)
                 {
                     emit_chunk_progress(progress, "unpack", loaded_chunks, total_chunks);

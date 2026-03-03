@@ -284,14 +284,14 @@ impl Marina {
         if !required {
             return Ok(());
         }
-        if let Some(var) = &cfg.auth_env
-            && std::env::var(var).is_err()
-        {
-            return Err(anyhow!(
-                "registry '{}' requires auth env var '{}'",
-                cfg.name,
-                var
-            ));
+        if let Some(var) = &cfg.auth_env {
+            if std::env::var(var).is_err() {
+                return Err(anyhow!(
+                    "registry '{}' requires auth env var '{}'",
+                    cfg.name,
+                    var
+                ));
+            }
         }
         Ok(())
     }

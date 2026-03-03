@@ -116,31 +116,33 @@ impl SshRegistry {
             None => {
                 // 1. Try ssh-agent
                 let mut authed = false;
-                if let Ok(mut agent) = session.agent()
-                    && agent.connect().is_ok()
-                    && agent.list_identities().is_ok()
-                    && let Ok(identities) = agent.identities()
-                {
-                    for identity in identities {
-                        if agent.userauth(&user, &identity).is_ok() {
-                            authed = true;
-                            break;
+                if let Ok(mut agent) = session.agent() {
+                    if agent.connect().is_ok() && agent.list_identities().is_ok() {
+                        if let Ok(identities) = agent.identities() {
+                            for identity in identities {
+                                if agent.userauth(&user, &identity).is_ok() {
+                                    authed = true;
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
 
                 // 2. Try default key files
-                if !authed && let Some(home) = dirs::home_dir() {
-                    let ssh_dir = home.join(".ssh");
-                    for key_name in ["id_ed25519", "id_rsa", "id_ecdsa", "id_dsa"] {
-                        let key_path = ssh_dir.join(key_name);
-                        if key_path.exists()
-                            && session
-                                .userauth_pubkey_file(&user, None, &key_path, None)
-                                .is_ok()
-                        {
-                            authed = true;
-                            break;
+                if !authed {
+                    if let Some(home) = dirs::home_dir() {
+                        let ssh_dir = home.join(".ssh");
+                        for key_name in ["id_ed25519", "id_rsa", "id_ecdsa", "id_dsa"] {
+                            let key_path = ssh_dir.join(key_name);
+                            if key_path.exists()
+                                && session
+                                    .userauth_pubkey_file(&user, None, &key_path, None)
+                                    .is_ok()
+                            {
+                                authed = true;
+                                break;
+                            }
                         }
                     }
                 }

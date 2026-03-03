@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>marina</name>
+  <version>0.0.1</version>
+  <description>ROS bag management CLI</description>
+  <maintainer email="stelzo@steado.de">Christopher Sieh</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <build_depend>cargo</build_depend>
+  <build_depend>python3-catkin-pkg-modules</build_depend>
+
+  <!--<exec_depend>marina</exec_depend>-->
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

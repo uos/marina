@@ -156,13 +156,13 @@ impl GDriveRegistry {
         }
 
         // 2. Service-account JSON via auth_env (for CI/server environments)
-        if let Some(var) = &self.token_env
-            && let Ok(secret) = std::env::var(var)
-        {
-            return Ok(Some(format!(
-                "Bearer {}",
-                self.service_account_access_token_from_secret(secret.trim())?
-            )));
+        if let Some(var) = &self.token_env {
+            if let Ok(secret) = std::env::var(var) {
+                return Ok(Some(format!(
+                    "Bearer {}",
+                    self.service_account_access_token_from_secret(secret.trim())?
+                )));
+            }
         }
 
         Ok(None)

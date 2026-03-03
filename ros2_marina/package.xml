@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>ros2_marina</name>
+  <version>0.0.1</version>
+  <description>ROS2 CLI extension adding marina bag management verbs to ros2 bag</description>
+  <maintainer email="todo@example.com">maintainer</maintainer>
+  <license>MIT</license>
+
+  <depend>ros2bag</depend>
+  <depend>ros2cli</depend>
+  <exec_depend>marina</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
