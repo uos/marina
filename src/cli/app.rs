@@ -1,7 +1,10 @@
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::{io::IsTerminal, io::Write};
 
 use anyhow::Result;
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use log::warn;
 
 use crate::core::{Marina, PullOptions, PushOptions, ResolveResult};
 use crate::io::mcap_transform::{McapChunkCompression, PointCloudCompressionMode};
@@ -17,10 +20,9 @@ use crate::storage::config::{
 
 #[derive(Parser)]
 #[command(name = "marina")]
-#[command(about = "Dataset-style ROS bag manager for MCAP bags")]
+#[command(about = "Dataset manager with first-class ROS bag support")]
 #[command(version)]
 struct Cli {
-    /// Auto-accept the first match instead of prompting when multiple registries contain the same bag
     #[arg(short = 'y', long = "yes", global = true)]
     yes: bool,
     #[command(subcommand)]
@@ -47,7 +49,7 @@ enum Commands {
 
 #[derive(Args)]
 struct LocalListArgs {
-    /// List bags available in all remote registries instead of the local cache
+    /// List datasets available in all remote registries instead of the local cache
     #[arg(long)]
     remote: bool,
     /// Filter to a specific registry (only with --remote)
@@ -70,7 +72,7 @@ enum RegistrySub {
     Rm(RemoveRegistryArgs),
     /// Authenticate a gdrive registry via browser OAuth flow
     Auth(AuthRegistryArgs),
-    /// Mirror all bags from one registry into another
+    /// Mirror all datasets from one registry into another
     Mirror(MirrorRegistryArgs),
 }
 
@@ -110,6 +112,9 @@ struct RemoveRegistryArgs {
 struct AuthRegistryArgs {
     /// Name of the registry to authenticate
     name: String,
+    /// Show persisted OAuth status for this registry
+    #[arg(long)]
+    status: bool,
     /// OAuth client ID (or set MARINA_GDRIVE_CLIENT_ID env var)
     #[arg(long)]
     client_id: Option<String>,
@@ -140,6 +145,7 @@ enum CliArchiveCompression {
 
 #[derive(Args)]
 struct PushArgs {
+    #[arg(value_name = "DATASET")]
     bag: BagRef,
     source: PathBuf,
     #[arg(long)]
@@ -154,12 +160,16 @@ struct PushArgs {
     packed_archive_compression: Option<CliArchiveCompression>,
     #[arg(long)]
     write_http_index: bool,
+    /// After push, keep the ready cache and optionally delete the original source to complete a move
+    #[arg(long)]
+    move_to_cache: bool,
     #[arg(long)]
     no_progress: bool,
 }
 
 #[derive(Args)]
 struct PullArgs {
+    #[arg(value_name = "DATASET")]
     target: String,
     #[arg(long)]
     registry: Option<String>,
@@ -171,17 +181,20 @@ struct PullArgs {
 
 #[derive(Args)]
 struct ResolveArgs {
+    #[arg(value_name = "DATASET")]
     target: String,
 }
 
 #[derive(Args)]
 struct ExportArgs {
+    #[arg(value_name = "DATASET")]
     target: BagRef,
     output: PathBuf,
 }
 
 #[derive(Args)]
 struct RemoveArgs {
+    #[arg(value_name = "DATASET")]
     bag: BagRef,
     #[arg(long)]
     remote: bool,
@@ -191,6 +204,7 @@ struct RemoveArgs {
 
 #[derive(Args)]
 struct CleanArgs {
+    /// Remove the added registries as well
     #[arg(short = 'a', long = "all")]
     all: bool,
 }
@@ -241,6 +255,34 @@ fn pick_registry(prompt: &str, items: &[(String, String)], yes: bool) -> Result<
         return Err(anyhow::anyhow!("selection out of range"));
     }
     Ok(items[idx - 1].0.clone())
+}
+
+fn is_interactive_shell() -> bool {
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
+fn confirm_yes_default(prompt: &str, yes: bool) -> Result<bool> {
+    if yes {
+        return Ok(true);
+    }
+    eprint!("{} [Y/n]: ", prompt);
+    std::io::stderr().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let input = input.trim().to_ascii_lowercase();
+    Ok(input.is_empty() || input == "y" || input == "yes")
+}
+
+fn confirm_no_default(prompt: &str, yes: bool) -> Result<bool> {
+    if yes {
+        return Ok(false);
+    }
+    eprint!("{} [y/N]: ", prompt);
+    std::io::stderr().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let input = input.trim().to_ascii_lowercase();
+    Ok(input == "y" || input == "yes")
 }
 
 fn run_parsed(cli: Cli) -> Result<()> {
@@ -301,6 +343,30 @@ fn run_parsed(cli: Cli) -> Result<()> {
                         cfg.kind
                     ));
                 }
+                if args.status {
+                    let status = gdrive_auth::oauth_status(&args.name)?;
+                    println!("registry: {}", args.name);
+                    println!("token file: {}", status.token_path.display());
+                    if !status.token_present {
+                        println!("status: missing (run `marina registry auth {}`)", args.name);
+                    } else if status.token_valid {
+                        println!("status: valid");
+                        if let Some(expires_at) = status.expires_at {
+                            let now = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0);
+                            let remaining = expires_at.saturating_sub(now);
+                            println!("expires in: {}s", remaining);
+                        }
+                    } else {
+                        println!("status: invalid (refresh failed)");
+                        if let Some(err) = status.refresh_error {
+                            println!("refresh error: {}", err);
+                        }
+                    }
+                    return Ok(());
+                }
                 let (client_id, client_secret) =
                     gdrive_auth::resolve_client_credentials(args.client_id, args.client_secret)?;
                 gdrive_auth::run_oauth_flow(&args.name, &client_id, &client_secret)?;
@@ -342,14 +408,24 @@ fn run_parsed(cli: Cli) -> Result<()> {
                         .map(|(bag, info)| (reg.to_string(), bag, info))
                         .collect::<Vec<_>>()
                 } else {
-                    marina
-                        .list_all_remotes_with_info()
-                        .into_iter()
-                        .map(|(hit, info)| (hit.registry, hit.bag, info))
-                        .collect()
+                    let mut rows = Vec::new();
+                    for cfg in marina.list_registry_configs() {
+                        match marina.search_remote("*", Some(&cfg.name)) {
+                            Ok(bags) => {
+                                rows.extend(bags.into_iter().map(|bag| {
+                                    let info = marina.bag_info(&cfg.name, &bag);
+                                    (cfg.name.clone(), bag, info)
+                                }));
+                            }
+                            Err(err) => {
+                                warn!("failed listing remote registry '{}': {}", cfg.name, err);
+                            }
+                        }
+                    }
+                    rows
                 };
                 if all.is_empty() {
-                    println!("no remote bags found");
+                    println!("no remote datasets found");
                 } else {
                     let time_display = config::load_registries()
                         .map(|f| f.settings.time_display)
@@ -372,7 +448,8 @@ fn run_parsed(cli: Cli) -> Result<()> {
                         })
                         .collect();
                     let headers = [
-                        "BAG", "REGISTRY", "HASH", "ORIGINAL", "PACKED", "CLOUDS", "MCAP", "PUSHED",
+                        "DATASET", "REGISTRY", "HASH", "ORIGINAL", "PACKED", "CLOUDS", "MCAP",
+                        "PUSHED",
                     ];
                     let mut widths = headers.map(|h| h.len());
                     for row in &rows {
@@ -402,7 +479,7 @@ fn run_parsed(cli: Cli) -> Result<()> {
             } else {
                 let items = marina.list_cached_bags();
                 if items.is_empty() {
-                    println!("no local bagfiles cached");
+                    println!("no local datasets cached");
                 } else {
                     for item in items {
                         println!("{}", item.bag);
@@ -510,6 +587,23 @@ fn run_parsed(cli: Cli) -> Result<()> {
             } else {
                 println!("pushed {}", args.bag.without_attachment());
             }
+
+            if args.move_to_cache && is_interactive_shell() {
+                if confirm_no_default(
+                    &format!(
+                        "Delete source '{}' now? (cache is already populated)",
+                        args.source.display()
+                    ),
+                    yes,
+                )? {
+                    if args.source.is_dir() {
+                        std::fs::remove_dir_all(&args.source)?;
+                    } else if args.source.is_file() {
+                        std::fs::remove_file(&args.source)?;
+                    }
+                    println!("deleted source {}", args.source.display());
+                }
+            }
         }
         Commands::Pull(args) => {
             let pull_options = PullOptions {
@@ -524,21 +618,25 @@ fn run_parsed(cli: Cli) -> Result<()> {
             let registry: Option<String> = match args.registry.clone() {
                 Some(r) => Some(r),
                 None => {
-                    let hits = marina.search_all_remotes(&args.target);
-                    // Deduplicate by registry, keeping one entry per registry
-                    let mut seen_registries = std::collections::HashSet::new();
-                    let mut unique: Vec<(String, String)> = hits
-                        .iter()
-                        .filter(|h| seen_registries.insert(h.registry.clone()))
-                        .map(|h| {
-                            let hash = marina
-                                .bag_info(&h.registry, &h.bag)
-                                .and_then(|i| i.bundle_hash)
-                                .map(|hx| format!("hash:{hx}"))
-                                .unwrap_or_default();
-                            (h.registry.clone(), format!("{} {}", h.registry, hash))
-                        })
-                        .collect();
+                    let mut unique: Vec<(String, String)> = Vec::new();
+                    for cfg in marina.list_registry_configs() {
+                        match marina.search_remote(&args.target, Some(&cfg.name)) {
+                            Ok(bags) => {
+                                if let Some(bag) = bags.first() {
+                                    let hash = marina
+                                        .bag_info(&cfg.name, bag)
+                                        .and_then(|i| i.bundle_hash)
+                                        .map(|hx| format!("hash:{hx}"))
+                                        .unwrap_or_default();
+                                    unique
+                                        .push((cfg.name.clone(), format!("{} {}", cfg.name, hash)));
+                                }
+                            }
+                            Err(err) => {
+                                warn!("failed searching registry '{}': {}", cfg.name, err);
+                            }
+                        }
+                    }
                     unique.sort_by(|a, b| a.0.cmp(&b.0));
                     if unique.len() > 1 {
                         Some(pick_registry(
@@ -546,6 +644,8 @@ fn run_parsed(cli: Cli) -> Result<()> {
                             &unique,
                             yes,
                         )?)
+                    } else if unique.len() == 1 {
+                        Some(unique[0].0.clone())
                     } else {
                         None
                     }
@@ -574,7 +674,7 @@ fn run_parsed(cli: Cli) -> Result<()> {
                 for bag in &pulled {
                     println!("pulled {}", bag);
                 }
-                println!("pulled {} bag(s)", pulled.len());
+                println!("pulled {} dataset(s)", pulled.len());
             } else {
                 let bag: BagRef = args.target.parse()?;
                 let path = if !args.no_progress {
@@ -611,10 +711,45 @@ fn run_parsed(cli: Cli) -> Result<()> {
                 needs_pull,
             } => {
                 if needs_pull {
-                    println!(
-                        "{} available in registry '{}'; run: marina pull {} --registry {}",
-                        bag, registry, bag, registry
-                    );
+                    if is_interactive_shell() {
+                        println!("{} available in registry '{}'", bag, registry);
+                    } else {
+                        println!(
+                            "{} available in registry '{}'; run: marina pull {} --registry {}",
+                            bag, registry, bag, registry
+                        );
+                    }
+                    if is_interactive_shell()
+                        && confirm_yes_default(
+                            &format!("pull {} from '{}' now?", bag.without_attachment(), registry),
+                            yes,
+                        )?
+                    {
+                        let pull_options = PullOptions {
+                            unpacked_mcap_compression: config_mcap_compression_to_core(
+                                compression.unpacked_mcap_compression,
+                            ),
+                        };
+                        let path = {
+                            let mut stdout = std::io::stdout();
+                            let mut sink = WriterProgress::new(&mut stdout);
+                            let mut progress = ProgressReporter::new(&mut sink);
+                            marina.pull_exact_with_progress_and_options(
+                                &bag,
+                                Some(registry.as_str()),
+                                pull_options,
+                                &mut progress,
+                            )?
+                        };
+                        println!("pulled {} -> {}", bag.without_attachment(), path.display());
+                        if let Some(stats) = marina.cached_size_stats(&bag) {
+                            print_size_summary(
+                                "cached size",
+                                stats.original_bytes,
+                                stats.packed_bytes,
+                            );
+                        }
+                    }
                 }
             }
             ResolveResult::Ambiguous { candidates } => {

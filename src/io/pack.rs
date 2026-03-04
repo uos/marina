@@ -3,15 +3,18 @@ use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use flate2::Compression;
 use flate2::read::GzDecoder;
-use flate2::write::GzEncoder;
+use flate2::{Compression, GzBuilder};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
-use tar::{Archive, Builder};
+use tar::{Archive, Builder, EntryType};
 
-use crate::io::bag::{BagSource, MCAP_CLI_URL, MCAP_ROS2_URL};
+use crate::io::bag::BagSource;
+#[cfg(feature = "db3")]
+use crate::io::db3_transform::{self, Db3TransformOptions};
 use crate::io::mcap_transform;
+#[cfg(feature = "db3")]
+use crate::io::mcap_transform::PointCloudCompressionMode;
 use crate::io::mcap_transform::{McapChunkCompression, PullTransformOptions, PushTransformOptions};
 use crate::progress::ProgressReporter;
 
@@ -81,9 +84,11 @@ fn append_staging_bundle<W: Write>(
     total_files: u64,
     progress: &mut ProgressReporter<'_>,
 ) -> Result<u64> {
-    builder.append_dir("bundle", staging_dir)?;
+    append_dir_header(builder, Path::new("bundle"))?;
 
-    let mut packed_files = 0u64;
+    let mut rel_dirs: Vec<PathBuf> = Vec::new();
+    let mut rel_files: Vec<PathBuf> = Vec::new();
+
     for entry in walkdir::WalkDir::new(staging_dir) {
         let entry = entry?;
         let path = entry.path();
@@ -99,18 +104,37 @@ fn append_staging_bundle<W: Write>(
             continue;
         }
 
-        let archive_path = Path::new("bundle").join(rel);
         if path.is_dir() {
-            builder.append_dir(&archive_path, path)?;
-            continue;
+            rel_dirs.push(rel.to_path_buf());
+        } else {
+            rel_files.push(rel.to_path_buf());
         }
+    }
 
-        let metadata = fs::metadata(path)?;
+    rel_dirs.sort();
+    rel_files.sort();
+
+    for rel in &rel_dirs {
+        let archive_path = Path::new("bundle").join(rel);
+        append_dir_header(builder, &archive_path)?;
+    }
+
+    let mut packed_files = 0u64;
+    for rel in &rel_files {
+        let path = staging_dir.join(rel);
+        let archive_path = Path::new("bundle").join(rel);
+
+        let metadata = fs::metadata(&path)?;
         let mut header = tar::Header::new_gnu();
-        header.set_metadata(&metadata);
+        header.set_entry_type(EntryType::Regular);
+        header.set_mode(normalized_file_mode(&metadata));
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(0);
+        header.set_size(metadata.len());
         header.set_cksum();
 
-        let mut file = File::open(path)?;
+        let mut file = File::open(&path)?;
         if !pb.is_hidden() && total_bytes > 0 {
             let mut reader = ProgressReader::new(file, pb.clone());
             builder.append_data(&mut header, &archive_path, &mut reader)?;
@@ -139,6 +163,32 @@ fn append_staging_bundle<W: Write>(
     Ok(packed_files)
 }
 
+fn append_dir_header<W: Write>(builder: &mut Builder<W>, archive_path: &Path) -> Result<()> {
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(EntryType::Directory);
+    header.set_mode(0o755);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_mtime(0);
+    header.set_size(0);
+    header.set_cksum();
+    builder.append_data(&mut header, archive_path, io::empty())?;
+    Ok(())
+}
+
+fn normalized_file_mode(metadata: &fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o777
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        0o644
+    }
+}
+
 pub fn pack_bag(source: &BagSource, out_file: &Path) -> Result<PackedMeta> {
     let mut reporter = ProgressReporter::silent();
     pack_bag_with_progress_and_options(source, out_file, PackOptions::default(), &mut reporter)
@@ -161,7 +211,7 @@ pub fn pack_bag_with_progress_and_options(
     progress.emit(
         "pack",
         format!(
-            "staging bag directory from {}",
+            "staging dataset directory from {}",
             source.root.as_path().display()
         ),
     );
@@ -229,14 +279,20 @@ pub fn pack_bag_with_progress_and_options(
             )?;
             fs::rename(&transformed_mcap, &staged_mcap)?;
         }
-    } else if source.has_db3 {
-        progress.emit(
-            "pack",
-            format!(
-                "WARNING: ROS2 .db3 source detected; skipping MCAP optimization pipeline. This is supported but significantly less efficient than MCAP for transfer/storage/playback. Strongly recommended: convert to MCAP first ({} / {}).",
-                MCAP_CLI_URL, MCAP_ROS2_URL
-            ),
-        );
+    }
+    #[cfg(feature = "db3")]
+    if source.has_db3 && options.transform.pointcloud_mode != PointCloudCompressionMode::Disabled {
+        progress.emit("pack", "compressing PointCloud2 messages in .db3 bag");
+        for db3_path in find_all_db3(&staging_dir)? {
+            db3_transform::compress_db3_for_push(
+                &db3_path,
+                &Db3TransformOptions {
+                    pointcloud_mode: options.transform.pointcloud_mode,
+                    pointcloud_precision_m: options.transform.pointcloud_precision_m,
+                },
+                progress,
+            )?;
+        }
     }
 
     progress.emit("pack", "compressing staged folder to marina archive");
@@ -276,7 +332,7 @@ pub fn pack_bag_with_progress_and_options(
     let packed_files = match options.archive_compression {
         ArchiveCompression::Gzip => {
             let tar_gz = File::create(out_file)?;
-            let encoder = GzEncoder::new(tar_gz, Compression::best());
+            let encoder = GzBuilder::new().mtime(0).write(tar_gz, Compression::best());
             let mut builder = Builder::new(encoder);
             let packed_files = append_staging_bundle(
                 &mut builder,
@@ -408,18 +464,23 @@ pub fn unpack_bag_with_progress_and_options(
             fs::rename(decoded, mcap_file)?;
         }
     } else if has_any_db3(out_dir)? {
+        #[cfg(feature = "db3")]
+        {
+            let db3_files = find_all_db3(out_dir)?;
+            if let Some(first) = db3_files.first() {
+                if db3_transform::has_marina_pointcloud_metadata(first)? {
+                    progress.emit("unpack", "restoring PointCloud2 messages in .db3 bag");
+                    for db3 in &db3_files {
+                        db3_transform::decompress_db3_after_pull(db3, progress)?;
+                    }
+                }
+            }
+        }
+    } else {
         progress.emit(
             "unpack",
-            format!(
-                "WARNING: pulled .db3 bag. Skipping restore and compression. MCAP is strongly recommended! ({} / {}).",
-                MCAP_CLI_URL, MCAP_ROS2_URL
-            ),
+            "no MCAP/DB3 detected, skipping ROS-specific restore pipeline",
         );
-    } else {
-        return Err(anyhow!(
-            "no .mcap or .db3 file found in {}",
-            out_dir.display()
-        ));
     }
     progress.emit("unpack", "unpack complete");
 
@@ -487,6 +548,19 @@ fn find_first_mcap(root: &Path) -> Result<Option<PathBuf>> {
         }
     }
     Ok(None)
+}
+
+#[cfg(feature = "db3")]
+fn find_all_db3(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    for entry in walkdir::WalkDir::new(root) {
+        let entry = entry?;
+        let p = entry.path();
+        if p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("db3") {
+            out.push(p.to_path_buf());
+        }
+    }
+    Ok(out)
 }
 
 fn has_any_db3(root: &Path) -> Result<bool> {

@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
@@ -34,7 +35,7 @@ impl StoredToken {
 }
 
 fn token_path(registry_name: &str) -> Option<std::path::PathBuf> {
-    config::cache_dir()
+    config::config_dir()
         .ok()
         .map(|d| d.join("tokens").join(format!("{}.json", registry_name)))
 }
@@ -68,6 +69,59 @@ pub fn get_access_token(registry_name: &str) -> Result<Option<String>> {
     }
 
     Ok(Some(token.access_token))
+}
+
+#[derive(Debug, Clone)]
+pub struct OAuthStatus {
+    pub token_path: PathBuf,
+    pub token_present: bool,
+    pub token_valid: bool,
+    pub expires_at: Option<u64>,
+    pub refresh_error: Option<String>,
+}
+
+pub fn oauth_status(registry_name: &str) -> Result<OAuthStatus> {
+    let path =
+        token_path(registry_name).ok_or_else(|| anyhow!("could not determine config directory"))?;
+
+    let mut token = match load_stored_token(registry_name) {
+        Some(token) => token,
+        None => {
+            return Ok(OAuthStatus {
+                token_path: path,
+                token_present: false,
+                token_valid: false,
+                expires_at: None,
+                refresh_error: None,
+            });
+        }
+    };
+
+    if token.is_expired() {
+        match do_refresh(&token.client_id, &token.client_secret, &token.refresh_token) {
+            Ok(refreshed) => {
+                save_stored_token(registry_name, &refreshed)?;
+                token = refreshed;
+            }
+            Err(err) => {
+                return Ok(OAuthStatus {
+                    token_path: path,
+                    token_present: true,
+                    token_valid: false,
+                    expires_at: Some(token.expires_at),
+                    refresh_error: Some(err.to_string()),
+                });
+            }
+        }
+    }
+
+    Ok(OAuthStatus {
+        token_path: path,
+        token_present: true,
+        token_valid: true,
+        expires_at: Some(token.expires_at),
+        refresh_error: None,
+    })
 }
 
 /// Resolves client credentials: explicit args → env vars → bundled constants.

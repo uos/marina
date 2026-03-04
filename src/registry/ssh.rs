@@ -295,7 +295,7 @@ impl SshRegistry {
     /// it cannot appear in valid JSON text.
     fn fetch_all_meta(&self) -> Result<Vec<MetaFile>> {
         let cmd = format!(
-            "find {} -type f -name metadata.json -exec sh -c 'printf \"\\x1e\"; cat \"$1\"' _ {{}} \\;",
+            "find {} -type f -name metadata.json -exec sh -c 'printf \"\\036\"; cat \"$1\"' _ {{}} \\;",
             shell_quote(&self.endpoint.root)
         );
         let output = self.run_ssh_capture(&cmd)?;
@@ -449,6 +449,19 @@ impl RegistryDriver for SshRegistry {
         self.upload_file_with_progress(&tmp, &remote)?;
         let _ = fs::remove_file(tmp);
         Ok(())
+    }
+
+    fn check_write_access(&self) -> Result<()> {
+        let probe = format!(
+            "{}/.marina_write_probe_{}",
+            self.endpoint.root,
+            std::process::id()
+        );
+        self.run_ssh(&format!(
+            "mkdir -p {} && rmdir {}",
+            shell_quote(&probe),
+            shell_quote(&probe)
+        ))
     }
 }
 

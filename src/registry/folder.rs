@@ -208,4 +208,21 @@ impl RegistryDriver for FolderRegistry {
             .with_context(|| format!("failed writing {}", path.display()))?;
         Ok(())
     }
+
+    fn check_write_access(&self) -> Result<()> {
+        let probe = self.root.join(".marina_write_probe");
+        fs::create_dir_all(&probe).with_context(|| {
+            format!(
+                "failed creating write probe directory in folder registry '{}'",
+                self.root.display()
+            )
+        })?;
+        fs::remove_dir(&probe).with_context(|| {
+            format!(
+                "failed removing write probe directory in folder registry '{}'",
+                self.root.display()
+            )
+        })?;
+        Ok(())
+    }
 }

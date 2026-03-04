@@ -118,7 +118,7 @@ pub struct PushTransformOptions {
 impl Default for PushTransformOptions {
     fn default() -> Self {
         Self {
-            pointcloud_mode: PointCloudCompressionMode::Lossy,
+            pointcloud_mode: PointCloudCompressionMode::Lossless,
             pointcloud_precision_m: 0.001,
             output_mcap_compression: McapChunkCompression::Zstd,
         }
@@ -485,6 +485,47 @@ pub fn decompress_mcap_after_pull_with_progress(
         );
     }
     Ok(stats)
+}
+
+/// Compress a raw CDR-encoded PointCloud2 payload using cloudini.
+/// Returns `(compressed_cdr_bytes, codec_value_string)`.
+pub fn compress_cdr_pointcloud(
+    data: &[u8],
+    mode: PointCloudCompressionMode,
+    precision_m: f64,
+) -> Result<(Vec<u8>, String)> {
+    let pointcloud: ros2_interfaces_jazzy_serde::sensor_msgs::msg::PointCloud2 =
+        cdr::deserialize(data).context("failed CDR-decoding PointCloud2")?;
+    let cloud = impl_ros2_interfaces_jazzy_serde::to_pointcloud2_msg(pointcloud);
+    let compression = match mode {
+        PointCloudCompressionMode::Disabled => {
+            unreachable!("disabled mode should not call compress_cdr_pointcloud")
+        }
+        PointCloudCompressionMode::Lossy => CompressionConfig::lossy_zstd(precision_m as f32),
+        PointCloudCompressionMode::Lossless => CompressionConfig::lossless_zstd(),
+    };
+    let compressed = CompressedPointCloud2::compress(cloud, compression)
+        .context("cloudini compression failed")?;
+    let payload = cdr::serialize::<_, _, cdr::CdrLe>(&compressed, cdr::Infinite)
+        .context("failed CDR-encoding compressed pointcloud")?;
+    let codec_val = match mode {
+        PointCloudCompressionMode::Disabled => unreachable!(),
+        PointCloudCompressionMode::Lossy => format!("cloudini/lossy-zstd/{:.9}m", precision_m),
+        PointCloudCompressionMode::Lossless => "cloudini/lossless-zstd".to_string(),
+    };
+    Ok((payload, codec_val))
+}
+
+/// Decompress cloudini-compressed CDR bytes back to standard PointCloud2 CDR bytes.
+pub fn decompress_cdr_pointcloud(data: &[u8]) -> Result<Vec<u8>> {
+    let compressed: CompressedPointCloud2 =
+        cdr::deserialize(data).context("failed CDR-decoding compressed pointcloud")?;
+    let restored = compressed
+        .decompress()
+        .context("cloudini decompression failed")?;
+    let ros_pointcloud = impl_ros2_interfaces_jazzy_serde::from_pointcloud2_msg(restored);
+    cdr::serialize::<_, _, cdr::CdrLe>(&ros_pointcloud, cdr::Infinite)
+        .context("failed CDR-encoding restored PointCloud2")
 }
 
 fn make_writer(

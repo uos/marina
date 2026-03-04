@@ -10,6 +10,8 @@
 
   <build_depend>cargo</build_depend>
   <build_depend>python3-catkin-pkg-modules</build_depend>
+  <build_depend>libsqlite3-dev</build_depend>
+  <exec_depend>libsqlite3-dev</exec_depend>
 
   <!--<exec_depend>marina</exec_depend>-->
 

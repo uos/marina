@@ -21,9 +21,9 @@ use crate::registry::gdrive_auth;
 
 const DRIVE_FILES_API: &str = "https://www.googleapis.com/drive/v3/files";
 const DRIVE_UPLOAD_API: &str = "https://www.googleapis.com/upload/drive/v3/files";
-const RESUMABLE_CHUNK_MIN_BYTES: usize = 16 * 1024 * 1024;
-const RESUMABLE_CHUNK_START_BYTES: usize = 64 * 1024 * 1024;
-const RESUMABLE_CHUNK_MAX_BYTES: usize = 256 * 1024 * 1024;
+const RESUMABLE_CHUNK_MIN_BYTES: usize = 8 * 1024 * 1024;
+const RESUMABLE_CHUNK_START_BYTES: usize = 32 * 1024 * 1024;
+const RESUMABLE_CHUNK_MAX_BYTES: usize = 48 * 1024 * 1024;
 const RESUMABLE_UPLOAD_RETRIES: usize = 4;
 
 #[derive(Debug, Clone)]
@@ -921,7 +921,7 @@ impl RegistryDriver for GDriveRegistry {
             self.download_public_url_to_path(
                 &manifest.bundle_url,
                 out_packed_file,
-                &format!("downloading {}", self.bundle_name(bag)),
+                &format!("downloading {}", bag.without_attachment()),
             )?;
 
             return Ok(RemoteDescriptor {
@@ -1115,6 +1115,34 @@ impl RegistryDriver for GDriveRegistry {
             .context("drive connectivity check returned error")?;
         Ok(())
     }
+
+    fn check_write_access(&self) -> Result<()> {
+        let probe_name = format!(".marina_write_probe_{}_{}", self.name, now_secs());
+        let file_id = self
+            .create_drive_file(&probe_name, "application/octet-stream")
+            .context("failed creating write probe file in Google Drive")?;
+
+        let upload_result = self.upload_media(
+            &file_id,
+            "application/octet-stream",
+            Body::new(std::io::Cursor::new(vec![0u8])),
+            &probe_name,
+        );
+        if let Err(err) = upload_result {
+            let _ = self.delete_file(&file_id);
+            return Err(err).context("failed writing probe content to Google Drive");
+        }
+
+        self.delete_file(&file_id)
+            .context("failed deleting Google Drive write probe file")
+    }
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn spinner(message: &str) -> ProgressBar {

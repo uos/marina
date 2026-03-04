@@ -285,4 +285,11 @@ impl RegistryDriver for HttpRegistry {
             .context("http registry connectivity check returned error")?;
         Ok(())
     }
+
+    fn check_write_access(&self) -> Result<()> {
+        Err(anyhow!(
+            "http registry '{}' is read-only: push is not supported",
+            self.name
+        ))
+    }
 }

@@ -80,4 +80,8 @@ pub trait RegistryDriver: Send + Sync {
     fn check_connection(&self) -> Result<()> {
         Ok(())
     }
+
+    fn check_write_access(&self) -> Result<()> {
+        self.check_connection()
+    }
 }

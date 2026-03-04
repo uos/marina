@@ -18,8 +18,6 @@ use crate::registry::stub::StubRegistry;
 use crate::storage::cache::{self, CacheEntry, Catalog};
 use crate::storage::config::{self, RegistryConfig};
 
-use log::warn;
-
 /// Statistics returned by [`Marina::mirror_registry`].
 #[derive(Debug, Default, Clone)]
 pub struct MirrorStats {
@@ -103,7 +101,7 @@ pub struct PushOptions {
 impl Default for PushOptions {
     fn default() -> Self {
         Self {
-            pointcloud_mode: PointCloudCompressionMode::Lossy,
+            pointcloud_mode: PointCloudCompressionMode::Lossless,
             pointcloud_precision_m: 0.001,
             packed_mcap_compression: McapChunkCompression::Zstd,
             packed_archive_compression: pack::ArchiveCompression::Gzip,
@@ -155,10 +153,6 @@ impl Marina {
                 "http" => Box::new(HttpRegistry::from_uri(&reg.name, &reg.uri)?),
                 other => Box::new(StubRegistry::new(other, &reg.uri, reg.auth_env.clone())),
             };
-
-            if let Some(msg) = connection_warning(&reg.name, &reg.uri, driver.as_ref()) {
-                warn!("{}", msg);
-            }
 
             registries.insert(reg.name.clone(), (reg, driver));
         }
@@ -333,13 +327,21 @@ impl Marina {
         options: PushOptions,
         progress: &mut ProgressReporter<'_>,
     ) -> Result<()> {
-        let source = bag::discover_bag(source_dir)?;
         let (cfg, driver) = self.choose_registry(registry)?;
         Self::ensure_auth(cfg, true)?;
         progress.emit(
             "push",
+            format!("checking write access for registry '{}'", cfg.name),
+        );
+        driver
+            .check_write_access()
+            .with_context(|| format!("write preflight failed for registry '{}'", cfg.name))?;
+
+        let source = bag::discover_bag(source_dir)?;
+        progress.emit(
+            "push",
             format!(
-                "preparing '{}' for registry '{}'",
+                "preparing dataset '{}' for registry '{}'",
                 bag.without_attachment(),
                 cfg.name
             ),
@@ -369,12 +371,21 @@ impl Marina {
             ),
         );
         let bundle_hash = compute_bundle_hash(&packed_file)?;
+        let ros_pipeline_applies = source.mcap.is_some() || source.has_db3;
         let push_meta = PushMeta {
             original_bytes: packed_meta.original_bytes,
             packed_bytes: packed_meta.packed_bytes,
             bundle_hash,
-            pointcloud: pointcloud_mode_label(options.pointcloud_mode).to_string(),
-            mcap_compression: mcap_compression_label(options.packed_mcap_compression).to_string(),
+            pointcloud: if ros_pipeline_applies {
+                pointcloud_mode_label(options.pointcloud_mode).to_string()
+            } else {
+                "n/a".to_string()
+            },
+            mcap_compression: if ros_pipeline_applies {
+                mcap_compression_label(options.packed_mcap_compression).to_string()
+            } else {
+                "n/a".to_string()
+            },
             pushed_at: now_unix_secs(),
         };
         driver.push(
@@ -384,7 +395,7 @@ impl Marina {
             &push_meta,
         )?;
 
-        if options.write_http_index {
+        if options.write_http_index || cfg.kind == "ssh" {
             progress.emit(
                 "push",
                 format!("writing http index.json for registry '{}'", cfg.name),
@@ -492,12 +503,7 @@ impl Marina {
         Self::ensure_auth(cfg, false)?;
         progress.emit(
             "pull",
-            format!(
-                "downloading '{}' from registry '{}' ({})",
-                bag.without_attachment(),
-                cfg.name,
-                cfg.kind
-            ),
+            format!("downloading from registry '{}' ({})", cfg.name, cfg.kind),
         );
 
         let cache_dir = cache::bag_cache_dir(&bag.without_attachment())?;
@@ -880,10 +886,7 @@ impl Marina {
             let tmp_dir = tempfile::tempdir().context("failed to create temp dir for mirror")?;
             let tmp_bundle = tmp_dir.path().join("bundle.marina");
 
-            progress.emit(
-                "mirror",
-                format!("downloading {} from '{}'", bag, source_name),
-            );
+            progress.emit("mirror", format!("downloading from '{}'", source_name));
             source_drv
                 .pull(&bag, &tmp_bundle)
                 .with_context(|| format!("failed to pull '{}' from '{}'", bag, source_name))?;
