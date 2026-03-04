@@ -268,7 +268,6 @@ fn compress_and_decompress_db3_message_count_matches() -> Result<()> {
     Ok(())
 }
 
-
 #[test]
 fn compress_and_decompress_real_fixture_lossless() -> Result<()> {
     let src = fixture_db3();

@@ -354,4 +354,3 @@ fn has_rosbag_db3_schema(conn: &Connection) -> Result<bool> {
         > 0;
     Ok(topics_exists && messages_exists)
 }
-

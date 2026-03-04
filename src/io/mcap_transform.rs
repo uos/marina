@@ -9,8 +9,8 @@ use cloudini::ros::{CompressedPointCloud2, CompressionConfig};
 use mcap::sans_io::{IndexedReadEvent, IndexedReader, SummaryReadEvent};
 use mcap::{Compression, Message, Summary, WriteOptions, Writer};
 
-use crate::progress::ProgressReporter;
 use crate::io::transform_progress::{emit_count_progress, make_count_progress_bar};
+use crate::progress::ProgressReporter;
 
 ros_pointcloud2::impl_pointcloud2_for_ros2_interfaces_jazzy_serde!();
 
@@ -350,7 +350,13 @@ pub fn decompress_mcap_after_pull_with_progress(
                         || loaded_chunks % CHUNK_PROGRESS_EVERY == 0
                         || loaded_chunks == total_chunks)
                 {
-                    emit_count_progress(progress, "unpack", "processed", loaded_chunks, total_chunks);
+                    emit_count_progress(
+                        progress,
+                        "unpack",
+                        "processed",
+                        loaded_chunks,
+                        total_chunks,
+                    );
                 }
             }
             IndexedReadEvent::Message { header, data } => {
@@ -472,8 +478,7 @@ fn make_writer(
         .compression(mcap_compression)
         .compression_threads(0);
 
-    Writer::with_options(writer, options)
-        .context("failed creating mcap writer")
+    Writer::with_options(writer, options).context("failed creating mcap writer")
 }
 
 fn write_message_checked(
