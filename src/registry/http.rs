@@ -1,11 +1,11 @@
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use glob::Pattern;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
 use serde::Deserialize;
@@ -126,8 +126,12 @@ impl HttpRegistry {
             .with_context(|| format!("download failed for {}", title))?;
 
         let total = resp.content_length().unwrap_or(0);
+        let hidden = !std::io::stdout().is_terminal();
         let pb = if total > 0 {
             let pb = ProgressBar::new(total);
+            if hidden {
+                pb.set_draw_target(ProgressDrawTarget::hidden());
+            }
             pb.set_style(
                 ProgressStyle::with_template(
                     "{msg} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})",
@@ -138,6 +142,9 @@ impl HttpRegistry {
             Some(pb)
         } else {
             let pb = ProgressBar::new_spinner();
+            if hidden {
+                pb.set_draw_target(ProgressDrawTarget::hidden());
+            }
             pb.set_style(
                 ProgressStyle::with_template("{spinner} {msg}")
                     .unwrap_or_else(|_| ProgressStyle::default_spinner())

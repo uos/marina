@@ -28,10 +28,11 @@ impl ResolveDetailed {
 }
 
 #[pyfunction]
-fn resolve(target: &str) -> PyResult<String> {
+#[pyo3(signature = (target, registry=None))]
+fn resolve(target: &str, registry: Option<&str>) -> PyResult<String> {
     let marina = Marina::load().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     match marina
-        .resolve_target(target)
+        .resolve_target(target, registry)
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
     {
         ResolveResult::LocalPath(p) | ResolveResult::Cached(p) => Ok(p.display().to_string()),
@@ -108,7 +109,8 @@ fn pull_with_progress(
 }
 
 #[pyfunction]
-fn resolve_detailed(target: &str) -> ResolveDetailed {
+#[pyo3(signature = (target, registry=None))]
+fn resolve_detailed(target: &str, registry: Option<&str>) -> ResolveDetailed {
     let marina = match Marina::load() {
         Ok(v) => v,
         Err(e) => {
@@ -122,7 +124,7 @@ fn resolve_detailed(target: &str) -> ResolveDetailed {
         }
     };
 
-    match marina.resolve_target(target) {
+    match marina.resolve_target(target, registry) {
         Ok(ResolveResult::LocalPath(p)) => ResolveDetailed {
             kind: "local".to_string(),
             path: Some(p.display().to_string()),

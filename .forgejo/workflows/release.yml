@@ -366,6 +366,20 @@ jobs:
               "dl/artifacts-macos/${arch}/marina"
           done
 
+          echo "=== cargo-binstall (target-triple named) ==="
+          make_tarball "marina-${VERSION}-x86_64-unknown-linux-gnu" \
+            "dl/artifacts-raw-noble/amd64/marina"
+          make_tarball "marina-${VERSION}-aarch64-unknown-linux-gnu" \
+            "dl/artifacts-raw-noble/arm64/marina"
+          make_tarball "marina-${VERSION}-x86_64-unknown-linux-musl" \
+            "dl/artifacts-cli-musl/amd64/marina"
+          make_tarball "marina-${VERSION}-aarch64-unknown-linux-musl" \
+            "dl/artifacts-cli-musl/arm64/marina"
+          make_tarball "marina-${VERSION}-x86_64-apple-darwin" \
+            "dl/artifacts-macos/amd64/marina"
+          make_tarball "marina-${VERSION}-aarch64-apple-darwin" \
+            "dl/artifacts-macos/arm64/marina"
+
           echo ""
           echo "=== Release artifacts ==="
           ls -lh release/
@@ -424,7 +438,7 @@ jobs:
           See the documentation for installation instructions.
 
           ### Artifacts
-          - **tar.gz** archives for Linux (noble, jammy, musl) and macOS (amd64, arm64)
+          - **tar.gz** archives for Linux (noble, jammy, musl) and macOS (amd64, arm64); target-triple archives for \`cargo-binstall\`
           - **.deb** packages published to [PPA](https://codeberg.org/uos-robotics/ppa)
           - **Python wheels** on PyPI and custom index" \
             ${ASSET_FLAGS}; then

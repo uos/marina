@@ -186,6 +186,8 @@ struct PullArgs {
 struct ResolveArgs {
     #[arg(value_name = "DATASET")]
     target: String,
+    #[arg(long)]
+    registry: Option<String>,
 }
 
 #[derive(Args)]
@@ -229,8 +231,9 @@ pub fn run() -> Result<()> {
 }
 
 pub fn run_with_args(args: Vec<String>) -> Result<()> {
+    let raw_yes = args.iter().any(|arg| arg == "-y" || arg == "--yes");
     let cli = Cli::parse_from(args);
-    run_parsed(cli)
+    run_parsed(cli, raw_yes)
 }
 
 /// Prompt the user to pick one registry from a list, or auto-accept the first if `yes` is set.
@@ -288,17 +291,15 @@ fn confirm_no_default(prompt: &str, yes: bool) -> Result<bool> {
     Ok(input == "y" || input == "yes")
 }
 
-fn pick_pull_candidate_no_default(
+fn pick_pull_candidate(
     prompt: &str,
     items: &[(String, BagRef, Option<BagInfo>)],
-    yes: bool,
     time_display: TimeDisplay,
 ) -> Result<Option<usize>> {
-    if yes || items.is_empty() {
+    if items.is_empty() {
         return Ok(None);
     }
     eprintln!("{}:", prompt);
-    eprintln!("  [0] no");
     let rows: Vec<[String; 9]> = items
         .iter()
         .enumerate()
@@ -347,19 +348,19 @@ fn pick_pull_candidate_no_default(
     for row in &rows {
         eprintln!("{}", fmt_row(&row.each_ref().map(|s| s.as_str())));
     }
-    eprint!("Select [0]: ");
+    eprint!("Select [1]: ");
     std::io::stderr().flush()?;
 
     let mut input = String::new();
     std::io::stdin().read_line(&mut input)?;
-    let input = input.trim().to_ascii_lowercase();
-    if input.is_empty() || input == "0" || input == "n" || input == "no" {
-        return Ok(None);
-    }
-
-    let idx: usize = input
-        .parse()
-        .map_err(|_| anyhow::anyhow!("invalid selection"))?;
+    let input = input.trim();
+    let idx: usize = if input.is_empty() {
+        1
+    } else {
+        input
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid selection"))?
+    };
     if idx == 0 || idx > items.len() {
         return Err(anyhow::anyhow!("selection out of range"));
     }
@@ -440,8 +441,9 @@ fn pull_and_print(
     Ok(())
 }
 
-fn run_parsed(cli: Cli) -> Result<()> {
-    let yes = cli.yes;
+fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
+    crate::cleanup::init();
+    let yes = cli.yes || raw_yes;
     let compression = config::load_compression_config()?;
     let mut marina = Marina::load()?;
 
@@ -829,97 +831,190 @@ fn run_parsed(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Commands::Resolve(args) => match marina.resolve_target(&args.target)? {
-            ResolveResult::LocalPath(p) => println!("{}", p.display()),
-            ResolveResult::Cached(p) => println!("{}", p.display()),
-            ResolveResult::RemoteAvailable {
-                registry,
-                bag,
-                needs_pull,
-            } => {
-                if needs_pull {
-                    if is_interactive_shell() {
-                        println!("{} available in registry '{}'", bag, registry);
-                    } else {
-                        println!(
-                            "{} available in registry '{}'; run: marina pull {} --registry {}",
-                            bag, registry, bag, registry
-                        );
+        Commands::Resolve(args) => {
+            let interactive = is_interactive_shell();
+            let quiet_non_interactive_yes = yes && !interactive;
+
+            match marina.resolve_target(&args.target, args.registry.as_deref())? {
+                ResolveResult::LocalPath(p) => println!("{}", p.display()),
+                ResolveResult::Cached(p) => println!("{}", p.display()),
+                ResolveResult::RemoteAvailable {
+                    registry,
+                    bag,
+                    needs_pull,
+                } => {
+                    if needs_pull {
+                        let should_pull = if interactive {
+                            if !quiet_non_interactive_yes {
+                                println!("{} available in registry '{}'", bag, registry);
+                            }
+                            confirm_yes_default(
+                                &format!(
+                                    "pull {} from '{}' now?",
+                                    bag.without_attachment(),
+                                    registry
+                                ),
+                                yes,
+                            )?
+                        } else {
+                            if !quiet_non_interactive_yes {
+                                println!(
+                                    "{} available in registry '{}'; run: marina pull {} --registry {}",
+                                    bag, registry, bag, registry
+                                );
+                            }
+                            yes
+                        };
+
+                        if should_pull {
+                            let pull_options = PullOptions {
+                                unpacked_mcap_compression: config_mcap_compression_to_core(
+                                    compression.unpacked_mcap_compression,
+                                ),
+                            };
+                            if quiet_non_interactive_yes {
+                                let mut progress = ProgressReporter::silent();
+                                marina.pull_exact_with_progress_and_options(
+                                    &bag,
+                                    Some(registry.as_str()),
+                                    pull_options,
+                                    &mut progress,
+                                )?;
+                            } else {
+                                let path = {
+                                    let mut stdout = std::io::stdout();
+                                    let mut sink = WriterProgress::new(&mut stdout);
+                                    let mut progress = ProgressReporter::new(&mut sink);
+                                    marina.pull_exact_with_progress_and_options(
+                                        &bag,
+                                        Some(registry.as_str()),
+                                        pull_options,
+                                        &mut progress,
+                                    )?
+                                };
+                                println!(
+                                    "pulled {} -> {}",
+                                    bag.without_attachment(),
+                                    path.display()
+                                );
+                                if let Some(stats) = marina.cached_size_stats(&bag) {
+                                    print_size_summary(
+                                        "cached size",
+                                        stats.original_bytes,
+                                        stats.packed_bytes,
+                                    );
+                                }
+                            }
+                            match marina.resolve_target(&args.target, args.registry.as_deref())? {
+                                ResolveResult::LocalPath(resolved)
+                                | ResolveResult::Cached(resolved) => {
+                                    println!("{}", resolved.display())
+                                }
+                                _ => {
+                                    return Err(anyhow::anyhow!(
+                                        "failed to resolve '{}' after pull",
+                                        args.target
+                                    ));
+                                }
+                            }
+                        }
                     }
-                    if is_interactive_shell()
-                        && confirm_yes_default(
-                            &format!("pull {} from '{}' now?", bag.without_attachment(), registry),
-                            yes,
-                        )?
-                    {
+                }
+                ResolveResult::Ambiguous { candidates } => {
+                    if interactive {
+                        let items: Vec<(String, BagRef, Option<BagInfo>)> = candidates
+                            .iter()
+                            .map(|(registry, bag)| {
+                                let info = marina.bag_info(registry, bag);
+                                (registry.clone(), bag.clone(), info)
+                            })
+                            .collect();
+
+                        let time_display = config::load_registries()
+                            .map(|f| f.settings.time_display)
+                            .unwrap_or_default();
+
+                        let choice = if yes {
+                            Some(0)
+                        } else {
+                            pick_pull_candidate(
+                                &format!(
+                                    "'{}' found in multiple registries, pull now?",
+                                    args.target
+                                ),
+                                &items,
+                                time_display,
+                            )?
+                        };
+
+                        if let Some(choice) = choice {
+                            let (registry, bag, _) = &items[choice];
+                            let pull_options = PullOptions {
+                                unpacked_mcap_compression: config_mcap_compression_to_core(
+                                    compression.unpacked_mcap_compression,
+                                ),
+                            };
+                            pull_and_print(
+                                &mut marina,
+                                bag,
+                                Some(registry.as_str()),
+                                pull_options,
+                            )?;
+                            match marina.resolve_target(&args.target, args.registry.as_deref())? {
+                                ResolveResult::LocalPath(resolved)
+                                | ResolveResult::Cached(resolved) => {
+                                    println!("{}", resolved.display())
+                                }
+                                _ => {
+                                    return Err(anyhow::anyhow!(
+                                        "failed to resolve '{}' after pull",
+                                        args.target
+                                    ));
+                                }
+                            }
+                        }
+                    } else if quiet_non_interactive_yes {
+                        let (registry, bag) = candidates.first().ok_or_else(|| {
+                            anyhow::anyhow!("no candidates found for '{}'", args.target)
+                        })?;
                         let pull_options = PullOptions {
                             unpacked_mcap_compression: config_mcap_compression_to_core(
                                 compression.unpacked_mcap_compression,
                             ),
                         };
-                        let path = {
-                            let mut stdout = std::io::stdout();
-                            let mut sink = WriterProgress::new(&mut stdout);
-                            let mut progress = ProgressReporter::new(&mut sink);
-                            marina.pull_exact_with_progress_and_options(
-                                &bag,
-                                Some(registry.as_str()),
-                                pull_options,
-                                &mut progress,
-                            )?
-                        };
-                        println!("pulled {} -> {}", bag.without_attachment(), path.display());
-                        if let Some(stats) = marina.cached_size_stats(&bag) {
-                            print_size_summary(
-                                "cached size",
-                                stats.original_bytes,
-                                stats.packed_bytes,
-                            );
+                        let mut progress = ProgressReporter::silent();
+                        marina.pull_exact_with_progress_and_options(
+                            bag,
+                            Some(registry.as_str()),
+                            pull_options,
+                            &mut progress,
+                        )?;
+                        match marina.resolve_target(&args.target, args.registry.as_deref())? {
+                            ResolveResult::LocalPath(resolved)
+                            | ResolveResult::Cached(resolved) => {
+                                println!("{}", resolved.display())
+                            }
+                            _ => {
+                                return Err(anyhow::anyhow!(
+                                    "failed to resolve '{}' after pull",
+                                    args.target
+                                ));
+                            }
+                        }
+                    } else {
+                        println!("'{}' found in multiple registries:", args.target);
+                        for (registry, bag) in &candidates {
+                            let hash = marina
+                                .bag_info(registry, bag)
+                                .and_then(|i| i.bundle_hash)
+                                .map(|h| format!("  [hash:{h}]"))
+                                .unwrap_or_default();
+                            println!("  marina pull {} --registry {}{}", bag, registry, hash);
                         }
                     }
                 }
             }
-            ResolveResult::Ambiguous { candidates } => {
-                if is_interactive_shell() {
-                    let items: Vec<(String, BagRef, Option<BagInfo>)> = candidates
-                        .iter()
-                        .map(|(registry, bag)| {
-                            let info = marina.bag_info(registry, bag);
-                            (registry.clone(), bag.clone(), info)
-                        })
-                        .collect();
-
-                    let time_display = config::load_registries()
-                        .map(|f| f.settings.time_display)
-                        .unwrap_or_default();
-
-                    if let Some(choice) = pick_pull_candidate_no_default(
-                        &format!("'{}' found in multiple registries, pull now?", args.target),
-                        &items,
-                        yes,
-                        time_display,
-                    )? {
-                        let (registry, bag, _) = &items[choice];
-                        let pull_options = PullOptions {
-                            unpacked_mcap_compression: config_mcap_compression_to_core(
-                                compression.unpacked_mcap_compression,
-                            ),
-                        };
-                        pull_and_print(&mut marina, bag, Some(registry.as_str()), pull_options)?;
-                    }
-                } else {
-                    println!("'{}' found in multiple registries:", args.target);
-                    for (registry, bag) in &candidates {
-                        let hash = marina
-                            .bag_info(registry, bag)
-                            .and_then(|i| i.bundle_hash)
-                            .map(|h| format!("  [hash:{h}]"))
-                            .unwrap_or_default();
-                        println!("  marina pull {} --registry {}{}", bag, registry, hash);
-                    }
-                }
-            }
-        },
+        }
         Commands::Export(args) => {
             marina.export(&args.target, &args.output)?;
             println!("exported {} -> {}", args.target, args.output.display());

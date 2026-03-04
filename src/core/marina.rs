@@ -480,8 +480,12 @@ impl Marina {
 
         let cache_dir = cache::bag_cache_dir(&bag.without_attachment())?;
         let packed_file = cache_dir.join("bundle.remote.tar.gz");
-        let descriptor = driver.pull(&bag.without_attachment(), &packed_file)?;
         let ready_dir = cache_dir.join("ready");
+
+        crate::cleanup::register(packed_file.clone());
+        crate::cleanup::register(ready_dir.clone());
+
+        let descriptor = driver.pull(&bag.without_attachment(), &packed_file)?;
         if ready_dir.exists() {
             fs::remove_dir_all(&ready_dir)?;
         }
@@ -507,11 +511,12 @@ impl Marina {
             },
         );
         cache::save_catalog(&self.catalog)?;
+        crate::cleanup::commit();
         progress.emit("pull", "pull complete");
 
         Ok(ready_dir)
     }
-    pub fn resolve_target(&self, target: &str) -> Result<ResolveResult> {
+    pub fn resolve_target(&self, target: &str, registry: Option<&str>) -> Result<ResolveResult> {
         let path = Path::new(target);
         if bag::has_direct_mcap(path)? {
             return Ok(ResolveResult::LocalPath(path.to_path_buf()));
@@ -537,39 +542,51 @@ impl Marina {
             }
         }
 
-        let mut names: Vec<_> = self.registries.keys().cloned().collect();
-        names.sort();
         let mut matches: Vec<(String, BagRef)> = Vec::new();
         let exact = bag_ref.without_attachment().to_string();
-        std::thread::scope(|s| {
-            let handles: Vec<_> = names
+
+        if let Some(registry_name) = registry {
+            let (cfg, drv) = self.choose_registry(Some(registry_name))?;
+            if drv
+                .list(&exact)?
                 .iter()
-                .filter_map(|name| {
-                    self.registries.get(name).map(|(_, drv)| {
-                        let name = name.clone();
-                        let exact = exact.clone();
-                        let bag_ref = bag_ref.without_attachment();
-                        s.spawn(move || {
-                            if drv
-                                .list(&exact)
-                                .ok()
-                                .is_some_and(|list| list.iter().any(|b| b == &bag_ref))
-                            {
-                                Some((name, bag_ref))
-                            } else {
-                                None
-                            }
+                .any(|b| b == &bag_ref.without_attachment())
+            {
+                matches.push((cfg.name.clone(), bag_ref.without_attachment()));
+            }
+        } else {
+            let mut names: Vec<_> = self.registries.keys().cloned().collect();
+            names.sort();
+            std::thread::scope(|s| {
+                let handles: Vec<_> = names
+                    .iter()
+                    .filter_map(|name| {
+                        self.registries.get(name).map(|(_, drv)| {
+                            let name = name.clone();
+                            let exact = exact.clone();
+                            let bag_ref = bag_ref.without_attachment();
+                            s.spawn(move || {
+                                if drv
+                                    .list(&exact)
+                                    .ok()
+                                    .is_some_and(|list| list.iter().any(|b| b == &bag_ref))
+                                {
+                                    Some((name, bag_ref))
+                                } else {
+                                    None
+                                }
+                            })
                         })
                     })
-                })
-                .collect();
+                    .collect();
 
-            for handle in handles {
-                if let Some(hit) = handle.join().ok().flatten() {
-                    matches.push(hit);
+                for handle in handles {
+                    if let Some(hit) = handle.join().ok().flatten() {
+                        matches.push(hit);
+                    }
                 }
-            }
-        });
+            });
+        }
         matches.sort_by_key(|(name, _)| name.clone());
 
         match matches.len() {

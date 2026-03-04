@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::Path;
 use std::sync::OnceLock;
 use std::thread::sleep;
@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 use glob::Pattern;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use regex::Regex;
 use reqwest::StatusCode;
@@ -774,6 +774,9 @@ impl GDriveRegistry {
         let total = resp.content_length().unwrap_or(0);
         let pb = if total > 0 {
             let pb = ProgressBar::new(total);
+            if !std::io::stdout().is_terminal() {
+                pb.set_draw_target(ProgressDrawTarget::hidden());
+            }
             pb.set_style(
                 ProgressStyle::with_template("{msg} [{bar:40.cyan/blue}] {bytes}/{total_bytes}")
                     .unwrap_or_else(|_| ProgressStyle::default_bar()),
@@ -1147,6 +1150,9 @@ fn now_secs() -> u64 {
 
 fn spinner(message: &str) -> ProgressBar {
     let pb = ProgressBar::new_spinner();
+    if !std::io::stdout().is_terminal() {
+        pb.set_draw_target(ProgressDrawTarget::hidden());
+    }
     pb.set_style(
         ProgressStyle::with_template("{spinner} {msg}")
             .unwrap_or_else(|_| ProgressStyle::default_spinner())
@@ -1163,6 +1169,9 @@ fn transfer_bar(total: u64, message: &str) -> ProgressBar {
     } else {
         ProgressBar::new_spinner()
     };
+    if !std::io::stdout().is_terminal() {
+        pb.set_draw_target(ProgressDrawTarget::hidden());
+    }
     pb.set_style(
         ProgressStyle::with_template("{msg} [{bar:40.green/blue}] {bytes}/{total_bytes} ({eta})")
             .unwrap_or_else(|_| ProgressStyle::default_bar()),

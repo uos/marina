@@ -29,14 +29,15 @@ typedef struct MarinaResolveDetailed {
 } MarinaResolveDetailed;
 
 // Detailed resolve response for C callers.
-MarinaResolveDetailed marina_resolve_detailed(const char *target);
+// Pass NULL (or empty string) for registry to keep automatic selection.
+MarinaResolveDetailed marina_resolve_detailed(const char *target, const char *registry);
 
 // Frees string fields inside MarinaResolveDetailed and clears pointers.
 void marina_free_resolve_detailed(MarinaResolveDetailed *result);
 
 // Returns allocated UTF-8 string (caller frees with marina_free_string) or NULL on error.
 // Legacy helper: returns local/cached path, or REMOTE:<bag>@<registry> marker.
-char *marina_resolve(const char *target);
+char *marina_resolve(const char *target, const char *registry);
 
 // Returns local path after pull (caller frees with marina_free_string) or NULL on error.
 // Pass NULL for registry to use default selection.

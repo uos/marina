@@ -7,7 +7,7 @@ static void on_progress(const char *phase, const char *message, void *user_data)
 }
 
 int main(void) {
-    MarinaResolveDetailed r = marina_resolve_detailed("tag");
+    MarinaResolveDetailed r = marina_resolve_detailed("tag", NULL);
     if (r.kind == MARINA_RESOLVE_LOCAL || r.kind == MARINA_RESOLVE_CACHED) {
         printf("ready locally: %s\n", r.path);
     } else if (r.kind == MARINA_RESOLVE_REMOTE_AVAILABLE) {

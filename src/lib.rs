@@ -5,6 +5,7 @@
 //! - pushing/pulling packed bag bundles,
 //! - optional phase-based progress reporting via [`ProgressSink`].
 
+pub mod cleanup;
 pub mod cli;
 pub mod core;
 pub mod ffi;

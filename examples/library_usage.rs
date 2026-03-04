@@ -4,7 +4,7 @@ fn main() -> anyhow::Result<()> {
     let mut marina = Marina::load()?;
 
     // Resolve a local path or cached/remote reference.
-    match marina.resolve_target("tag")? {
+    match marina.resolve_target("tag", None)? {
         ResolveResult::LocalPath(path) | ResolveResult::Cached(path) => {
             println!("resolved local/cached path: {}", path.display());
         }

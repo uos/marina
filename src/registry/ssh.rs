@@ -1,12 +1,12 @@
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
 use dirs;
 use glob::Pattern;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use serde::{Deserialize, Serialize};
 use ssh2::Session;
 
@@ -540,6 +540,9 @@ fn transfer_bar(total: u64, message: &str) -> ProgressBar {
     } else {
         ProgressBar::new_spinner()
     };
+    if !std::io::stdout().is_terminal() {
+        pb.set_draw_target(ProgressDrawTarget::hidden());
+    }
     pb.set_style(
         ProgressStyle::with_template("{msg} [{bar:40.cyan/blue}] {bytes}/{total_bytes}")
             .unwrap_or_else(|_| ProgressStyle::default_bar()),

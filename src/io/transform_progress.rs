@@ -5,7 +5,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use crate::progress::ProgressReporter;
 
 pub fn make_count_progress_bar(total: usize, label: impl Into<String>, unit: &str) -> ProgressBar {
-    if !std::io::stderr().is_terminal() {
+    if !std::io::stdout().is_terminal() {
         return ProgressBar::hidden();
     }
 
@@ -33,7 +33,7 @@ pub fn make_count_progress_bar(total: usize, label: impl Into<String>, unit: &st
 }
 
 pub fn make_byte_progress_bar(total_bytes: u64, label: impl Into<String>) -> ProgressBar {
-    if !std::io::stderr().is_terminal() {
+    if !std::io::stdout().is_terminal() {
         return ProgressBar::hidden();
     }
 
