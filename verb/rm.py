@@ -1,7 +1,7 @@
 import argparse
-import subprocess
 
 from ros2bag.verb import VerbExtension
+from ros2_marina._marina_exec import run_marina
 
 
 class RmVerb(VerbExtension):
@@ -15,5 +15,4 @@ class RmVerb(VerbExtension):
         )
 
     def main(self, *, args):
-        result = subprocess.run(['marina', 'rm'] + args.args)
-        return result.returncode
+        return run_marina('rm', args.args)

@@ -2,7 +2,13 @@
 name = "marina"
 version = "0.0.1"
 edition = "2024"
+include = ["**/*.rs", "**/*.md", "**/Cargo.toml", "**/LICENSE*"]
+keywords = ["robotics"]
+license = "MIT OR Apache-2.0"
+repository = "https://codeberg.org/uos-robotics/pelorus/"
+authors = ["Christopher 'stelzo' Sieh <stelzo@steado.de>"]
 rust-version = "1.85"
+description = "A dataset manager for robotics to organize, share, and discover datasets and metadata across storage backends."
 
 [lib]
 name = "marina"
@@ -53,7 +59,24 @@ env_logger = "0.11"
 version = "3.5"
 
 [lints.clippy]
-manual_is_multiple_of = "allow"
+manual_is_multiple_of = "allow" # rust 1.85 compatible
+
+[profile.release]
+strip = "symbols" # Significantly reduce binary size
+opt-level = "s"   # Optimize for size but keep some performance
+debug = 0
+
+[profile.full-release]
+inherits = "release"
+lto = "fat"          # Link Time Optimization
+codegen-units = 1    # Slower compile times but compiler sees all generated code and can optimize over everything across modules. Also decreases binary size.
 
 [profile.colcon]
 inherits = "release"
+
+[package.metadata.deb]
+name = "marina"
+section = "science"
+priority = "optional"
+assets = [["target/release/marina", "usr/bin/marina", "755"]]
+

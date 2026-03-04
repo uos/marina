@@ -10,7 +10,8 @@ enum {
   MARINA_RESOLVE_ERROR = -1,
   MARINA_RESOLVE_LOCAL = 0,
   MARINA_RESOLVE_CACHED = 1,
-  MARINA_RESOLVE_REMOTE_AVAILABLE = 2
+  MARINA_RESOLVE_REMOTE_AVAILABLE = 2,
+  MARINA_RESOLVE_AMBIGUOUS = 3
 };
 
 // Pull progress mode values.
@@ -22,8 +23,8 @@ enum {
 typedef struct MarinaResolveDetailed {
   int kind;
   char *path;      // set when kind is LOCAL or CACHED
-  char *bag;       // set when kind is REMOTE_AVAILABLE
-  char *registry;  // set when kind is REMOTE_AVAILABLE
+  char *bag;       // set when kind is REMOTE_AVAILABLE or AMBIGUOUS
+  char *registry;  // set when kind is REMOTE_AVAILABLE or AMBIGUOUS
   char *message;   // optional human-readable message
 } MarinaResolveDetailed;
 

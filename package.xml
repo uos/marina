@@ -1,21 +1,19 @@
 <?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>marina</name>
   <version>0.0.1</version>
-  <description>ROS bag management CLI</description>
+  <description>A dataset manager for robotics to organize, share, and discover datasets and metadata across storage backends.</description>
   <maintainer email="stelzo@steado.de">Christopher Sieh</maintainer>
   <license>MIT</license>
-
-  <buildtool_depend>ament_cmake</buildtool_depend>
+  <author>Christopher Sieh</author>
 
   <build_depend>cargo</build_depend>
   <build_depend>python3-catkin-pkg-modules</build_depend>
-  <build_depend>libsqlite3-dev</build_depend>
-  <exec_depend>libsqlite3-dev</exec_depend>
-
-  <!--<exec_depend>marina</exec_depend>-->
+  <depend>ros2bag</depend>
+  <depend>ros2cli</depend>
 
   <export>
-    <build_type>ament_cmake</build_type>
+    <build_type>ament_python</build_type>
   </export>
 </package>

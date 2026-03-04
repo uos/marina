@@ -23,7 +23,7 @@ struct ResolveDetailed {
 impl ResolveDetailed {
     #[getter]
     fn should_pull(&self) -> bool {
-        self.kind == "remote_available"
+        self.kind == "remote_available" || self.kind == "ambiguous"
     }
 }
 
@@ -36,6 +36,14 @@ fn resolve(target: &str) -> PyResult<String> {
     {
         ResolveResult::LocalPath(p) | ResolveResult::Cached(p) => Ok(p.display().to_string()),
         ResolveResult::RemoteAvailable { bag, registry, .. } => {
+            Ok(format!("REMOTE:{}@{}", bag, registry))
+        }
+        ResolveResult::Ambiguous { mut candidates } => {
+            candidates.sort_by(|a, b| a.0.cmp(&b.0));
+            let (registry, bag) = candidates
+                .into_iter()
+                .next()
+                .ok_or_else(|| PyRuntimeError::new_err("resolve returned no candidates"))?;
             Ok(format!("REMOTE:{}@{}", bag, registry))
         }
     }
@@ -136,6 +144,28 @@ fn resolve_detailed(target: &str) -> ResolveDetailed {
             registry: Some(registry),
             message: Some("remote bag available; call pull(...)".to_string()),
         },
+        Ok(ResolveResult::Ambiguous { mut candidates }) => {
+            candidates.sort_by(|a, b| a.0.cmp(&b.0));
+            if let Some((registry, bag)) = candidates.into_iter().next() {
+                ResolveDetailed {
+                    kind: "ambiguous".to_string(),
+                    path: None,
+                    bag: Some(bag.to_string()),
+                    registry: Some(registry),
+                    message: Some(
+                        "bag found in multiple registries; first registry selected".to_string(),
+                    ),
+                }
+            } else {
+                ResolveDetailed {
+                    kind: "error".to_string(),
+                    path: None,
+                    bag: None,
+                    registry: None,
+                    message: Some("resolve returned no candidates".to_string()),
+                }
+            }
+        }
         Err(e) => ResolveDetailed {
             kind: "error".to_string(),
             path: None,

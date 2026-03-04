@@ -1,7 +1,7 @@
 import argparse
-import subprocess
 
 from ros2bag.verb import VerbExtension
+from ros2_marina._marina_exec import run_marina
 
 
 class RegistryVerb(VerbExtension):
@@ -26,5 +26,4 @@ class RegistryVerb(VerbExtension):
         )
 
     def main(self, *, args):
-        result = subprocess.run(['marina', 'registry'] + args.args)
-        return result.returncode
+        return run_marina('registry', args.args)
