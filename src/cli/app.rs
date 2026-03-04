@@ -721,21 +721,23 @@ fn run_parsed(cli: Cli) -> Result<()> {
                 println!("pushed {}", args.bag.without_attachment());
             }
 
-            if args.move_to_cache && !args.dry_run && is_interactive_shell() {
-                if confirm_no_default(
+            if args.move_to_cache
+                && !args.dry_run
+                && is_interactive_shell()
+                && confirm_no_default(
                     &format!(
                         "Delete source '{}' now? (cache is already populated)",
                         args.source.display()
                     ),
                     yes,
-                )? {
-                    if args.source.is_dir() {
-                        std::fs::remove_dir_all(&args.source)?;
-                    } else if args.source.is_file() {
-                        std::fs::remove_file(&args.source)?;
-                    }
-                    println!("deleted source {}", args.source.display());
+                )?
+            {
+                if args.source.is_dir() {
+                    std::fs::remove_dir_all(&args.source)?;
+                } else if args.source.is_file() {
+                    std::fs::remove_file(&args.source)?;
                 }
+                println!("deleted source {}", args.source.display());
             }
         }
         Commands::Pull(args) => {
