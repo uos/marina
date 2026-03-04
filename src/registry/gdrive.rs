@@ -944,7 +944,7 @@ impl RegistryDriver for GDriveRegistry {
         self.download_file_to_path(
             &bundle.id,
             out_packed_file,
-            &format!("downloading {}", bundle.name),
+            &format!("{}", bag.without_attachment()),
         )?;
 
         let meta_bytes = self.download_file_bytes(&metadata_file.id)?;

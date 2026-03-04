@@ -258,7 +258,12 @@ impl SshRegistry {
         Ok(())
     }
 
-    fn download_file_with_progress(&self, remote_path: &str, local: &Path) -> Result<()> {
+    fn download_file_with_progress(
+        &self,
+        remote_path: &str,
+        local: &Path,
+        bag: &BagRef,
+    ) -> Result<()> {
         let session = self.connect()?;
         let (mut remote, stat) = session
             .scp_recv(Path::new(remote_path))
@@ -271,7 +276,7 @@ impl SshRegistry {
         let mut local_file = fs::File::create(local)
             .with_context(|| format!("failed creating local file {}", local.display()))?;
 
-        let pb = transfer_bar(size, &format!("ssh download {}", remote_path));
+        let pb = transfer_bar(size, &format!("{}", bag.without_attachment()));
         let mut buf = [0u8; 64 * 1024];
         loop {
             let n = remote.read(&mut buf)?;
@@ -366,10 +371,10 @@ impl RegistryDriver for SshRegistry {
             .ok_or_else(|| anyhow!("invalid output path"))?;
         fs::create_dir_all(parent)?;
 
-        self.download_file_with_progress(&self.data_path(bag), out_packed_file)?;
+        self.download_file_with_progress(&self.data_path(bag), out_packed_file, bag)?;
 
         let meta_local = parent.join("remote_metadata.json");
-        self.download_file_with_progress(&self.meta_path(bag), &meta_local)?;
+        self.download_file_with_progress(&self.meta_path(bag), &meta_local, bag)?;
         let meta_text = fs::read_to_string(&meta_local)?;
         let _ = fs::remove_file(meta_local);
         let meta: MetaFile = serde_json::from_str(&meta_text)?;

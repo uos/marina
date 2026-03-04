@@ -1,6 +1,8 @@
 pub mod driver;
 pub mod folder;
+#[cfg(feature = "gdrive")]
 pub mod gdrive;
+#[cfg(feature = "gdrive")]
 pub mod gdrive_auth;
 pub mod http;
 pub mod ssh;

@@ -122,6 +122,7 @@ pub fn registry_file_path() -> Result<PathBuf> {
 pub const DEFAULT_REGISTRY_NAME: &str = "osnabotics-public";
 pub const DEFAULT_GDRIVE_FOLDER_ID: &str = "10hjoMIyWTOVNOo3zDOfHoSb1S55gO3rJ";
 
+#[cfg(feature = "osnabotics-default-registry")]
 fn default_registry() -> RegistryConfig {
     RegistryConfig {
         name: DEFAULT_REGISTRY_NAME.to_string(),
@@ -134,10 +135,16 @@ fn default_registry() -> RegistryConfig {
 pub fn load_registries() -> Result<RegistryFile> {
     let path = registry_file_path()?;
     if !path.exists() {
-        let mut base = RegistryFile::default();
         #[cfg(feature = "osnabotics-default-registry")]
-        base.registry.push(default_registry());
-        return Ok(base);
+        {
+            let mut base = RegistryFile::default();
+            base.registry.push(default_registry());
+            return Ok(base);
+        }
+        #[cfg(not(feature = "osnabotics-default-registry"))]
+        {
+            return Ok(RegistryFile::default());
+        }
     }
 
     let content =

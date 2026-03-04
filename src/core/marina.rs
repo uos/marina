@@ -11,6 +11,7 @@ use crate::model::bag_ref::BagRef;
 use crate::progress::ProgressReporter;
 use crate::registry::driver::{BagInfo, PushMeta, RegistryDriver};
 use crate::registry::folder::FolderRegistry;
+#[cfg(feature = "gdrive")]
 use crate::registry::gdrive::GDriveRegistry;
 use crate::registry::http::HttpRegistry;
 use crate::registry::ssh::SshRegistry;
@@ -138,21 +139,7 @@ impl Marina {
         let mut registries = HashMap::new();
 
         for reg in registry_file.registry {
-            let driver: Box<dyn RegistryDriver> = match reg.kind.as_str() {
-                "folder" | "directory" => Box::new(FolderRegistry::from_uri(&reg.name, &reg.uri)?),
-                "ssh" => Box::new(SshRegistry::from_uri(
-                    &reg.name,
-                    &reg.uri,
-                    reg.auth_env.clone(),
-                )?),
-                "gdrive" => Box::new(GDriveRegistry::from_uri(
-                    &reg.name,
-                    &reg.uri,
-                    reg.auth_env.clone(),
-                )?),
-                "http" => Box::new(HttpRegistry::from_uri(&reg.name, &reg.uri)?),
-                other => Box::new(StubRegistry::new(other, &reg.uri, reg.auth_env.clone())),
-            };
+            let driver = make_registry_driver(&reg)?;
 
             registries.insert(reg.name.clone(), (reg, driver));
         }
@@ -173,27 +160,7 @@ impl Marina {
         existing.registry.push(registry.clone());
         config::save_registries(&existing)?;
 
-        let driver: Box<dyn RegistryDriver> = match registry.kind.as_str() {
-            "folder" | "directory" => {
-                Box::new(FolderRegistry::from_uri(&registry.name, &registry.uri)?)
-            }
-            "ssh" => Box::new(SshRegistry::from_uri(
-                &registry.name,
-                &registry.uri,
-                registry.auth_env.clone(),
-            )?),
-            "gdrive" => Box::new(GDriveRegistry::from_uri(
-                &registry.name,
-                &registry.uri,
-                registry.auth_env.clone(),
-            )?),
-            "http" => Box::new(HttpRegistry::from_uri(&registry.name, &registry.uri)?),
-            other => Box::new(StubRegistry::new(
-                other,
-                &registry.uri,
-                registry.auth_env.clone(),
-            )),
-        };
+        let driver = make_registry_driver(&registry)?;
 
         self.registries
             .insert(registry.name.clone(), (registry, driver));
@@ -929,6 +896,44 @@ impl Marina {
             .and_then(|(_, drv)| drv.list_with_info(pattern).ok())
             .unwrap_or_default()
     }
+}
+
+fn make_registry_driver(registry: &RegistryConfig) -> Result<Box<dyn RegistryDriver>> {
+    let driver: Box<dyn RegistryDriver> = match registry.kind.as_str() {
+        "folder" | "directory" => {
+            Box::new(FolderRegistry::from_uri(&registry.name, &registry.uri)?)
+        }
+        "ssh" => Box::new(SshRegistry::from_uri(
+            &registry.name,
+            &registry.uri,
+            registry.auth_env.clone(),
+        )?),
+        "http" => Box::new(HttpRegistry::from_uri(&registry.name, &registry.uri)?),
+        "gdrive" => {
+            #[cfg(feature = "gdrive")]
+            {
+                Box::new(GDriveRegistry::from_uri(
+                    &registry.name,
+                    &registry.uri,
+                    registry.auth_env.clone(),
+                )?)
+            }
+            #[cfg(not(feature = "gdrive"))]
+            {
+                Box::new(StubRegistry::new(
+                    "gdrive",
+                    &registry.uri,
+                    registry.auth_env.clone(),
+                ))
+            }
+        }
+        other => Box::new(StubRegistry::new(
+            other,
+            &registry.uri,
+            registry.auth_env.clone(),
+        )),
+    };
+    Ok(driver)
 }
 
 fn now_unix_secs() -> u64 {

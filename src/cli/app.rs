@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::{io::IsTerminal, io::Write};
 
 use anyhow::Result;
@@ -12,6 +11,7 @@ use crate::io::pack::ArchiveCompression;
 use crate::model::bag_ref::BagRef;
 use crate::progress::{ProgressReporter, WriterProgress};
 use crate::registry::driver::BagInfo;
+#[cfg(feature = "gdrive")]
 use crate::registry::gdrive_auth;
 use crate::storage::config::{
     self, ConfigArchiveCompression, ConfigMcapCompression, ConfigPointcloudMode, RegistryConfig,
@@ -285,6 +285,158 @@ fn confirm_no_default(prompt: &str, yes: bool) -> Result<bool> {
     Ok(input == "y" || input == "yes")
 }
 
+fn pick_pull_candidate_no_default(
+    prompt: &str,
+    items: &[(String, BagRef, Option<BagInfo>)],
+    yes: bool,
+    time_display: TimeDisplay,
+) -> Result<Option<usize>> {
+    if yes || items.is_empty() {
+        return Ok(None);
+    }
+    eprintln!("{}:", prompt);
+    eprintln!("  [0] no");
+    let rows: Vec<[String; 9]> = items
+        .iter()
+        .enumerate()
+        .map(|(i, (registry, bag, info))| {
+            let (hash, orig, packed, clouds, mcap, pushed) =
+                format_bag_info(info.as_ref(), time_display);
+            [
+                (i + 1).to_string(),
+                bag.to_string(),
+                registry.clone(),
+                hash,
+                orig,
+                packed,
+                clouds,
+                mcap,
+                pushed,
+            ]
+        })
+        .collect();
+
+    let headers = [
+        "IDX", "DATASET", "REGISTRY", "HASH", "ORIGINAL", "PACKED", "CLOUDS", "MCAP", "PUSHED",
+    ];
+    let mut widths = headers.map(|h| h.len());
+    for row in &rows {
+        for (i, cell) in row.iter().enumerate() {
+            widths[i] = widths[i].max(cell.len());
+        }
+    }
+    let fmt_row = |cols: &[&str; 9]| {
+        let mut s = String::new();
+        for (i, col) in cols.iter().enumerate() {
+            if i > 0 {
+                s.push_str("  ");
+            }
+            if i + 1 < cols.len() {
+                s.push_str(&format!("{:<width$}", col, width = widths[i]));
+            } else {
+                s.push_str(col);
+            }
+        }
+        s
+    };
+
+    eprintln!("{}", fmt_row(&headers));
+    for row in &rows {
+        eprintln!("{}", fmt_row(&row.each_ref().map(|s| s.as_str())));
+    }
+    eprint!("Select [0]: ");
+    std::io::stderr().flush()?;
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let input = input.trim().to_ascii_lowercase();
+    if input.is_empty() || input == "0" || input == "n" || input == "no" {
+        return Ok(None);
+    }
+
+    let idx: usize = input
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid selection"))?;
+    if idx == 0 || idx > items.len() {
+        return Err(anyhow::anyhow!("selection out of range"));
+    }
+    Ok(Some(idx - 1))
+}
+
+fn print_remote_detail_table(
+    all: Vec<(String, BagRef, Option<BagInfo>)>,
+    time_display: TimeDisplay,
+) {
+    if all.is_empty() {
+        println!("no remote datasets found");
+        return;
+    }
+
+    let rows: Vec<[String; 8]> = all
+        .into_iter()
+        .map(|(registry, bag, info)| {
+            let (hash, orig, packed, clouds, mcap, pushed) =
+                format_bag_info(info.as_ref(), time_display);
+            [
+                bag.to_string(),
+                registry,
+                hash,
+                orig,
+                packed,
+                clouds,
+                mcap,
+                pushed,
+            ]
+        })
+        .collect();
+    let headers = [
+        "DATASET", "REGISTRY", "HASH", "ORIGINAL", "PACKED", "CLOUDS", "MCAP", "PUSHED",
+    ];
+    let mut widths = headers.map(|h| h.len());
+    for row in &rows {
+        for (i, cell) in row.iter().enumerate() {
+            widths[i] = widths[i].max(cell.len());
+        }
+    }
+    let fmt_row = |cols: &[&str; 8]| {
+        let mut s = String::new();
+        for (i, col) in cols.iter().enumerate() {
+            if i > 0 {
+                s.push_str("  ");
+            }
+            if i + 1 < cols.len() {
+                s.push_str(&format!("{:<width$}", col, width = widths[i]));
+            } else {
+                s.push_str(col);
+            }
+        }
+        s
+    };
+    println!("{}", fmt_row(&headers));
+    for row in &rows {
+        println!("{}", fmt_row(&row.each_ref().map(|s| s.as_str())));
+    }
+}
+
+fn pull_and_print(
+    marina: &mut Marina,
+    bag: &BagRef,
+    registry: Option<&str>,
+    pull_options: PullOptions,
+) -> Result<()> {
+    let path = {
+        let mut stdout = std::io::stdout();
+        let mut sink = WriterProgress::new(&mut stdout);
+        let mut progress = ProgressReporter::new(&mut sink);
+        marina.pull_exact_with_progress_and_options(bag, registry, pull_options, &mut progress)?
+    };
+    println!("pulled {} -> {}", bag.without_attachment(), path.display());
+    if let Some(stats) = marina.cached_size_stats(bag) {
+        print_size_summary("cached size", stats.original_bytes, stats.packed_bytes);
+    }
+    Ok(())
+}
+
 fn run_parsed(cli: Cli) -> Result<()> {
     let yes = cli.yes;
     let compression = config::load_compression_config()?;
@@ -343,33 +495,45 @@ fn run_parsed(cli: Cli) -> Result<()> {
                         cfg.kind
                     ));
                 }
-                if args.status {
-                    let status = gdrive_auth::oauth_status(&args.name)?;
-                    println!("registry: {}", args.name);
-                    println!("token file: {}", status.token_path.display());
-                    if !status.token_present {
-                        println!("status: missing (run `marina registry auth {}`)", args.name);
-                    } else if status.token_valid {
-                        println!("status: valid");
-                        if let Some(expires_at) = status.expires_at {
-                            let now = SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .map(|d| d.as_secs())
-                                .unwrap_or(0);
-                            let remaining = expires_at.saturating_sub(now);
-                            println!("expires in: {}s", remaining);
-                        }
-                    } else {
-                        println!("status: invalid (refresh failed)");
-                        if let Some(err) = status.refresh_error {
-                            println!("refresh error: {}", err);
-                        }
-                    }
-                    return Ok(());
+                #[cfg(not(feature = "gdrive"))]
+                {
+                    let _ = args;
+                    return Err(anyhow::anyhow!(
+                        "gdrive support is disabled in this build; rebuild with feature `gdrive`"
+                    ));
                 }
-                let (client_id, client_secret) =
-                    gdrive_auth::resolve_client_credentials(args.client_id, args.client_secret)?;
-                gdrive_auth::run_oauth_flow(&args.name, &client_id, &client_secret)?;
+                #[cfg(feature = "gdrive")]
+                {
+                    if args.status {
+                        let status = gdrive_auth::oauth_status(&args.name)?;
+                        println!("registry: {}", args.name);
+                        println!("token file: {}", status.token_path.display());
+                        if !status.token_present {
+                            println!("status: missing (run `marina registry auth {}`)", args.name);
+                        } else if status.token_valid {
+                            println!("status: valid");
+                            if let Some(expires_at) = status.expires_at {
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs())
+                                    .unwrap_or(0);
+                                let remaining = expires_at.saturating_sub(now);
+                                println!("expires in: {}s", remaining);
+                            }
+                        } else {
+                            println!("status: invalid (refresh failed)");
+                            if let Some(err) = status.refresh_error {
+                                println!("refresh error: {}", err);
+                            }
+                        }
+                        return Ok(());
+                    }
+                    let (client_id, client_secret) = gdrive_auth::resolve_client_credentials(
+                        args.client_id,
+                        args.client_secret,
+                    )?;
+                    gdrive_auth::run_oauth_flow(&args.name, &client_id, &client_secret)?;
+                }
             }
             RegistrySub::Mirror(args) => {
                 let mut out = std::io::stdout();
@@ -424,58 +588,10 @@ fn run_parsed(cli: Cli) -> Result<()> {
                     }
                     rows
                 };
-                if all.is_empty() {
-                    println!("no remote datasets found");
-                } else {
-                    let time_display = config::load_registries()
-                        .map(|f| f.settings.time_display)
-                        .unwrap_or_default();
-                    let rows: Vec<[String; 8]> = all
-                        .into_iter()
-                        .map(|(registry, bag, info)| {
-                            let (hash, orig, packed, clouds, mcap, pushed) =
-                                format_bag_info(info.as_ref(), time_display);
-                            [
-                                bag.to_string(),
-                                registry,
-                                hash,
-                                orig,
-                                packed,
-                                clouds,
-                                mcap,
-                                pushed,
-                            ]
-                        })
-                        .collect();
-                    let headers = [
-                        "DATASET", "REGISTRY", "HASH", "ORIGINAL", "PACKED", "CLOUDS", "MCAP",
-                        "PUSHED",
-                    ];
-                    let mut widths = headers.map(|h| h.len());
-                    for row in &rows {
-                        for (i, cell) in row.iter().enumerate() {
-                            widths[i] = widths[i].max(cell.len());
-                        }
-                    }
-                    let fmt_row = |cols: &[&str; 8]| {
-                        let mut s = String::new();
-                        for (i, col) in cols.iter().enumerate() {
-                            if i > 0 {
-                                s.push_str("  ");
-                            }
-                            if i + 1 < cols.len() {
-                                s.push_str(&format!("{:<width$}", col, width = widths[i]));
-                            } else {
-                                s.push_str(col);
-                            }
-                        }
-                        s
-                    };
-                    println!("{}", fmt_row(&headers));
-                    for row in &rows {
-                        println!("{}", fmt_row(&row.each_ref().map(|s| s.as_str())));
-                    }
-                }
+                let time_display = config::load_registries()
+                    .map(|f| f.settings.time_display)
+                    .unwrap_or_default();
+                print_remote_detail_table(all, time_display);
             } else {
                 let items = marina.list_cached_bags();
                 if items.is_empty() {
@@ -494,25 +610,33 @@ fn run_parsed(cli: Cli) -> Result<()> {
             }
         }
         Commands::Search(args) => {
-            if let Some(registry) = args.registry.as_deref() {
-                let out = marina.search_remote(&args.pattern, Some(registry))?;
-                if out.is_empty() {
-                    println!("no remote matches found in '{}'", registry);
-                } else {
-                    for bag in out {
-                        println!("{}\t{}", registry, bag);
-                    }
-                }
+            let rows = if let Some(registry) = args.registry.as_deref() {
+                marina
+                    .search_remote_with_info(registry, &args.pattern)
+                    .into_iter()
+                    .map(|(bag, info)| (registry.to_string(), bag, info))
+                    .collect::<Vec<_>>()
             } else {
-                let hits = marina.search_all_remotes(&args.pattern);
-                if hits.is_empty() {
-                    println!("no remote matches found");
-                } else {
-                    for hit in hits {
-                        println!("{}\t{}", hit.registry, hit.bag);
+                let mut rows = Vec::new();
+                for cfg in marina.list_registry_configs() {
+                    match marina.search_remote(&args.pattern, Some(&cfg.name)) {
+                        Ok(bags) => {
+                            rows.extend(bags.into_iter().map(|bag| {
+                                let info = marina.bag_info(&cfg.name, &bag);
+                                (cfg.name.clone(), bag, info)
+                            }));
+                        }
+                        Err(err) => {
+                            warn!("failed searching registry '{}': {}", cfg.name, err);
+                        }
                     }
                 }
-            }
+                rows
+            };
+            let time_display = config::load_registries()
+                .map(|f| f.settings.time_display)
+                .unwrap_or_default();
+            print_remote_detail_table(rows, time_display);
         }
         Commands::Push(args) => {
             let registry = match args.registry.clone() {
@@ -677,28 +801,20 @@ fn run_parsed(cli: Cli) -> Result<()> {
                 println!("pulled {} dataset(s)", pulled.len());
             } else {
                 let bag: BagRef = args.target.parse()?;
-                let path = if !args.no_progress {
-                    let mut stdout = std::io::stdout();
-                    let mut sink = WriterProgress::new(&mut stdout);
-                    let mut progress = ProgressReporter::new(&mut sink);
-                    marina.pull_exact_with_progress_and_options(
-                        &bag,
-                        registry.as_deref(),
-                        pull_options,
-                        &mut progress,
-                    )?
-                } else {
+                if args.no_progress {
                     let mut progress = ProgressReporter::silent();
-                    marina.pull_exact_with_progress_and_options(
+                    let path = marina.pull_exact_with_progress_and_options(
                         &bag,
                         registry.as_deref(),
                         pull_options,
                         &mut progress,
-                    )?
-                };
-                println!("pulled {} -> {}", bag.without_attachment(), path.display());
-                if let Some(stats) = marina.cached_size_stats(&bag) {
-                    print_size_summary("cached size", stats.original_bytes, stats.packed_bytes);
+                    )?;
+                    println!("pulled {} -> {}", bag.without_attachment(), path.display());
+                    if let Some(stats) = marina.cached_size_stats(&bag) {
+                        print_size_summary("cached size", stats.original_bytes, stats.packed_bytes);
+                    }
+                } else {
+                    pull_and_print(&mut marina, &bag, registry.as_deref(), pull_options)?;
                 }
             }
         }
@@ -753,14 +869,43 @@ fn run_parsed(cli: Cli) -> Result<()> {
                 }
             }
             ResolveResult::Ambiguous { candidates } => {
-                println!("'{}' found in multiple registries:", args.target);
-                for (registry, bag) in &candidates {
-                    let hash = marina
-                        .bag_info(registry, bag)
-                        .and_then(|i| i.bundle_hash)
-                        .map(|h| format!("  [hash:{h}]"))
+                if is_interactive_shell() {
+                    let items: Vec<(String, BagRef, Option<BagInfo>)> = candidates
+                        .iter()
+                        .map(|(registry, bag)| {
+                            let info = marina.bag_info(registry, bag);
+                            (registry.clone(), bag.clone(), info)
+                        })
+                        .collect();
+
+                    let time_display = config::load_registries()
+                        .map(|f| f.settings.time_display)
                         .unwrap_or_default();
-                    println!("  marina pull {} --registry {}{}", bag, registry, hash);
+
+                    if let Some(choice) = pick_pull_candidate_no_default(
+                        &format!("'{}' found in multiple registries, pull now?", args.target),
+                        &items,
+                        yes,
+                        time_display,
+                    )? {
+                        let (registry, bag, _) = &items[choice];
+                        let pull_options = PullOptions {
+                            unpacked_mcap_compression: config_mcap_compression_to_core(
+                                compression.unpacked_mcap_compression,
+                            ),
+                        };
+                        pull_and_print(&mut marina, bag, Some(registry.as_str()), pull_options)?;
+                    }
+                } else {
+                    println!("'{}' found in multiple registries:", args.target);
+                    for (registry, bag) in &candidates {
+                        let hash = marina
+                            .bag_info(registry, bag)
+                            .and_then(|i| i.bundle_hash)
+                            .map(|h| format!("  [hash:{h}]"))
+                            .unwrap_or_default();
+                        println!("  marina pull {} --registry {}{}", bag, registry, hash);
+                    }
                 }
             }
         },

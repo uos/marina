@@ -216,11 +216,8 @@ impl RegistryDriver for HttpRegistry {
             .and_then(|e| e.metadata_url.clone())
             .unwrap_or_else(|| self.default_metadata_url(&target));
 
-        let downloaded = self.download_file_with_progress(
-            &bundle_url,
-            out_packed_file,
-            &format!("http download {}", target),
-        )?;
+        let downloaded =
+            self.download_file_with_progress(&bundle_url, out_packed_file, &format!("{}", target))?;
 
         let descriptor = match self.fetch_metadata(&metadata_url) {
             Ok(meta) => RemoteDescriptor {

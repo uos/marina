@@ -1,25 +1,43 @@
 # marina
 
-`marina` is a bagfile manager to organize, share, and discover ROS bags across storage backends so you can finally stop emailing download links around.
+`marina` is a dataset manager for robotics to organize, share, and discover datasets and metadata across storage backends so we can finally stop emailing download links around.
+The focus lies primarily on ROS 2 bagfiles but plain folders are supported as well.
+
+## Quickstart
+
+After installation, you can download the `Minot` demo bag like this:
+
+```bash
+marina pull dlg2023:cutted
+```
+
+The bag will be placed in your local marina cache. You can get the path to it with the `resolve` subcommand.
+```bash
+
+```
 
 ## Compression
 
-Marina compresses PointCloud2 messages in MCAP bags for more efficient storage and transfer. To avoid unexpected data loss, the default compression mode is `lossless`, which is a reversible encoding that preserves all original data. If you want to achieve higher compression ratios at the cost of some mm accuracy, you can choose `lossy` mode, which we recommend for most use cases.
+Marina heavily uses compression for creating the archives in the registries. For ROS 2 PointCloud2 messages, we embed the [cloudini](https://github.com/facontidavide/cloudini) library for much better compression rates. Marina uses lossy compression with 1mm accuracy by default. You can easily switch to lossless compression or change the accuracy via config or CLI. The defaults for the config, is defined as follows:
 
-Compression defaults can be configured globally in `~/.config/marina/registries.toml`:
-
+`~/.config/marina/registries.toml`
+ 
 ```toml
-registry = []
+[[registry]]
+name = "osnabotics-public"
+kind = "gdrive"
+uri = "gdrive://10hjoMIyWTOVNOo3zDOfHoSb1S55gO3rJ"
+
 
 [compression]
-pointcloud_mode = "lossless"             # off | lossy | lossless
+pointcloud_mode = "lossy"             # off | lossy | lossless
 pointcloud_accuracy_mm = 1.0             # float
 packed_mcap_compression = "zstd"         # none | zstd | lz4
 packed_archive_compression = "gzip"      # gzip | none
 unpacked_mcap_compression = "zstd"       # none | zstd | lz4
 ```
 
-If `push`/`pull` compression flags are provided on the CLI, those values override the config for that command only.
+If compression flags are provided on the CLI, those values override the config for that command only.
 
 ## Registries
 
