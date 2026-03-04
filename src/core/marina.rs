@@ -97,6 +97,7 @@ pub struct PushOptions {
     pub packed_mcap_compression: McapChunkCompression,
     pub packed_archive_compression: pack::ArchiveCompression,
     pub write_http_index: bool,
+    pub dry_run: bool,
 }
 
 impl Default for PushOptions {
@@ -107,6 +108,7 @@ impl Default for PushOptions {
             packed_mcap_compression: McapChunkCompression::Zstd,
             packed_archive_compression: pack::ArchiveCompression::Gzip,
             write_http_index: false,
+            dry_run: false,
         }
     }
 }
@@ -120,7 +122,7 @@ pub struct PullOptions {
 impl Default for PullOptions {
     fn default() -> Self {
         Self {
-            unpacked_mcap_compression: McapChunkCompression::Zstd,
+            unpacked_mcap_compression: McapChunkCompression::Lz4,
         }
     }
 }
@@ -305,15 +307,6 @@ impl Marina {
             .with_context(|| format!("write preflight failed for registry '{}'", cfg.name))?;
 
         let source = bag::discover_bag(source_dir)?;
-        progress.emit(
-            "push",
-            format!(
-                "preparing dataset '{}' for registry '{}'",
-                bag.without_attachment(),
-                cfg.name
-            ),
-        );
-
         let cache_dir = cache::bag_cache_dir(&bag.without_attachment())?;
         let packed_file = cache_dir.join("bundle.marina.tar.gz");
         let packed_meta = pack::pack_bag_with_progress_and_options(
@@ -329,6 +322,18 @@ impl Marina {
             },
             progress,
         )?;
+
+        if options.dry_run {
+            progress.emit(
+                "push",
+                format!(
+                    "dry-run: packed bundle prepared for registry '{}' ({}); upload/index/cache update skipped",
+                    cfg.name, cfg.kind
+                ),
+            );
+            progress.emit("push", "dry-run complete");
+            return Ok(());
+        }
 
         progress.emit(
             "push",

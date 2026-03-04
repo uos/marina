@@ -1,13 +1,12 @@
-use std::io::IsTerminal;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use indicatif::{ProgressBar, ProgressStyle};
 use rusqlite::{Connection, params};
 
 use crate::io::mcap_transform::{
     PointCloudCompressionMode, compress_cdr_pointcloud, decompress_cdr_pointcloud,
 };
+use crate::io::transform_progress::{emit_count_progress, make_count_progress_bar};
 use crate::progress::ProgressReporter;
 
 const MARINA_CODEC_KEY: &str = "marina.pointcloud.codec";
@@ -104,13 +103,13 @@ pub fn compress_db3_for_push(
         PointCloudCompressionMode::Lossy => "lossy",
         PointCloudCompressionMode::Lossless => "lossless",
     };
-    let pb = make_progress_bar(pc2_count, "compressing db3 PointCloud2");
+    let pb = make_count_progress_bar(pc2_count, "processing messages", "steps");
     let bar_visible = !pb.is_hidden();
     if !bar_visible {
         progress.emit(
             "pack",
             format!(
-                "compressing {} PointCloud2 message(s) in db3 (mode: {}, precision: {:.3} mm)",
+                "compressing {} messages (mode: {}, precision: {:.3} mm)",
                 pc2_count,
                 mode_str,
                 options.pointcloud_precision_m * 1000.0
@@ -158,11 +157,7 @@ pub fn compress_db3_for_push(
             pb.inc(1);
             i += 1;
             if !bar_visible && (i % MESSAGE_PROGRESS_EVERY == 0 || i == pc2_count) {
-                let pct = (i as f64 / pc2_count as f64) * 100.0;
-                progress.emit(
-                    "pack",
-                    format!("db3 pointcloud compression: {i}/{pc2_count} ({pct:.1}%)"),
-                );
+                emit_count_progress(progress, "pack", "processed", i, pc2_count);
             }
         }
         Ok(codec_val)
@@ -253,7 +248,7 @@ pub fn decompress_db3_after_pull(
         .context("failed counting PointCloud2 messages")? as usize;
     stats.pointcloud_messages = pc2_count;
 
-    let pb = make_progress_bar(pc2_count, "restoring db3 PointCloud2");
+    let pb = make_count_progress_bar(pc2_count, "restoring messages", "steps");
     let bar_visible = !pb.is_hidden();
     if !bar_visible {
         progress.emit(
@@ -295,11 +290,7 @@ pub fn decompress_db3_after_pull(
             pb.inc(1);
             i += 1;
             if !bar_visible && (i % MESSAGE_PROGRESS_EVERY == 0 || i == pc2_count) {
-                let pct = (i as f64 / pc2_count as f64) * 100.0;
-                progress.emit(
-                    "unpack",
-                    format!("db3 pointcloud restore: {i}/{pc2_count} ({pct:.1}%)"),
-                );
+                emit_count_progress(progress, "unpack", "processed", i, pc2_count);
             }
         }
         Ok(())
@@ -364,15 +355,3 @@ fn has_rosbag_db3_schema(conn: &Connection) -> Result<bool> {
     Ok(topics_exists && messages_exists)
 }
 
-fn make_progress_bar(count: usize, label: &str) -> ProgressBar {
-    if !std::io::stderr().is_terminal() || count == 0 {
-        return ProgressBar::hidden();
-    }
-    let pb = ProgressBar::new(count as u64);
-    pb.set_style(
-        ProgressStyle::with_template("{msg} [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
-            .unwrap_or_else(|_| ProgressStyle::default_bar()),
-    );
-    pb.set_message(label.to_string());
-    pb
-}

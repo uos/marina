@@ -1,17 +1,16 @@
 use std::borrow::Cow;
-use std::ffi::OsStr;
 use std::fs::File;
-use std::io::{BufWriter, IsTerminal, Read, Seek};
+use std::io::{BufWriter, Read, Seek};
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use cloudini::ros::{CompressedPointCloud2, CompressionConfig};
-use indicatif::{ProgressBar, ProgressStyle};
 use mcap::sans_io::{IndexedReadEvent, IndexedReader, SummaryReadEvent};
 use mcap::{Compression, Message, Summary, WriteOptions, Writer};
 
 use crate::progress::ProgressReporter;
+use crate::io::transform_progress::{emit_count_progress, make_count_progress_bar};
 
 ros_pointcloud2::impl_pointcloud2_for_ros2_interfaces_jazzy_serde!();
 
@@ -21,52 +20,6 @@ const MARINA_CODEC_KEY: &str = "marina.pointcloud.codec";
 const MARINA_CODEC_VAL: &str = "cloudini";
 const CHUNK_PROGRESS_EVERY: usize = 16;
 const MESSAGE_PROGRESS_EVERY: usize = 200_000;
-
-fn emit_chunk_progress(
-    progress: &mut ProgressReporter<'_>,
-    phase: &'static str,
-    loaded_chunks: usize,
-    total_chunks: usize,
-) {
-    if total_chunks > 0 {
-        let pct = (loaded_chunks as f64 / total_chunks as f64) * 100.0;
-        progress.emit(
-            phase,
-            format!(
-                "loaded chunk {}/{} ({:.1}%)",
-                loaded_chunks, total_chunks, pct
-            ),
-        );
-    } else {
-        progress.emit(phase, format!("loaded chunk {}", loaded_chunks));
-    }
-}
-
-fn indexed_reader_bar(total_chunks: usize, phase: &'static str, file_name: &str) -> ProgressBar {
-    if !std::io::stderr().is_terminal() {
-        return ProgressBar::hidden();
-    }
-
-    if total_chunks > 0 {
-        let pb = ProgressBar::new(total_chunks as u64);
-        pb.set_style(
-            ProgressStyle::with_template("{msg} [{bar:40.cyan/blue}] {pos}/{len} chunks ({eta})")
-                .unwrap_or_else(|_| ProgressStyle::default_bar()),
-        );
-        pb.set_message(format!("{phase} read {file_name}"));
-        pb
-    } else {
-        let pb = ProgressBar::new_spinner();
-        pb.set_style(
-            ProgressStyle::with_template("{spinner} {msg}")
-                .unwrap_or_else(|_| ProgressStyle::default_spinner())
-                .tick_chars("|/-\\ "),
-        );
-        pb.set_message(format!("{phase} read {file_name}"));
-        pb.enable_steady_tick(std::time::Duration::from_millis(100));
-        pb
-    }
-}
 
 fn read_summary_from_file(file: &mut File) -> Result<Summary> {
     let mut summary_reader = mcap::sans_io::summary_reader::SummaryReader::new();
@@ -118,7 +71,7 @@ pub struct PushTransformOptions {
 impl Default for PushTransformOptions {
     fn default() -> Self {
         Self {
-            pointcloud_mode: PointCloudCompressionMode::Lossless,
+            pointcloud_mode: PointCloudCompressionMode::Lossy,
             pointcloud_precision_m: 0.001,
             output_mcap_compression: McapChunkCompression::Zstd,
         }
@@ -160,14 +113,6 @@ pub fn compress_mcap_for_push_with_progress(
     options: PushTransformOptions,
     progress: &mut ProgressReporter<'_>,
 ) -> Result<TransformStats> {
-    let input_name = input
-        .file_name()
-        .unwrap_or_else(|| OsStr::new("<unknown>"))
-        .to_string_lossy()
-        .to_string();
-
-    progress.emit("pack", format!("reading MCAP file {}", input_name));
-
     let mut input_file = File::open(input)
         .with_context(|| format!("failed to open input mcap {}", input.display()))?;
     let summary = read_summary_from_file(&mut input_file)?;
@@ -177,7 +122,7 @@ pub fn compress_mcap_for_push_with_progress(
     let total_chunks = summary.chunk_indexes.len();
     let expected_messages = summary.stats.as_ref().map(|s| s.message_count);
     let mut loaded_chunks = 0usize;
-    let pb = indexed_reader_bar(total_chunks, "pack", &input_name);
+    let pb = make_count_progress_bar(total_chunks, "processing messages", "steps");
     let bar_visible = !pb.is_hidden();
 
     if !bar_visible {
@@ -199,7 +144,10 @@ pub fn compress_mcap_for_push_with_progress(
 
     let writer_file = File::create(output)
         .with_context(|| format!("failed to create output mcap {}", output.display()))?;
-    let mut writer = make_writer(BufWriter::new(writer_file), options.output_mcap_compression)?;
+    let mut writer = Some(make_writer(
+        BufWriter::new(writer_file),
+        options.output_mcap_compression,
+    )?);
 
     let mut stats = TransformStats::default();
 
@@ -226,7 +174,7 @@ pub fn compress_mcap_for_push_with_progress(
                         || loaded_chunks % CHUNK_PROGRESS_EVERY == 0
                         || loaded_chunks == total_chunks)
                 {
-                    emit_chunk_progress(progress, "pack", loaded_chunks, total_chunks);
+                    emit_count_progress(progress, "pack", "processed", loaded_chunks, total_chunks);
                 }
             }
             IndexedReadEvent::Message { header, data } => {
@@ -268,7 +216,9 @@ pub fn compress_mcap_for_push_with_progress(
                     }
                 }
                 match options.pointcloud_mode {
-                    PointCloudCompressionMode::Disabled => writer.write(&msg)?,
+                    PointCloudCompressionMode::Disabled => {
+                        write_message_checked(&mut writer, &msg, "pack")?
+                    }
                     PointCloudCompressionMode::Lossy | PointCloudCompressionMode::Lossless => {
                         if should_transform_channel(&msg) {
                             let transformed = compress_pointcloud_message(
@@ -276,10 +226,10 @@ pub fn compress_mcap_for_push_with_progress(
                                 options.pointcloud_mode,
                                 options.pointcloud_precision_m,
                             )?;
-                            writer.write(&transformed)?;
+                            write_message_checked(&mut writer, &transformed, "pack")?;
                             stats.pointcloud_messages += 1;
                         } else {
-                            writer.write(&msg)?;
+                            write_message_checked(&mut writer, &msg, "pack")?;
                         }
                     }
                 }
@@ -287,16 +237,9 @@ pub fn compress_mcap_for_push_with_progress(
         }
     }
 
-    writer.finish()?;
+    finish_writer_checked(&mut writer, "pack")?;
     if !pb.is_hidden() {
-        if total_chunks > 0 {
-            pb.finish_with_message(format!(
-                "pack complete {} ({}/{})",
-                input_name, loaded_chunks, total_chunks
-            ));
-        } else {
-            pb.finish_with_message(format!("pack complete {}", input_name));
-        }
+        pb.finish_and_clear();
     }
     let mode = match options.pointcloud_mode {
         PointCloudCompressionMode::Disabled => "disabled",
@@ -346,14 +289,6 @@ pub fn decompress_mcap_after_pull_with_progress(
     options: PullTransformOptions,
     progress: &mut ProgressReporter<'_>,
 ) -> Result<TransformStats> {
-    let input_name = input
-        .file_name()
-        .unwrap_or_else(|| OsStr::new("<unknown>"))
-        .to_string_lossy()
-        .to_string();
-
-    progress.emit("unpack", format!("reading MCAP file {}", input_name));
-
     let mut input_file = File::open(input)
         .with_context(|| format!("failed to open input mcap {}", input.display()))?;
     let summary = read_summary_from_file(&mut input_file)?;
@@ -363,7 +298,7 @@ pub fn decompress_mcap_after_pull_with_progress(
     let total_chunks = summary.chunk_indexes.len();
     let expected_messages = summary.stats.as_ref().map(|s| s.message_count);
     let mut loaded_chunks = 0usize;
-    let pb = indexed_reader_bar(total_chunks, "unpack", &input_name);
+    let pb = make_count_progress_bar(total_chunks, "restoring messages", "steps");
     let bar_visible = !pb.is_hidden();
 
     if !bar_visible {
@@ -385,7 +320,10 @@ pub fn decompress_mcap_after_pull_with_progress(
 
     let writer_file = File::create(output)
         .with_context(|| format!("failed to create output mcap {}", output.display()))?;
-    let mut writer = make_writer(BufWriter::new(writer_file), options.output_mcap_compression)?;
+    let mut writer = Some(make_writer(
+        BufWriter::new(writer_file),
+        options.output_mcap_compression,
+    )?);
 
     let mut stats = TransformStats::default();
 
@@ -412,7 +350,7 @@ pub fn decompress_mcap_after_pull_with_progress(
                         || loaded_chunks % CHUNK_PROGRESS_EVERY == 0
                         || loaded_chunks == total_chunks)
                 {
-                    emit_chunk_progress(progress, "unpack", loaded_chunks, total_chunks);
+                    emit_count_progress(progress, "unpack", "processed", loaded_chunks, total_chunks);
                 }
             }
             IndexedReadEvent::Message { header, data } => {
@@ -455,25 +393,18 @@ pub fn decompress_mcap_after_pull_with_progress(
                 }
                 if is_cloudini_encoded_channel(&msg) {
                     let transformed = decompress_pointcloud_message(msg)?;
-                    writer.write(&transformed)?;
+                    write_message_checked(&mut writer, &transformed, "unpack")?;
                     stats.pointcloud_messages += 1;
                 } else {
-                    writer.write(&msg)?;
+                    write_message_checked(&mut writer, &msg, "unpack")?;
                 }
             }
         }
     }
 
-    writer.finish()?;
+    finish_writer_checked(&mut writer, "unpack")?;
     if !pb.is_hidden() {
-        if total_chunks > 0 {
-            pb.finish_with_message(format!(
-                "unpack complete {} ({}/{})",
-                input_name, loaded_chunks, total_chunks
-            ));
-        } else {
-            pb.finish_with_message(format!("unpack complete {}", input_name));
-        }
+        pb.finish_and_clear();
     }
     if !bar_visible {
         progress.emit(
@@ -537,8 +468,58 @@ fn make_writer(
         McapChunkCompression::Zstd => Some(Compression::Zstd),
         McapChunkCompression::Lz4 => Some(Compression::Lz4),
     };
-    Writer::with_options(writer, WriteOptions::new().compression(mcap_compression))
+    let options = WriteOptions::new()
+        .compression(mcap_compression)
+        .compression_threads(0);
+
+    Writer::with_options(writer, options)
         .context("failed creating mcap writer")
+}
+
+fn write_message_checked(
+    writer: &mut Option<Writer<BufWriter<File>>>,
+    msg: &Message<'_>,
+    phase: &'static str,
+) -> Result<()> {
+    let mut w = writer
+        .take()
+        .ok_or_else(|| anyhow!("mcap writer missing during {}", phase))?;
+    match w.write(msg) {
+        Ok(()) => {
+            *writer = Some(w);
+            Ok(())
+        }
+        Err(err) => {
+            std::mem::forget(w);
+            Err(anyhow!(
+                "failed writing {} mcap message: {} ({:?})",
+                phase,
+                err,
+                err
+            ))
+        }
+    }
+}
+
+fn finish_writer_checked(
+    writer: &mut Option<Writer<BufWriter<File>>>,
+    phase: &'static str,
+) -> Result<()> {
+    let mut w = writer
+        .take()
+        .ok_or_else(|| anyhow!("mcap writer missing during {} finish", phase))?;
+    match w.finish() {
+        Ok(_) => Ok(()),
+        Err(err) => {
+            std::mem::forget(w);
+            Err(anyhow!(
+                "failed finalizing {} mcap output: {} ({:?})",
+                phase,
+                err,
+                err
+            ))
+        }
+    }
 }
 
 fn should_transform_channel(msg: &Message<'_>) -> bool {

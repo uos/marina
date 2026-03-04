@@ -80,7 +80,7 @@ impl Default for CompressionConfig {
             pointcloud_accuracy_mm: 1.0,
             packed_mcap_compression: ConfigMcapCompression::Zstd,
             packed_archive_compression: ConfigArchiveCompression::Gzip,
-            unpacked_mcap_compression: ConfigMcapCompression::Zstd,
+            unpacked_mcap_compression: ConfigMcapCompression::Lz4,
         }
     }
 }
@@ -135,16 +135,14 @@ fn default_registry() -> RegistryConfig {
 pub fn load_registries() -> Result<RegistryFile> {
     let path = registry_file_path()?;
     if !path.exists() {
+        let mut base = RegistryFile::default();
         #[cfg(feature = "osnabotics-default-registry")]
         {
-            let mut base = RegistryFile::default();
             base.registry.push(default_registry());
-            return Ok(base);
         }
-        #[cfg(not(feature = "osnabotics-default-registry"))]
-        {
-            return Ok(RegistryFile::default());
-        }
+
+        save_registries(&base)?;
+        return Ok(base);
     }
 
     let content =

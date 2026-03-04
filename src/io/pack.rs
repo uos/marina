@@ -1,11 +1,11 @@
 use std::fs::{self, File};
-use std::io::{self, IsTerminal, Read, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use flate2::read::GzDecoder;
 use flate2::{Compression, GzBuilder};
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::ProgressBar;
 use serde::{Deserialize, Serialize};
 use tar::{Archive, Builder, EntryType};
 
@@ -16,6 +16,7 @@ use crate::io::mcap_transform;
 #[cfg(feature = "db3")]
 use crate::io::mcap_transform::PointCloudCompressionMode;
 use crate::io::mcap_transform::{McapChunkCompression, PullTransformOptions, PushTransformOptions};
+use crate::io::transform_progress::make_byte_progress_bar;
 use crate::progress::ProgressReporter;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -270,7 +271,6 @@ pub fn pack_bag_with_progress_and_options(
                 "skipping MCAP rewrite (pointcloud + chunk compression disabled)",
             );
         } else {
-            progress.emit("pack", "rewriting MCAP messages");
             mcap_transform::compress_mcap_for_push_with_progress(
                 &staged_mcap,
                 &transformed_mcap,
@@ -282,7 +282,6 @@ pub fn pack_bag_with_progress_and_options(
     }
     #[cfg(feature = "db3")]
     if source.has_db3 && options.transform.pointcloud_mode != PointCloudCompressionMode::Disabled {
-        progress.emit("pack", "compressing PointCloud2 messages in .db3 bag");
         for db3_path in find_all_db3(&staging_dir)? {
             db3_transform::compress_db3_for_push(
                 &db3_path,
@@ -308,33 +307,14 @@ pub fn pack_bag_with_progress_and_options(
         }
     }
 
-    let pb = if std::io::stderr().is_terminal() {
-        let pb = if total_bytes > 0 {
-            ProgressBar::new(total_bytes)
-        } else {
-            ProgressBar::new_spinner()
-        };
-        pb.set_style(
-            ProgressStyle::with_template(
-                "packing archive [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})",
-            )
-            .unwrap_or_else(|_| ProgressStyle::default_bar()),
-        );
-        pb.set_message(format!("packing {} file(s)", total_files));
-        if total_bytes == 0 {
-            pb.enable_steady_tick(std::time::Duration::from_millis(100));
-        }
-        pb
-    } else {
-        ProgressBar::hidden()
-    };
+    let pb = make_byte_progress_bar(total_bytes, format!("packing {} file(s)", total_files));
 
-    let packed_files = match options.archive_compression {
+    match options.archive_compression {
         ArchiveCompression::Gzip => {
             let tar_gz = File::create(out_file)?;
             let encoder = GzBuilder::new().mtime(0).write(tar_gz, Compression::best());
             let mut builder = Builder::new(encoder);
-            let packed_files = append_staging_bundle(
+            append_staging_bundle(
                 &mut builder,
                 &staging_dir,
                 &pb,
@@ -344,12 +324,11 @@ pub fn pack_bag_with_progress_and_options(
             )?;
             let encoder = builder.into_inner()?;
             encoder.finish()?;
-            packed_files
         }
         ArchiveCompression::None => {
             let tar_file = File::create(out_file)?;
             let mut builder = Builder::new(tar_file);
-            let packed_files = append_staging_bundle(
+            append_staging_bundle(
                 &mut builder,
                 &staging_dir,
                 &pb,
@@ -358,19 +337,11 @@ pub fn pack_bag_with_progress_and_options(
                 progress,
             )?;
             let _file = builder.into_inner()?;
-            packed_files
         }
     };
 
     if !pb.is_hidden() {
-        if total_bytes > 0 {
-            pb.finish_with_message(format!(
-                "packing archive complete: {}/{} file(s)",
-                packed_files, total_files
-            ));
-        } else {
-            pb.finish_with_message("packing archive complete".to_string());
-        }
+        pb.finish_and_clear();
     }
 
     progress.emit("pack", "cleaning temporary staging files");
@@ -445,7 +416,6 @@ pub fn unpack_bag_with_progress_and_options(
     }
 
     if let Some(mcap_file) = find_first_mcap(out_dir)? {
-        progress.emit("unpack", "restoring PointCloud2 messages");
         let has_cloudini_channels = mcap_transform::has_cloudini_pointcloud_metadata(&mcap_file)?;
         let skip_pull_transform = options.transform.output_mcap_compression
             == McapChunkCompression::None
@@ -469,7 +439,6 @@ pub fn unpack_bag_with_progress_and_options(
             let db3_files = find_all_db3(out_dir)?;
             if let Some(first) = db3_files.first() {
                 if db3_transform::has_marina_pointcloud_metadata(first)? {
-                    progress.emit("unpack", "restoring PointCloud2 messages in .db3 bag");
                     for db3 in &db3_files {
                         db3_transform::decompress_db3_after_pull(db3, progress)?;
                     }

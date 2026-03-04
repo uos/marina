@@ -160,6 +160,9 @@ struct PushArgs {
     packed_archive_compression: Option<CliArchiveCompression>,
     #[arg(long)]
     write_http_index: bool,
+    /// Run full packing/rewrite pipeline but do not upload or modify remote state
+    #[arg(long)]
+    dry_run: bool,
     /// After push, keep the ready cache and optionally delete the original source to complete a move
     #[arg(long)]
     move_to_cache: bool,
@@ -680,6 +683,7 @@ fn run_parsed(cli: Cli) -> Result<()> {
                         config_archive_compression_to_core(compression.packed_archive_compression)
                     }),
                 write_http_index: args.write_http_index,
+                dry_run: args.dry_run,
             };
             if !args.no_progress {
                 let mut stdout = std::io::stdout();
@@ -702,7 +706,12 @@ fn run_parsed(cli: Cli) -> Result<()> {
                     &mut progress,
                 )?;
             }
-            if let Some(stats) = marina.cached_size_stats(&args.bag) {
+            if args.dry_run {
+                println!(
+                    "dry-run complete for {} (no upload performed)",
+                    args.bag.without_attachment()
+                );
+            } else if let Some(stats) = marina.cached_size_stats(&args.bag) {
                 print_size_summary(
                     &format!("pushed {}", args.bag.without_attachment()),
                     stats.original_bytes,
@@ -712,7 +721,7 @@ fn run_parsed(cli: Cli) -> Result<()> {
                 println!("pushed {}", args.bag.without_attachment());
             }
 
-            if args.move_to_cache && is_interactive_shell() {
+            if args.move_to_cache && !args.dry_run && is_interactive_shell() {
                 if confirm_no_default(
                     &format!(
                         "Delete source '{}' now? (cache is already populated)",

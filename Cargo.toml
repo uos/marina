@@ -36,7 +36,7 @@ flate2 = "1.1"
 glob = "0.3"
 indicatif = "0.17"
 jsonwebtoken = { version = "9.3", optional = true }
-mcap = "0.24"
+mcap = { version = "0.24", features = ["zstd", "lz4"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
 regex = { version = "1.11", optional = true }
 rusqlite = { version = "0.38", optional = true }

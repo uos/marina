@@ -1,4 +1,4 @@
-//! marina is a ROS MCAP bag manager for pushing/pulling bags across registries.
+//! marina is a dataset manager for robotics to organize, share, and discover datasets and metadata across storage backends.
 //!
 //! It supports:
 //! - resolving bag references to local cache paths,

@@ -138,10 +138,6 @@ fn pack_and_unpack_db3_roundtrip() -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// db3 PointCloud2 compression / decompression  (mirrors mcap_transform_read)
-// ---------------------------------------------------------------------------
-
 #[test]
 fn compress_and_decompress_db3_pointcloud_lossless() -> Result<()> {
     let tmp = tempfile::tempdir()?;
@@ -272,9 +268,6 @@ fn compress_and_decompress_db3_message_count_matches() -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Direct fixture tests (operate on a copy of dlg_cut_db3/dlg_cut_db3.db3)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn compress_and_decompress_real_fixture_lossless() -> Result<()> {
