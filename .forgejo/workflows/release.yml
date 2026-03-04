@@ -309,390 +309,390 @@ jobs:
       - name: Docker clean
         run: docker system prune -af
 
-  # tarball:
-  #   needs:
-  #     - clean-6-5
-  #   runs-on: ubuntu-dev-noble-arm
-  #   steps:
-  #     - uses: actions/checkout@v4
+  tarball:
+    needs:
+      - clean-6-5
+    runs-on: ubuntu-dev-noble-arm
+    steps:
+      - uses: actions/checkout@v4
 
-  #     - name: Download all artifacts
-  #       uses: actions/download-artifact@v3
-  #       with:
-  #         path: dl
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: dl
 
-  #     - name: Create tarballs
-  #       run: |
-  #         set -euo pipefail
-  #         VERSION=$(toml get --raw Cargo.toml package.version)
-  #         mkdir -p release
+      - name: Create tarballs
+        run: |
+          set -euo pipefail
+          VERSION=$(toml get --raw Cargo.toml package.version)
+          mkdir -p release
 
-  #         make_tarball() {
-  #           local archive_name=$1; shift
-  #           local staging
-  #           staging=$(mktemp -d)
-  #           local dest="$staging/marina-${VERSION}"
-  #           mkdir -p "$dest"
-  #           for f in "$@"; do
-  #             [ -f "$f" ] && cp "$f" "$dest/"
-  #           done
-  #           # only create if we actually copied files
-  #           if [ "$(ls -A "$dest" 2>/dev/null)" ]; then
-  #             tar -czf "release/${archive_name}.tar.gz" -C "$staging" "marina-${VERSION}"
-  #             echo "  created ${archive_name}.tar.gz"
-  #           else
-  #             echo "  SKIP ${archive_name} (no files found)"
-  #           fi
-  #           rm -rf "$staging"
-  #         }
+          make_tarball() {
+            local archive_name=$1; shift
+            local staging
+            staging=$(mktemp -d)
+            local dest="$staging/marina-${VERSION}"
+            mkdir -p "$dest"
+            for f in "$@"; do
+              [ -f "$f" ] && cp "$f" "$dest/"
+            done
+            # only create if we actually copied files
+            if [ "$(ls -A "$dest" 2>/dev/null)" ]; then
+              tar -czf "release/${archive_name}.tar.gz" -C "$staging" "marina-${VERSION}"
+              echo "  created ${archive_name}.tar.gz"
+            else
+              echo "  SKIP ${archive_name} (no files found)"
+            fi
+            rm -rf "$staging"
+          }
 
-  #         echo "=== Linux glibc ==="
-  #         for repo in noble jammy; do
-  #           for arch in amd64 arm64; do
-  #             make_tarball "marina-${VERSION}-linux-${repo}-${arch}" \
-  #               "dl/artifacts-raw-${repo}/${arch}/marina"
-  #           done
-  #         done
+          echo "=== Linux glibc ==="
+          for repo in noble jammy; do
+            for arch in amd64 arm64; do
+              make_tarball "marina-${VERSION}-linux-${repo}-${arch}" \
+                "dl/artifacts-raw-${repo}/${arch}/marina"
+            done
+          done
 
-  #         echo "=== Linux musl (static) ==="
-  #         for arch in amd64 arm64; do
-  #           make_tarball "marina-${VERSION}-linux-musl-${arch}" \
-  #             "dl/artifacts-cli-musl/${arch}/marina"
-  #         done
+          echo "=== Linux musl (static) ==="
+          for arch in amd64 arm64; do
+            make_tarball "marina-${VERSION}-linux-musl-${arch}" \
+              "dl/artifacts-cli-musl/${arch}/marina"
+          done
 
-  #         echo "=== macOS ==="
-  #         for arch in amd64 arm64; do
-  #           make_tarball "marina-${VERSION}-macos-${arch}" \
-  #             "dl/artifacts-macos/${arch}/marina"
-  #         done
+          echo "=== macOS ==="
+          for arch in amd64 arm64; do
+            make_tarball "marina-${VERSION}-macos-${arch}" \
+              "dl/artifacts-macos/${arch}/marina"
+          done
 
-  #         echo ""
-  #         echo "=== Release artifacts ==="
-  #         ls -lh release/
+          echo ""
+          echo "=== Release artifacts ==="
+          ls -lh release/
 
-  #     - name: Upload tarballs
-  #       uses: actions/upload-artifact@v3
-  #       with:
-  #         name: release-tarballs
-  #         path: release/
+      - name: Upload tarballs
+        uses: actions/upload-artifact@v3
+        with:
+          name: release-tarballs
+          path: release/
 
-  # release:
-  #   needs:
-  #     - tarball
-  #   runs-on: ubuntu-dev-noble-arm
-  #   if: startsWith(github.ref, 'refs/tags/')
-  #   steps:
-  #     - uses: actions/checkout@v4
+  release:
+    needs:
+      - tarball
+    runs-on: ubuntu-dev-noble-arm
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
 
-  #     - name: Download tarballs
-  #       uses: actions/download-artifact@v3
-  #       with:
-  #         name: release-tarballs
-  #         path: release
+      - name: Download tarballs
+        uses: actions/download-artifact@v3
+        with:
+          name: release-tarballs
+          path: release
 
-  #     - name: Create release and upload assets
-  #       env:
-  #         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  #       run: |
-  #         set -euo pipefail
+      - name: Create release and upload assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
 
-  #         TAG="${GITHUB_REF_NAME}"
-  #         VERSION=$(toml get --raw Cargo.toml package.version)
+          TAG="${GITHUB_REF_NAME}"
+          VERSION=$(toml get --raw Cargo.toml package.version)
 
-  #         tea login add --name codeberg --url ${{ github.server_url }} --token "${GITHUB_TOKEN}"
-  #         tea release delete --repo ${{ github.repository }} --confirm ${{ github.ref_name }} || true
+          tea login add --name codeberg --url ${{ github.server_url }} --token "${GITHUB_TOKEN}"
+          tea release delete --repo ${{ github.repository }} --confirm ${{ github.ref_name }} || true
 
-  #         # Build --asset flags for every tarball
-  #         ASSET_FLAGS=""
-  #         for f in release/*.tar.gz; do
-  #           [ -f "$f" ] || continue
-  #           ASSET_FLAGS="${ASSET_FLAGS} --asset ${f}"
-  #         done
+          # Build --asset flags for every tarball
+          ASSET_FLAGS=""
+          for f in release/*.tar.gz; do
+            [ -f "$f" ] || continue
+            ASSET_FLAGS="${ASSET_FLAGS} --asset ${f}"
+          done
 
-  #         echo "=== Uploading $(ls release/*.tar.gz 2>/dev/null | wc -l) assets ==="
+          echo "=== Uploading $(ls release/*.tar.gz 2>/dev/null | wc -l) assets ==="
 
-  #         # Create release with all assets in one call
-  #         # tea will fail if the release already exists, so handle that
-  #         if ! tea release create \
-  #           --login codeberg \
-  #           --repo "${GITHUB_REPOSITORY}" \
-  #           --tag "${TAG}" \
-  #           --title "${TAG}" \
-  #           --note "Release ${TAG}
+          # Create release with all assets in one call
+          # tea will fail if the release already exists, so handle that
+          if ! tea release create \
+            --login codeberg \
+            --repo "${GITHUB_REPOSITORY}" \
+            --tag "${TAG}" \
+            --title "${TAG}" \
+            --note "Release ${TAG}
 
-  #         ### Install
-  #         See the documentation for installation instructions.
+          ### Install
+          See the documentation for installation instructions.
 
-  #         ### Artifacts
-  #         - **tar.gz** archives for Linux (noble, jammy, musl) and macOS (amd64, arm64)
-  #         - **.deb** packages published to [PPA](https://codeberg.org/uos-robotics/ppa)
-  #         - **Python wheels** on PyPI and custom index" \
-  #           ${ASSET_FLAGS}; then
+          ### Artifacts
+          - **tar.gz** archives for Linux (noble, jammy, musl) and macOS (amd64, arm64)
+          - **.deb** packages published to [PPA](https://codeberg.org/uos-robotics/ppa)
+          - **Python wheels** on PyPI and custom index" \
+            ${ASSET_FLAGS}; then
 
-  #           echo "Release may already exist, trying to add assets individually..."
-  #           for f in release/*.tar.gz; do
-  #             [ -f "$f" ] || continue
-  #             echo "  uploading $(basename "$f")..."
-  #             tea release create \
-  #               --login codeberg \
-  #               --repo "${GITHUB_REPOSITORY}" \
-  #               --tag "${TAG}" \
-  #               --title "${TAG}" \
-  #               --asset "$f" 2>/dev/null || true
-  #           done
-  #         fi
+            echo "Release may already exist, trying to add assets individually..."
+            for f in release/*.tar.gz; do
+              [ -f "$f" ] || continue
+              echo "  uploading $(basename "$f")..."
+              tea release create \
+                --login codeberg \
+                --repo "${GITHUB_REPOSITORY}" \
+                --tag "${TAG}" \
+                --title "${TAG}" \
+                --asset "$f" 2>/dev/null || true
+            done
+          fi
 
-  #         echo "Release ${TAG} published."
+          echo "Release ${TAG} published."
 
-  # publish-ppa:
-  #   needs:
-  #     - release
-  #   runs-on: ubuntu-dev-noble-arm
-  #   steps:
-  #     - uses: actions/checkout@v4
+  publish-ppa:
+    needs:
+      - release
+    runs-on: ubuntu-dev-noble-arm
+    steps:
+      - uses: actions/checkout@v4
 
-  #     - name: Download all artifacts
-  #       uses: actions/download-artifact@v3
-  #       with:
-  #         path: dl
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: dl
 
-  #     - name: Publish to PPA
-  #       env:
-  #         PPA_DEPLOY_KEY: ${{ secrets.PPA_DEPLOY_KEY }}
-  #       run: |
-  #         set -euo pipefail
-  #         apt-get update -y && apt-get install -y ssh
+      - name: Publish to PPA
+        env:
+          PPA_DEPLOY_KEY: ${{ secrets.PPA_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          apt-get update -y && apt-get install -y ssh
 
-  #         # ── Collect .deb files by series ──────────────────────
-  #         mkdir -p staging/noble staging/jammy
+          # ── Collect .deb files by series ──────────────────────
+          mkdir -p staging/noble staging/jammy
 
-  #         # raw
-  #         for repo in noble jammy; do
-  #           find "dl/artifacts-raw-${repo}" -name '*.deb' -exec cp {} "staging/${repo}/" \; 2>/dev/null || true
-  #         done
+          # raw
+          for repo in noble jammy; do
+            find "dl/artifacts-raw-${repo}" -name '*.deb' -exec cp {} "staging/${repo}/" \; 2>/dev/null || true
+          done
 
-  #         # ros-debs
-  #         for repo in noble jammy; do
-  #           find "dl/artifacts-ros-debs-${repo}" -name '*.deb' -exec cp {} "staging/${repo}/" \; 2>/dev/null || true
-  #         done
+          # ros-debs
+          for repo in noble jammy; do
+            find "dl/artifacts-ros-debs-${repo}" -name '*.deb' -exec cp {} "staging/${repo}/" \; 2>/dev/null || true
+          done
 
-  #         echo "=== Collected .deb files ==="
-  #         echo "noble: $(ls staging/noble/*.deb 2>/dev/null | wc -l) packages"
-  #         echo "jammy:  $(ls staging/jammy/*.deb 2>/dev/null | wc -l) packages"
+          echo "=== Collected .deb files ==="
+          echo "noble: $(ls staging/noble/*.deb 2>/dev/null | wc -l) packages"
+          echo "jammy:  $(ls staging/jammy/*.deb 2>/dev/null | wc -l) packages"
 
-  #         # ── Collect wheels by variant ─────────────────────────
-  #         mkdir -p staging-whl/cpu
+          # ── Collect wheels by variant ─────────────────────────
+          mkdir -p staging-whl/cpu
 
-  #         # CPU wheels
-  #         find "dl/wheels" -name '*.whl' -exec cp {} staging-whl/cpu/ \; 2>/dev/null || true
+          # CPU wheels
+          find "dl/wheels" -name '*.whl' -exec cp {} staging-whl/cpu/ \; 2>/dev/null || true
 
-  #         echo ""
-  #         echo "=== Collected wheels ==="
-  #         for v in cpu; do
-  #           echo "${v}: $(ls staging-whl/${v}/*.whl 2>/dev/null | wc -l) wheels"
-  #         done
+          echo ""
+          echo "=== Collected wheels ==="
+          for v in cpu; do
+            echo "${v}: $(ls staging-whl/${v}/*.whl 2>/dev/null | wc -l) wheels"
+          done
 
-  #         # ── Helper: build PEP 503 simple index ────────────────
-  #         build_pep503_index() {
-  #           local base_dir=$1  # e.g. whl/cpu
+          # ── Helper: build PEP 503 simple index ────────────────
+          build_pep503_index() {
+            local base_dir=$1  # e.g. whl/cpu
 
-  #           # Organise wheels into per-package subdirectories
-  #           for whl in "$base_dir"/*.whl; do
-  #             [ -f "$whl" ] || continue
-  #             # normalised package name: lowercase, [-_.] → -
-  #             local pkg
-  #             pkg=$(basename "$whl" | sed 's/-[0-9].*//' | tr '[:upper:]_.' '[:lower:]--' | sed 's/--*/-/g')
-  #             mkdir -p "$base_dir/$pkg"
-  #             mv "$whl" "$base_dir/$pkg/"
-  #           done
+            # Organise wheels into per-package subdirectories
+            for whl in "$base_dir"/*.whl; do
+              [ -f "$whl" ] || continue
+              # normalised package name: lowercase, [-_.] → -
+              local pkg
+              pkg=$(basename "$whl" | sed 's/-[0-9].*//' | tr '[:upper:]_.' '[:lower:]--' | sed 's/--*/-/g')
+              mkdir -p "$base_dir/$pkg"
+              mv "$whl" "$base_dir/$pkg/"
+            done
 
-  #           # Per-package index.html
-  #           for pkg_dir in "$base_dir"/*/; do
-  #             [ -d "$pkg_dir" ] || continue
-  #             {
-  #               echo '<!DOCTYPE html><html><body>'
-  #               for whl in "$pkg_dir"/*.whl; do
-  #                 [ -f "$whl" ] || continue
-  #                 local fname hash
-  #                 fname=$(basename "$whl")
-  #                 hash=$(sha256sum "$whl" | awk '{print $1}')
-  #                 echo "<a href=\"${fname}#sha256=${hash}\">${fname}</a><br/>"
-  #               done
-  #               echo '</body></html>'
-  #             } > "$pkg_dir/index.html"
-  #           done
+            # Per-package index.html
+            for pkg_dir in "$base_dir"/*/; do
+              [ -d "$pkg_dir" ] || continue
+              {
+                echo '<!DOCTYPE html><html><body>'
+                for whl in "$pkg_dir"/*.whl; do
+                  [ -f "$whl" ] || continue
+                  local fname hash
+                  fname=$(basename "$whl")
+                  hash=$(sha256sum "$whl" | awk '{print $1}')
+                  echo "<a href=\"${fname}#sha256=${hash}\">${fname}</a><br/>"
+                done
+                echo '</body></html>'
+              } > "$pkg_dir/index.html"
+            done
 
-  #           # Root index.html (lists packages)
-  #           {
-  #             echo '<!DOCTYPE html><html><body>'
-  #             for pkg_dir in "$base_dir"/*/; do
-  #               [ -d "$pkg_dir" ] || continue
-  #               local pkg_name
-  #               pkg_name=$(basename "$pkg_dir")
-  #               echo "<a href=\"${pkg_name}/\">${pkg_name}</a><br/>"
-  #             done
-  #             echo '</body></html>'
-  #           } > "$base_dir/index.html"
-  #         }
+            # Root index.html (lists packages)
+            {
+              echo '<!DOCTYPE html><html><body>'
+              for pkg_dir in "$base_dir"/*/; do
+                [ -d "$pkg_dir" ] || continue
+                local pkg_name
+                pkg_name=$(basename "$pkg_dir")
+                echo "<a href=\"${pkg_name}/\">${pkg_name}</a><br/>"
+              done
+              echo '</body></html>'
+            } > "$base_dir/index.html"
+          }
 
-  #         # ── Push to PPA git repo ──────────────────────────────
-  #         mkdir -p ~/.ssh
-  #         printf '%s\n' "$PPA_DEPLOY_KEY" > ~/.ssh/deploy_key
-  #         chmod 600 ~/.ssh/deploy_key
-  #         ssh-keyscan codeberg.org >> ~/.ssh/known_hosts 2>/dev/null
-  #         export GIT_SSH_COMMAND='ssh -i ~/.ssh/deploy_key -o UserKnownHostsFile=~/.ssh/known_hosts -o StrictHostKeyChecking=yes'
+          # ── Push to PPA git repo ──────────────────────────────
+          mkdir -p ~/.ssh
+          printf '%s\n' "$PPA_DEPLOY_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan codeberg.org >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND='ssh -i ~/.ssh/deploy_key -o UserKnownHostsFile=~/.ssh/known_hosts -o StrictHostKeyChecking=yes'
 
-  #         git clone --depth 1 --filter=blob:none --sparse ssh://git@codeberg.org/uos-robotics/ppa.git ppa
-  #         cd ppa
-  #         git sparse-checkout init --cone
-  #         git sparse-checkout set \
-  #           ubuntu/pool/main/noble \
-  #           ubuntu/pool/main/jammy \
-  #           whl/cpu \
-  #           bin
+          git clone --depth 1 --filter=blob:none --sparse ssh://git@codeberg.org/uos-robotics/ppa.git ppa
+          cd ppa
+          git sparse-checkout init --cone
+          git sparse-checkout set \
+            ubuntu/pool/main/noble \
+            ubuntu/pool/main/jammy \
+            whl/cpu \
+            bin
 
-  #         # Copy debs
-  #         for series in noble jammy; do
-  #           mkdir -p "ubuntu/pool/main/${series}"
-  #           cp ../staging/${series}/*.deb "ubuntu/pool/main/${series}/" 2>/dev/null || true
-  #         done
+          # Copy debs
+          for series in noble jammy; do
+            mkdir -p "ubuntu/pool/main/${series}"
+            cp ../staging/${series}/*.deb "ubuntu/pool/main/${series}/" 2>/dev/null || true
+          done
 
-  #         # Copy wheels and build PEP 503 indices
-  #         for variant in cpu; do
-  #           mkdir -p "whl/${variant}"
-  #           cp ../staging-whl/${variant}/*.whl "whl/${variant}/" 2>/dev/null || true
-  #           build_pep503_index "whl/${variant}"
-  #         done
+          # Copy wheels and build PEP 503 indices
+          for variant in cpu; do
+            mkdir -p "whl/${variant}"
+            cp ../staging-whl/${variant}/*.whl "whl/${variant}/" 2>/dev/null || true
+            build_pep503_index "whl/${variant}"
+          done
 
-  #         # Copy macOS and musl tarballs
-  #         mkdir -p bin
-  #         find "../dl/release-tarballs" -name 'marina-*-macos-*.tar.gz' -exec cp {} bin/ \; 2>/dev/null || true
-  #         find "../dl/release-tarballs" -name 'marina-*-linux-musl-*.tar.gz' -exec cp {} bin/ \; 2>/dev/null || true
+          # Copy macOS and musl tarballs
+          mkdir -p bin
+          find "../dl/release-tarballs" -name 'marina-*-macos-*.tar.gz' -exec cp {} bin/ \; 2>/dev/null || true
+          find "../dl/release-tarballs" -name 'marina-*-linux-musl-*.tar.gz' -exec cp {} bin/ \; 2>/dev/null || true
 
-  #         # Commit and push
-  #         git add ubuntu/ whl/ bin/
-  #         git config --global user.email "$(git log -1 --pretty=format:'%ae')"
-  #         git config --global user.name "$(git log -1 --pretty=format:'%an')"
-  #         git commit -m "ci: add debs and wheels from ${FORGEJO_REPOSITORY}@${FORGEJO_SHA}" || echo "No changes to commit"
-  #         git push origin pages
+          # Commit and push
+          git add ubuntu/ whl/ bin/
+          git config --global user.email "$(git log -1 --pretty=format:'%ae')"
+          git config --global user.name "$(git log -1 --pretty=format:'%an')"
+          git commit -m "ci: add debs and wheels from ${FORGEJO_REPOSITORY}@${FORGEJO_SHA}" || echo "No changes to commit"
+          git push origin pages
 
-  #         # Cleanup
-  #         shred -u ~/.ssh/deploy_key || rm -f ~/.ssh/deploy_key
-  #         cd ..
+          # Cleanup
+          shred -u ~/.ssh/deploy_key || rm -f ~/.ssh/deploy_key
+          cd ..
 
-  #         echo ""
-  #         echo "=== PPA published ==="
+          echo ""
+          echo "=== PPA published ==="
 
-  # aur:
-  #   runs-on: ubuntu-dev-noble
-  #   needs:
-  #     - release
-  #     - publish-ppa
-  #   container:
-  #     image: archlinux:latest
-  #   steps:
-  #     - name: Deps
-  #       run: |
-  #         sudo pacman -Sy openssh git nodejs
-  #     - uses: actions/checkout@v4
-  #     - name: Update AUR
-  #       env:
-  #         AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
-  #       run: |
-  #         mkdir -p ~/.ssh
-  #         printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur_key
-  #         chmod 600 ~/.ssh/aur_key
-  #         ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
-  #         export GIT_SSH_COMMAND='ssh -i ~/.ssh/aur_key -o UserKnownHostsFile=~/.ssh/known_hosts -o StrictHostKeyChecking=yes'
+  aur:
+    runs-on: ubuntu-dev-noble
+    needs:
+      - release
+      - publish-ppa
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Deps
+        run: |
+          sudo pacman -Sy openssh git nodejs
+      - uses: actions/checkout@v4
+      - name: Update AUR
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur_key
+          chmod 600 ~/.ssh/aur_key
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND='ssh -i ~/.ssh/aur_key -o UserKnownHostsFile=~/.ssh/known_hosts -o StrictHostKeyChecking=yes'
 
-  #         git config --global user.email $(git log -1 --pretty=format:'%ae')
-  #         git config --global user.name $(git log -1 --pretty=format:'%an')
+          git config --global user.email $(git log -1 --pretty=format:'%ae')
+          git config --global user.name $(git log -1 --pretty=format:'%an')
 
-  #         git clone ssh://aur@aur.archlinux.org/marina-bin.git marina-bin
-  #         cp packaging/arch-bin/PKGBUILD marina-bin/
-  #         cd marina-bin
-  #         makepkg --printsrcinfo > .SRCINFO
-  #         git add -f .SRCINFO PKGBUILD
-  #         git commit -m "Update package from $GITHUB_REPOSITORY@$GITHUB_SHA"
-  #         git push origin
-  #         shred -u ~/.ssh/aur_key || rm -f ~/.ssh/aur_key
+          git clone ssh://aur@aur.archlinux.org/marina-bin.git marina-bin
+          cp packaging/arch-bin/PKGBUILD marina-bin/
+          cd marina-bin
+          makepkg --printsrcinfo > .SRCINFO
+          git add -f .SRCINFO PKGBUILD
+          git commit -m "Update package from $GITHUB_REPOSITORY@$GITHUB_SHA"
+          git push origin
+          shred -u ~/.ssh/aur_key || rm -f ~/.ssh/aur_key
 
-  # homebrew:
-  #   runs-on: ubuntu-dev-noble-arm
-  #   needs:
-  #     - publish-ppa
-  #   if: startsWith(github.ref, 'refs/tags/')
-  #   steps:
-  #     - uses: actions/checkout@v4
+  homebrew:
+    runs-on: ubuntu-dev-noble-arm
+    needs:
+      - publish-ppa
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
 
-  #     - name: Download release tarballs
-  #       uses: actions/download-artifact@v3
-  #       with:
-  #         name: release-tarballs
-  #         path: release
+      - name: Download release tarballs
+        uses: actions/download-artifact@v3
+        with:
+          name: release-tarballs
+          path: release
 
-  #     - name: Update Homebrew tap
-  #       env:
-  #         HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
-  #       run: |
-  #         set -euo pipefail
-  #         VERSION=$(toml get --raw Cargo.toml package.version)
-  #         apt-get update -y && apt-get install -y keychain
+      - name: Update Homebrew tap
+        env:
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          VERSION=$(toml get --raw Cargo.toml package.version)
+          apt-get update -y && apt-get install -y keychain
 
-  #         ARM_SHA256=$(sha256sum "release/marina-${VERSION}-macos-arm64.tar.gz" | awk '{print $1}')
-  #         X86_SHA256=$(sha256sum "release/marina-${VERSION}-macos-amd64.tar.gz" | awk '{print $1}')
+          ARM_SHA256=$(sha256sum "release/marina-${VERSION}-macos-arm64.tar.gz" | awk '{print $1}')
+          X86_SHA256=$(sha256sum "release/marina-${VERSION}-macos-amd64.tar.gz" | awk '{print $1}')
 
-  #         sed \
-  #           -e "s/VERSION_PLACEHOLDER/${VERSION}/g" \
-  #           -e "s/ARM_SHA256_PLACEHOLDER/${ARM_SHA256}/g" \
-  #           -e "s/X86_SHA256_PLACEHOLDER/${X86_SHA256}/g" \
-  #           packaging/homebrew/marina.rb > /tmp/marina.rb
+          sed \
+            -e "s/VERSION_PLACEHOLDER/${VERSION}/g" \
+            -e "s/ARM_SHA256_PLACEHOLDER/${ARM_SHA256}/g" \
+            -e "s/X86_SHA256_PLACEHOLDER/${X86_SHA256}/g" \
+            packaging/homebrew/marina.rb > /tmp/marina.rb
 
-  #         mkdir -p ~/.ssh
-  #         printf '%s\n' "$HOMEBREW_TAP_DEPLOY_KEY" > ~/.ssh/tap_key
-  #         chmod 600 ~/.ssh/tap_key
-  #         ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
-  #         export GIT_SSH_COMMAND='ssh -i ~/.ssh/tap_key -o UserKnownHostsFile=~/.ssh/known_hosts -o StrictHostKeyChecking=yes'
+          mkdir -p ~/.ssh
+          printf '%s\n' "$HOMEBREW_TAP_DEPLOY_KEY" > ~/.ssh/tap_key
+          chmod 600 ~/.ssh/tap_key
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND='ssh -i ~/.ssh/tap_key -o UserKnownHostsFile=~/.ssh/known_hosts -o StrictHostKeyChecking=yes'
 
-  #         git config --global user.email "$(git log -1 --pretty=format:'%ae')"
-  #         git config --global user.name "$(git log -1 --pretty=format:'%an')"
+          git config --global user.email "$(git log -1 --pretty=format:'%ae')"
+          git config --global user.name "$(git log -1 --pretty=format:'%an')"
 
-  #         git clone git@github.com:uos/homebrew-marina.git homebrew-marina
-  #         mkdir -p homebrew-marina/Formula
-  #         cp /tmp/marina.rb homebrew-marina/Formula/marina.rb
-  #         cd homebrew-marina
-  #         git add Formula/marina.rb
-  #         git commit -m "marina ${VERSION}"
-  #         git push origin
-  #         shred -u ~/.ssh/tap_key || rm -f ~/.ssh/tap_key
+          git clone git@github.com:uos/homebrew-marina.git homebrew-marina
+          mkdir -p homebrew-marina/Formula
+          cp /tmp/marina.rb homebrew-marina/Formula/marina.rb
+          cd homebrew-marina
+          git add Formula/marina.rb
+          git commit -m "marina ${VERSION}"
+          git push origin
+          shred -u ~/.ssh/tap_key || rm -f ~/.ssh/tap_key
 
-  # publish-pypi:
-  #   needs:
-  #     - release
-  #   runs-on: ubuntu-dev-noble-arm
-  #   steps:
-  #     - name: Download CPU wheels
-  #       uses: actions/download-artifact@v3
-  #       with:
-  #         name: wheels
-  #         path: dist
-  #     - name: Get twine
-  #       run: uv tool install twine
-  #     - name: Publish to PyPI
-  #       env:
-  #         PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
-  #       run: |
-  #         set -euo pipefail
+  publish-pypi:
+    needs:
+      - release
+    runs-on: ubuntu-dev-noble-arm
+    steps:
+      - name: Download CPU wheels
+        uses: actions/download-artifact@v3
+        with:
+          name: wheels
+          path: dist
+      - name: Get twine
+        run: uv tool install twine
+      - name: Publish to PyPI
+        env:
+          PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+        run: |
+          set -euo pipefail
 
-  #         echo "=== Wheels to publish ==="
-  #         ls -lh dist/*.whl 2>/dev/null || true
+          echo "=== Wheels to publish ==="
+          ls -lh dist/*.whl 2>/dev/null || true
 
-  #         twine upload \
-  #           --username __token__ \
-  #           --password "${PYPI_TOKEN}" \
-  #           --non-interactive \
-  #           --skip-existing \
-  #           --verbose \
-  #           dist/*.whl
+          twine upload \
+            --username __token__ \
+            --password "${PYPI_TOKEN}" \
+            --non-interactive \
+            --skip-existing \
+            --verbose \
+            dist/*.whl
 
-  #         echo "Published to PyPI."
+          echo "Published to PyPI."
