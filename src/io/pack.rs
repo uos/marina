@@ -2,6 +2,41 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+fn available_space(path: &Path) -> Result<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = CString::new(path.as_os_str().as_bytes()).context("path contains null byte")?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let ret = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+    if ret != 0 {
+        return Err(anyhow!("statvfs failed for {}", path.display()));
+    }
+    #[allow(clippy::unnecessary_cast)]
+    Ok(stat.f_bavail as u64 * stat.f_frsize)
+}
+
+#[cfg(not(unix))]
+fn available_space(_path: &Path) -> Result<u64> {
+    // Not implemented on non-Unix; skip the check.
+    Ok(u64::MAX)
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const GB: u64 = 1 << 30;
+    const MB: u64 = 1 << 20;
+    const KB: u64 = 1 << 10;
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 use anyhow::{Context, Result, anyhow};
 use flate2::read::GzDecoder;
 use flate2::{Compression, GzBuilder};
@@ -209,96 +244,136 @@ pub fn pack_bag_with_progress_and_options(
     options: PackOptions,
     progress: &mut ProgressReporter<'_>,
 ) -> Result<PackedMeta> {
-    progress.emit(
-        "pack",
-        format!(
-            "staging dataset directory from {}",
-            source.root.as_path().display()
-        ),
-    );
     let parent = out_file
         .parent()
         .context("packed output file has no parent dir")?;
     fs::create_dir_all(parent)?;
-    let staging_dir = parent.join("staging_push_bundle");
-    if staging_dir.exists() {
-        fs::remove_dir_all(&staging_dir)?;
-    }
-    fs::create_dir_all(&staging_dir)?;
-    if source.root.is_file() {
-        let file_name = source
-            .root
-            .file_name()
-            .ok_or_else(|| anyhow!("source mcap file has no file name"))?;
-        fs::copy(&source.root, staging_dir.join(file_name)).with_context(|| {
-            format!(
-                "failed to stage source mcap file {}",
-                source.root.as_path().display()
-            )
-        })?;
-    } else {
-        copy_dir(&source.root, &staging_dir)?;
-    }
 
-    if let Some(source_mcap) = source.mcap.as_ref() {
-        let mcap_rel = if source.root.is_file() {
-            PathBuf::from(
-                source_mcap
-                    .file_name()
-                    .ok_or_else(|| anyhow!("mcap file has no file name"))?,
-            )
-        } else {
-            source_mcap
-                .strip_prefix(&source.root)
-                .with_context(|| {
-                    format!(
-                        "{} is outside {}",
-                        source_mcap.display(),
-                        source.root.display()
-                    )
-                })?
-                .to_path_buf()
-        };
-        let staged_mcap = staging_dir.join(mcap_rel);
-        let transformed_mcap = staging_dir.join(".marina_transform.mcap");
-        let skip_push_transform = options.transform.pointcloud_mode
-            == mcap_transform::PointCloudCompressionMode::Disabled
-            && options.transform.output_mcap_compression == McapChunkCompression::None;
+    let skip_push_transform = options.transform.pointcloud_mode
+        == mcap_transform::PointCloudCompressionMode::Disabled
+        && options.transform.output_mcap_compression == McapChunkCompression::None;
 
-        if skip_push_transform {
-            progress.emit(
-                "pack",
-                "skipping MCAP rewrite (pointcloud + chunk compression disabled)",
-            );
-        } else {
-            mcap_transform::compress_mcap_for_push_with_progress(
-                &staged_mcap,
-                &transformed_mcap,
-                options.transform,
-                progress,
-            )?;
-            fs::rename(&transformed_mcap, &staged_mcap)?;
-        }
-    }
+    // Staging (copying source to a temp dir) is only needed when transforms must be applied
+    // in-place, or when the source is a single file (so the archive root contains the file,
+    // not the parent directory).
     #[cfg(feature = "db3")]
-    if source.has_db3 && options.transform.pointcloud_mode != PointCloudCompressionMode::Disabled {
-        for db3_path in find_all_db3(&staging_dir)? {
-            db3_transform::compress_db3_for_push(
-                &db3_path,
-                &Db3TransformOptions {
-                    pointcloud_mode: options.transform.pointcloud_mode,
-                    pointcloud_precision_m: options.transform.pointcloud_precision_m,
-                },
-                progress,
-            )?;
-        }
+    let needs_staging = (source.mcap.is_some() && !skip_push_transform)
+        || source.root.is_file()
+        || (source.has_db3
+            && options.transform.pointcloud_mode
+                != mcap_transform::PointCloudCompressionMode::Disabled);
+    #[cfg(not(feature = "db3"))]
+    let needs_staging = (source.mcap.is_some() && !skip_push_transform) || source.root.is_file();
+
+    // Check available space: bundle ≈ bag size (assuming no compression benefit).
+    // If staging is needed, the staging copy and the bundle coexist on the same filesystem.
+    let required_space = if needs_staging {
+        source.original_bytes * 2
+    } else {
+        source.original_bytes
+    };
+    let avail = available_space(parent)?;
+    if avail < required_space {
+        let missing = required_space - avail;
+        return Err(anyhow!(
+            "not enough disk space in {}: need {} more ({} required, {} available)",
+            parent.display(),
+            format_bytes(missing),
+            format_bytes(required_space),
+            format_bytes(avail),
+        ));
     }
+
+    let (pack_dir, staging_is_temp) = if needs_staging {
+        progress.emit(
+            "pack",
+            format!(
+                "staging dataset directory from {}",
+                source.root.as_path().display()
+            ),
+        );
+        let staging_dir = parent.join("staging_push_bundle");
+        if staging_dir.exists() {
+            fs::remove_dir_all(&staging_dir)?;
+        }
+        fs::create_dir_all(&staging_dir)?;
+        if source.root.is_file() {
+            let file_name = source
+                .root
+                .file_name()
+                .ok_or_else(|| anyhow!("source mcap file has no file name"))?;
+            fs::copy(&source.root, staging_dir.join(file_name)).with_context(|| {
+                format!(
+                    "failed to stage source mcap file {}",
+                    source.root.as_path().display()
+                )
+            })?;
+        } else {
+            copy_dir(&source.root, &staging_dir)?;
+        }
+
+        if let Some(source_mcap) = source.mcap.as_ref() {
+            let mcap_rel = if source.root.is_file() {
+                PathBuf::from(
+                    source_mcap
+                        .file_name()
+                        .ok_or_else(|| anyhow!("mcap file has no file name"))?,
+                )
+            } else {
+                source_mcap
+                    .strip_prefix(&source.root)
+                    .with_context(|| {
+                        format!(
+                            "{} is outside {}",
+                            source_mcap.display(),
+                            source.root.display()
+                        )
+                    })?
+                    .to_path_buf()
+            };
+            let staged_mcap = staging_dir.join(mcap_rel);
+            let transformed_mcap = staging_dir.join(".marina_transform.mcap");
+            if skip_push_transform {
+                progress.emit(
+                    "pack",
+                    "skipping MCAP rewrite (pointcloud + chunk compression disabled)",
+                );
+            } else {
+                mcap_transform::compress_mcap_for_push_with_progress(
+                    &staged_mcap,
+                    &transformed_mcap,
+                    options.transform,
+                    progress,
+                )?;
+                fs::rename(&transformed_mcap, &staged_mcap)?;
+            }
+        }
+        #[cfg(feature = "db3")]
+        if source.has_db3
+            && options.transform.pointcloud_mode != PointCloudCompressionMode::Disabled
+        {
+            for db3_path in find_all_db3(&staging_dir)? {
+                db3_transform::compress_db3_for_push(
+                    &db3_path,
+                    &Db3TransformOptions {
+                        pointcloud_mode: options.transform.pointcloud_mode,
+                        pointcloud_precision_m: options.transform.pointcloud_precision_m,
+                    },
+                    progress,
+                )?;
+            }
+        }
+
+        (staging_dir, true)
+    } else {
+        (source.root.clone(), false)
+    };
 
     progress.emit("pack", "compressing staged folder to marina archive");
 
     let mut total_bytes = 0u64;
     let mut total_files = 0u64;
-    for entry in walkdir::WalkDir::new(&staging_dir) {
+    for entry in walkdir::WalkDir::new(&pack_dir) {
         let entry = entry?;
         let path = entry.path();
         if path.is_file() {
@@ -316,7 +391,7 @@ pub fn pack_bag_with_progress_and_options(
             let mut builder = Builder::new(encoder);
             append_staging_bundle(
                 &mut builder,
-                &staging_dir,
+                &pack_dir,
                 &pb,
                 total_bytes,
                 total_files,
@@ -330,7 +405,7 @@ pub fn pack_bag_with_progress_and_options(
             let mut builder = Builder::new(tar_file);
             append_staging_bundle(
                 &mut builder,
-                &staging_dir,
+                &pack_dir,
                 &pb,
                 total_bytes,
                 total_files,
@@ -344,8 +419,10 @@ pub fn pack_bag_with_progress_and_options(
         pb.finish_and_clear();
     }
 
-    progress.emit("pack", "cleaning temporary staging files");
-    fs::remove_dir_all(staging_dir)?;
+    if staging_is_temp {
+        progress.emit("pack", "cleaning temporary staging files");
+        fs::remove_dir_all(&pack_dir)?;
+    }
 
     let packed_bytes = fs::metadata(out_file)?.len();
     Ok(PackedMeta {

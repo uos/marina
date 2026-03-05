@@ -1,13 +1,14 @@
 use std::fs;
-use std::io::{IsTerminal, Read, Write};
+use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
+use async_trait::async_trait;
 use glob::Pattern;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use reqwest::Client;
 use reqwest::StatusCode;
-use reqwest::blocking::Client;
 use serde::Deserialize;
 
 use crate::model::bag_ref::BagRef;
@@ -81,11 +82,12 @@ impl HttpRegistry {
         format!("{}/metadata.json", self.object_base_url(bag))
     }
 
-    fn fetch_index(&self) -> Result<Vec<HttpIndexEntry>> {
+    async fn fetch_index(&self) -> Result<Vec<HttpIndexEntry>> {
         let resp = self
             .client
             .get(self.index_url())
             .send()
+            .await
             .context("failed to fetch http registry index.json")?;
 
         if resp.status() == StatusCode::NOT_FOUND {
@@ -96,6 +98,7 @@ impl HttpRegistry {
             .error_for_status()
             .context("http registry index request failed")?
             .text()
+            .await
             .context("failed reading http registry index response")?;
 
         let parsed: HttpIndexFile =
@@ -106,9 +109,9 @@ impl HttpRegistry {
         })
     }
 
-    fn find_index_entry(&self, bag: &BagRef) -> Result<Option<HttpIndexEntry>> {
+    async fn find_index_entry(&self, bag: &BagRef) -> Result<Option<HttpIndexEntry>> {
         let target = bag.without_attachment();
-        for item in self.fetch_index()? {
+        for item in self.fetch_index().await? {
             if item.bag.without_attachment() == target {
                 return Ok(Some(item));
             }
@@ -116,11 +119,12 @@ impl HttpRegistry {
         Ok(None)
     }
 
-    fn download_file_with_progress(&self, url: &str, out: &Path, title: &str) -> Result<u64> {
-        let mut resp = self
+    async fn download_file_with_progress(&self, url: &str, out: &Path, title: &str) -> Result<u64> {
+        let resp = self
             .client
             .get(url)
             .send()
+            .await
             .with_context(|| format!("failed downloading {}", title))?
             .error_for_status()
             .with_context(|| format!("download failed for {}", title))?;
@@ -162,16 +166,12 @@ impl HttpRegistry {
             .with_context(|| format!("failed creating output file {}", out.display()))?;
 
         let mut downloaded = 0u64;
-        let mut buf = [0u8; 64 * 1024];
-        loop {
-            let n = resp.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            file.write_all(&buf[..n])?;
-            downloaded += n as u64;
+        let mut resp = resp;
+        while let Some(chunk) = resp.chunk().await? {
+            file.write_all(&chunk)?;
+            downloaded += chunk.len() as u64;
             if let Some(pb) = &pb {
-                pb.inc(n as u64);
+                pb.inc(chunk.len() as u64);
             }
         }
         if let Some(pb) = pb {
@@ -180,15 +180,17 @@ impl HttpRegistry {
         Ok(downloaded)
     }
 
-    fn fetch_metadata(&self, url: &str) -> Result<MetaFile> {
+    async fn fetch_metadata(&self, url: &str) -> Result<MetaFile> {
         let text = self
             .client
             .get(url)
             .send()
+            .await
             .with_context(|| format!("failed downloading metadata {}", url))?
             .error_for_status()
             .with_context(|| format!("metadata request failed for {}", url))?
             .text()
+            .await
             .context("failed reading metadata response")?;
         let meta: MetaFile = serde_json::from_str(&text)
             .with_context(|| format!("failed parsing metadata json from {}", url))?;
@@ -196,8 +198,9 @@ impl HttpRegistry {
     }
 }
 
+#[async_trait]
 impl RegistryDriver for HttpRegistry {
-    fn push(
+    async fn push(
         &self,
         _registry_name: &str,
         _bag: &BagRef,
@@ -210,9 +213,9 @@ impl RegistryDriver for HttpRegistry {
         ))
     }
 
-    fn pull(&self, bag: &BagRef, out_packed_file: &Path) -> Result<RemoteDescriptor> {
+    async fn pull(&self, bag: &BagRef, out_packed_file: &Path) -> Result<RemoteDescriptor> {
         let target = bag.without_attachment();
-        let entry = self.find_index_entry(&target)?;
+        let entry = self.find_index_entry(&target).await?;
 
         let bundle_url = entry
             .as_ref()
@@ -223,10 +226,11 @@ impl RegistryDriver for HttpRegistry {
             .and_then(|e| e.metadata_url.clone())
             .unwrap_or_else(|| self.default_metadata_url(&target));
 
-        let downloaded =
-            self.download_file_with_progress(&bundle_url, out_packed_file, &format!("{}", target))?;
+        let downloaded = self
+            .download_file_with_progress(&bundle_url, out_packed_file, &format!("{}", target))
+            .await?;
 
-        let descriptor = match self.fetch_metadata(&metadata_url) {
+        let descriptor = match self.fetch_metadata(&metadata_url).await {
             Ok(meta) => RemoteDescriptor {
                 registry_name: self.name.clone(),
                 bag: meta.bag.without_attachment(),
@@ -250,9 +254,9 @@ impl RegistryDriver for HttpRegistry {
         Ok(descriptor)
     }
 
-    fn list(&self, filter: &str) -> Result<Vec<BagRef>> {
+    async fn list(&self, filter: &str) -> Result<Vec<BagRef>> {
         let pattern = Pattern::new(filter).or_else(|_| Pattern::new("*"))?;
-        let items = self.fetch_index()?;
+        let items = self.fetch_index().await?;
         if items.is_empty() {
             return Err(anyhow!(
                 "http registry '{}' has no index.json; list/search is unavailable (pull by exact bag still works)",
@@ -272,25 +276,26 @@ impl RegistryDriver for HttpRegistry {
         Ok(out)
     }
 
-    fn remove(&self, _bag: &BagRef) -> Result<()> {
+    async fn remove(&self, _bag: &BagRef) -> Result<()> {
         Err(anyhow!(
             "http registry '{}' is read-only: remove is not supported",
             self.name
         ))
     }
 
-    fn check_connection(&self) -> Result<()> {
+    async fn check_connection(&self) -> Result<()> {
         self.client
             .get(&self.base_url)
             .timeout(Duration::from_secs(5))
             .send()
+            .await
             .context("failed checking http registry connectivity")?
             .error_for_status()
             .context("http registry connectivity check returned error")?;
         Ok(())
     }
 
-    fn check_write_access(&self) -> Result<()> {
+    async fn check_write_access(&self) -> Result<()> {
         Err(anyhow!(
             "http registry '{}' is read-only: push is not supported",
             self.name

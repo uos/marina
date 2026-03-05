@@ -1,19 +1,19 @@
 use std::fs;
-use std::io::{IsTerminal, Read, Write};
+use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::OnceLock;
-use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
+use async_trait::async_trait;
 use glob::Pattern;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use regex::Regex;
+use reqwest::Client;
 use reqwest::StatusCode;
-use reqwest::blocking::{Body, Client};
 use reqwest::header::{CONTENT_RANGE, LOCATION, RANGE};
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncReadExt;
 
 use crate::model::bag_ref::BagRef;
 use crate::registry::driver::{BagInfo, PushMeta, RegistryDriver, RemoteDescriptor};
@@ -110,6 +110,47 @@ fn default_token_uri() -> String {
     "https://oauth2.googleapis.com/token".to_string()
 }
 
+/// Create a signed RS256 JWT from serializable claims and a PEM-encoded RSA private key.
+fn sign_rs256_jwt<T: serde::Serialize>(claims: &T, private_key_pem: &[u8]) -> Result<String> {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let header = r#"{"alg":"RS256","typ":"JWT"}"#;
+    let header_b64 = URL_SAFE_NO_PAD.encode(header);
+    let claims_json = serde_json::to_string(claims)?;
+    let claims_b64 = URL_SAFE_NO_PAD.encode(&claims_json);
+    let signing_input = format!("{}.{}", header_b64, claims_b64);
+
+    let der = pem_to_der(private_key_pem).context("failed to parse RSA private key PEM")?;
+    let key_pair = ring::signature::RsaKeyPair::from_pkcs8(&der)
+        .map_err(|e| anyhow!("invalid RSA private key (PKCS#8 DER required): {:?}", e))?;
+    let rng = ring::rand::SystemRandom::new();
+    let mut sig = vec![0u8; key_pair.public().modulus_len()];
+    key_pair
+        .sign(
+            &ring::signature::RSA_PKCS1_SHA256,
+            &rng,
+            signing_input.as_bytes(),
+            &mut sig,
+        )
+        .map_err(|e| anyhow!("RSA signing failed: {:?}", e))?;
+
+    let sig_b64 = URL_SAFE_NO_PAD.encode(&sig);
+    Ok(format!("{}.{}", signing_input, sig_b64))
+}
+
+/// Decode a PEM-encoded key (strips headers and base64-decodes the body).
+fn pem_to_der(pem: &[u8]) -> Result<Vec<u8>> {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+    let pem_str = std::str::from_utf8(pem).context("PEM is not valid UTF-8")?;
+    let b64: String = pem_str
+        .lines()
+        .filter(|l| !l.starts_with("-----"))
+        .collect();
+    STANDARD.decode(b64).context("PEM base64 decode failed")
+}
+
 impl GDriveRegistry {
     pub fn from_uri(name: &str, uri: &str, auth_env: Option<String>) -> Result<Self> {
         let folder_id = uri
@@ -149,9 +190,9 @@ impl GDriveRegistry {
         format!("{}.public.json", self.object_stem(bag))
     }
 
-    fn auth_header_optional(&self) -> Result<Option<String>> {
+    async fn auth_header_optional(&self) -> Result<Option<String>> {
         // 1. Stored OAuth token from `marina registry auth`
-        if let Some(token) = gdrive_auth::get_access_token(&self.name)? {
+        if let Some(token) = gdrive_auth::get_access_token(&self.name).await? {
             return Ok(Some(format!("Bearer {}", token)));
         }
 
@@ -160,7 +201,8 @@ impl GDriveRegistry {
             if let Ok(secret) = std::env::var(var) {
                 return Ok(Some(format!(
                     "Bearer {}",
-                    self.service_account_access_token_from_secret(secret.trim())?
+                    self.service_account_access_token_from_secret(secret.trim())
+                        .await?
                 )));
             }
         }
@@ -168,8 +210,8 @@ impl GDriveRegistry {
         Ok(None)
     }
 
-    fn auth_header_required(&self) -> Result<String> {
-        self.auth_header_optional()?.ok_or_else(|| {
+    async fn auth_header_required(&self) -> Result<String> {
+        self.auth_header_optional().await?.ok_or_else(|| {
             anyhow!(
                 "gdrive auth missing: run `marina registry auth {}` or set auth_env to a service-account JSON path",
                 self.name
@@ -181,14 +223,14 @@ impl GDriveRegistry {
         std::env::var("GOOGLE_DRIVE_API_KEY").ok()
     }
 
-    fn service_account_access_token_from_secret(&self, secret: &str) -> Result<String> {
+    async fn service_account_access_token_from_secret(&self, secret: &str) -> Result<String> {
         if secret.is_empty() {
             return Err(anyhow!("empty gdrive auth_env value"));
         }
         let sa = self.try_load_service_account(secret)?.ok_or_else(|| {
             anyhow!("auth_env value is not a valid service-account JSON file path or JSON string")
         })?;
-        self.service_account_access_token(&sa)
+        self.service_account_access_token(&sa).await
     }
 
     fn try_load_service_account(&self, secret: &str) -> Result<Option<ServiceAccountKey>> {
@@ -219,7 +261,7 @@ impl GDriveRegistry {
         Ok(Some(key))
     }
 
-    fn service_account_access_token(&self, key: &ServiceAccountKey) -> Result<String> {
+    async fn service_account_access_token(&self, key: &ServiceAccountKey) -> Result<String> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .context("system clock before unix epoch")?
@@ -231,13 +273,8 @@ impl GDriveRegistry {
             exp: now + 3600,
             iat: now,
         };
-        let assertion = encode(
-            &Header::new(Algorithm::RS256),
-            &claims,
-            &EncodingKey::from_rsa_pem(key.private_key.as_bytes())
-                .context("invalid service-account private_key PEM")?,
-        )
-        .context("failed creating service-account JWT assertion")?;
+        let assertion = sign_rs256_jwt(&claims, key.private_key.as_bytes())
+            .context("failed creating service-account JWT assertion")?;
 
         let token = self
             .client
@@ -247,20 +284,22 @@ impl GDriveRegistry {
                 ("assertion", assertion.as_str()),
             ])
             .send()
+            .await
             .context("failed requesting OAuth token from Google")?
             .error_for_status()
             .context("Google OAuth token request failed")?
             .json::<OAuthTokenResponse>()
+            .await
             .context("failed decoding Google OAuth token response")?;
         Ok(token.access_token)
     }
 
-    fn query_files(&self, query: &str) -> Result<Vec<DriveFile>> {
-        let auth = self.auth_header_optional()?;
+    async fn query_files(&self, query: &str) -> Result<Vec<DriveFile>> {
+        let auth = self.auth_header_optional().await?;
         let api_key = self.api_key_optional();
 
         if auth.is_none() && api_key.is_none() {
-            let files = self.list_public_folder_files()?;
+            let files = self.list_public_folder_files().await?;
             return Ok(filter_public_files(&files, query));
         }
 
@@ -279,15 +318,17 @@ impl GDriveRegistry {
 
         let resp = req
             .send()
+            .await
             .context("failed querying Google Drive files")?
             .error_for_status()
             .context("Google Drive list query failed")?
             .json::<FilesListResponse>()
+            .await
             .context("failed decoding Google Drive file list")?;
         Ok(resp.files)
     }
 
-    fn list_public_folder_files(&self) -> Result<Vec<DriveFile>> {
+    async fn list_public_folder_files(&self) -> Result<Vec<DriveFile>> {
         let html = self
             .client
             .get(format!(
@@ -295,10 +336,12 @@ impl GDriveRegistry {
                 self.folder_id
             ))
             .send()
+            .await
             .context("failed loading public gdrive folder page")?
             .error_for_status()
             .context("public gdrive folder page request failed")?
             .text()
+            .await
             .context("failed reading public gdrive folder page")?;
 
         let mut files = Vec::new();
@@ -324,32 +367,33 @@ impl GDriveRegistry {
         Ok(files)
     }
 
-    fn delete_by_name(&self, name: &str) -> Result<()> {
+    async fn delete_by_name(&self, name: &str) -> Result<()> {
         let q = format!(
             "'{}' in parents and trashed = false and name = '{}'",
             self.folder_id, name
         );
-        for file in self.query_files(&q)? {
-            let _ = self.delete_file(&file.id);
+        for file in self.query_files(&q).await? {
+            let _ = self.delete_file(&file.id).await;
         }
         Ok(())
     }
 
-    fn delete_file(&self, id: &str) -> Result<()> {
-        let auth = self.auth_header_required()?;
+    async fn delete_file(&self, id: &str) -> Result<()> {
+        let auth = self.auth_header_required().await?;
         self.client
             .delete(format!("{}/{}", DRIVE_FILES_API, id))
             .header("Authorization", auth)
             .query(&[("supportsAllDrives", "true")])
             .send()
+            .await
             .with_context(|| format!("failed deleting gdrive file {}", id))?
             .error_for_status()
             .with_context(|| format!("Google Drive delete failed for {}", id))?;
         Ok(())
     }
 
-    fn find_files_by_name_authenticated(&self, name: &str) -> Result<Vec<DriveFile>> {
-        let auth = self.auth_header_required()?;
+    async fn find_files_by_name_authenticated(&self, name: &str) -> Result<Vec<DriveFile>> {
+        let auth = self.auth_header_required().await?;
         let q = format!(
             "'{}' in parents and trashed = false and name = '{}'",
             self.folder_id, name
@@ -365,22 +409,24 @@ impl GDriveRegistry {
                 ("includeItemsFromAllDrives", "true"),
             ])
             .send()
+            .await
             .context("failed querying existing gdrive files by name")?
             .error_for_status()
             .context("Google Drive list by name failed")?
             .json::<FilesListResponse>()
+            .await
             .context("failed decoding Google Drive file list by name")?;
         Ok(resp.files)
     }
 
-    fn create_drive_file(&self, name: &str, mime: &str) -> Result<String> {
-        let mut existing = self.find_files_by_name_authenticated(name)?;
+    async fn create_drive_file(&self, name: &str, mime: &str) -> Result<String> {
+        let mut existing = self.find_files_by_name_authenticated(name).await?;
         existing.sort_by(|a, b| a.id.cmp(&b.id));
         if let Some(first) = existing.first() {
             return Ok(first.id.clone());
         }
 
-        let auth = self.auth_header_required()?;
+        let auth = self.auth_header_required().await?;
         let created = self
             .client
             .post(DRIVE_FILES_API)
@@ -392,16 +438,24 @@ impl GDriveRegistry {
                 mime_type: Some(mime.to_string()),
             })
             .send()
+            .await
             .with_context(|| format!("failed creating Google Drive file {}", name))?
             .error_for_status()
             .with_context(|| format!("Google Drive create failed for {}", name))?
             .json::<DriveCreateResponse>()
+            .await
             .with_context(|| format!("failed decoding create response for {}", name))?;
         Ok(created.id)
     }
 
-    fn upload_media(&self, file_id: &str, mime: &str, body: Body, name: &str) -> Result<()> {
-        let auth = self.auth_header_required()?;
+    async fn upload_media(
+        &self,
+        file_id: &str,
+        mime: &str,
+        body: reqwest::Body,
+        name: &str,
+    ) -> Result<()> {
+        let auth = self.auth_header_required().await?;
         self.client
             .patch(format!("{}/{}", DRIVE_UPLOAD_API, file_id))
             .header("Authorization", auth)
@@ -409,20 +463,21 @@ impl GDriveRegistry {
             .query(&[("uploadType", "media"), ("supportsAllDrives", "true")])
             .body(body)
             .send()
+            .await
             .with_context(|| format!("failed uploading {} to Google Drive", name))?
             .error_for_status()
             .with_context(|| format!("Google Drive upload failed for {}", name))?;
         Ok(())
     }
 
-    fn start_resumable_upload_session(
+    async fn start_resumable_upload_session(
         &self,
         file_id: &str,
         mime: &str,
         total_bytes: u64,
         name: &str,
     ) -> Result<String> {
-        let auth = self.auth_header_required()?;
+        let auth = self.auth_header_required().await?;
         let resp = self
             .client
             .patch(format!("{}/{}", DRIVE_UPLOAD_API, file_id))
@@ -433,6 +488,7 @@ impl GDriveRegistry {
             .query(&[("uploadType", "resumable"), ("supportsAllDrives", "true")])
             .body("{}")
             .send()
+            .await
             .with_context(|| {
                 format!(
                     "failed starting resumable Google Drive upload session for {}",
@@ -463,7 +519,7 @@ impl GDriveRegistry {
         Ok(location)
     }
 
-    fn upload_file_resumable(
+    async fn upload_file_resumable(
         &self,
         session_url: &str,
         mime: &str,
@@ -472,9 +528,10 @@ impl GDriveRegistry {
         name: &str,
         pb: &ProgressBar,
     ) -> Result<()> {
-        let auth = self.auth_header_required()?;
-        let mut file =
-            fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+        let auth = self.auth_header_required().await?;
+        let mut file = tokio::fs::File::open(path)
+            .await
+            .with_context(|| format!("failed to open {}", path.display()))?;
         let mut chunk_size = RESUMABLE_CHUNK_START_BYTES;
         let mut chunk = vec![0u8; chunk_size];
         let mut sent = 0u64;
@@ -485,6 +542,7 @@ impl GDriveRegistry {
             }
             let n = file
                 .read(&mut chunk)
+                .await
                 .with_context(|| format!("failed reading {}", path.display()))?;
             if n == 0 {
                 break;
@@ -492,7 +550,7 @@ impl GDriveRegistry {
 
             let end = sent + n as u64 - 1;
             let range = format!("bytes {}-{}/{}", sent, end, total_bytes);
-            let payload = &chunk[..n];
+            let payload = chunk[..n].to_vec();
 
             let mut attempt = 0usize;
             loop {
@@ -504,8 +562,9 @@ impl GDriveRegistry {
                     .header("Content-Type", mime)
                     .header("Content-Length", n.to_string())
                     .header("Content-Range", &range)
-                    .body(payload.to_vec())
-                    .send();
+                    .body(payload.clone())
+                    .send()
+                    .await;
 
                 match resp {
                     Ok(resp) => {
@@ -531,11 +590,11 @@ impl GDriveRegistry {
                             if chunk_size > RESUMABLE_CHUNK_MIN_BYTES {
                                 chunk_size = (chunk_size / 2).max(RESUMABLE_CHUNK_MIN_BYTES);
                             }
-                            sleep(Duration::from_millis(250 * attempt as u64));
+                            tokio::time::sleep(Duration::from_millis(250 * attempt as u64)).await;
                             continue;
                         }
 
-                        let body = resp.text().unwrap_or_default();
+                        let body = resp.text().await.unwrap_or_default();
                         return Err(anyhow!(
                             "Google Drive resumable upload failed for {} with status {}: {}",
                             name,
@@ -549,7 +608,7 @@ impl GDriveRegistry {
                             if chunk_size > RESUMABLE_CHUNK_MIN_BYTES {
                                 chunk_size = (chunk_size / 2).max(RESUMABLE_CHUNK_MIN_BYTES);
                             }
-                            sleep(Duration::from_millis(250 * attempt as u64));
+                            tokio::time::sleep(Duration::from_millis(250 * attempt as u64)).await;
                             continue;
                         }
                         return Err(err).with_context(|| {
@@ -577,7 +636,7 @@ impl GDriveRegistry {
         url: &str,
         auth: Option<&str>,
         api_key: Option<&str>,
-    ) -> reqwest::blocking::RequestBuilder {
+    ) -> reqwest::RequestBuilder {
         let mut req = self.client.get(url);
         if let Some(auth) = auth {
             req = req.header("Authorization", auth);
@@ -592,7 +651,7 @@ impl GDriveRegistry {
         total.parse::<u64>().ok()
     }
 
-    fn download_with_adaptive_ranges(
+    async fn download_with_adaptive_ranges(
         &self,
         url: &str,
         auth: Option<&str>,
@@ -604,14 +663,17 @@ impl GDriveRegistry {
             .build_download_request(url, auth, api_key)
             .header(RANGE, "bytes=0-0")
             .send()
+            .await
             .with_context(|| format!("failed probing ranged download {}", title))?;
 
         if probe.status() != StatusCode::PARTIAL_CONTENT {
-            return self.stream_response_to_path(
-                self.build_download_request(url, auth, api_key),
-                out,
-                title,
-            );
+            return self
+                .stream_response_to_path(
+                    self.build_download_request(url, auth, api_key),
+                    out,
+                    title,
+                )
+                .await;
         }
 
         let total = probe
@@ -622,11 +684,13 @@ impl GDriveRegistry {
             .unwrap_or(0);
 
         if total == 0 {
-            return self.stream_response_to_path(
-                self.build_download_request(url, auth, api_key),
-                out,
-                title,
-            );
+            return self
+                .stream_response_to_path(
+                    self.build_download_request(url, auth, api_key),
+                    out,
+                    title,
+                )
+                .await;
         }
 
         let pb = transfer_bar(total, title);
@@ -635,7 +699,9 @@ impl GDriveRegistry {
 
         let first_bytes = probe
             .bytes()
+            .await
             .with_context(|| format!("failed reading initial ranged response for {}", title))?;
+        use std::io::Write;
         file.write_all(&first_bytes)?;
         let mut downloaded = first_bytes.len() as u64;
         pb.set_position(downloaded.min(total));
@@ -651,13 +717,14 @@ impl GDriveRegistry {
                 let resp = self
                     .build_download_request(url, auth, api_key)
                     .header(RANGE, &range)
-                    .send();
+                    .send()
+                    .await;
 
                 match resp {
                     Ok(resp) => {
                         let status = resp.status();
                         if status == StatusCode::PARTIAL_CONTENT {
-                            let bytes = resp.bytes().with_context(|| {
+                            let bytes = resp.bytes().await.with_context(|| {
                                 format!("failed reading ranged chunk {} for {}", range, title)
                             })?;
                             let received = bytes.len() as u64;
@@ -682,7 +749,7 @@ impl GDriveRegistry {
                             if chunk_size > RESUMABLE_CHUNK_MIN_BYTES as u64 {
                                 chunk_size = (chunk_size / 2).max(RESUMABLE_CHUNK_MIN_BYTES as u64);
                             }
-                            sleep(Duration::from_millis(250 * attempt as u64));
+                            tokio::time::sleep(Duration::from_millis(250 * attempt as u64)).await;
                             continue;
                         }
 
@@ -698,7 +765,7 @@ impl GDriveRegistry {
                             if chunk_size > RESUMABLE_CHUNK_MIN_BYTES as u64 {
                                 chunk_size = (chunk_size / 2).max(RESUMABLE_CHUNK_MIN_BYTES as u64);
                             }
-                            sleep(Duration::from_millis(250 * attempt as u64));
+                            tokio::time::sleep(Duration::from_millis(250 * attempt as u64)).await;
                             continue;
                         }
                         return Err(err)
@@ -712,40 +779,40 @@ impl GDriveRegistry {
         Ok(())
     }
 
-    fn upload_named_bytes(&self, name: &str, mime: &str, bytes: Vec<u8>) -> Result<String> {
-        let file_id = self.create_drive_file(name, mime)?;
+    async fn upload_named_bytes(&self, name: &str, mime: &str, bytes: Vec<u8>) -> Result<String> {
+        let file_id = self.create_drive_file(name, mime).await?;
         let total = bytes.len() as u64;
         let pb = transfer_bar(total, &format!("gdrive upload {}", name));
-        let reader = ProgressReader::new(std::io::Cursor::new(bytes), Some(pb.clone()));
-        self.upload_media(&file_id, mime, Body::new(reader), name)?;
+        self.upload_media(&file_id, mime, reqwest::Body::from(bytes), name)
+            .await?;
+        pb.set_position(total);
         pb.finish_and_clear();
         Ok(file_id)
     }
 
-    fn upload_named_file(&self, name: &str, mime: &str, path: &Path) -> Result<String> {
-        let file_id = self.create_drive_file(name, mime)?;
+    async fn upload_named_file(&self, name: &str, mime: &str, path: &Path) -> Result<String> {
+        let file_id = self.create_drive_file(name, mime).await?;
         let size = fs::metadata(path)
             .with_context(|| format!("failed to stat {}", path.display()))?
             .len();
         let pb = transfer_bar(size, &format!("gdrive upload {}", name));
-        let session_url = self.start_resumable_upload_session(&file_id, mime, size, name)?;
-        self.upload_file_resumable(&session_url, mime, path, size, name, &pb)?;
+        let session_url = self
+            .start_resumable_upload_session(&file_id, mime, size, name)
+            .await?;
+        self.upload_file_resumable(&session_url, mime, path, size, name, &pb)
+            .await?;
         pb.finish_and_clear();
         Ok(file_id)
     }
 
-    fn download_file_to_path(&self, id: &str, out: &Path, title: &str) -> Result<()> {
-        let auth = self.auth_header_optional()?;
+    async fn download_file_to_path(&self, id: &str, out: &Path, title: &str) -> Result<()> {
+        let auth = self.auth_header_optional().await?;
         let api_key = self.api_key_optional();
 
         if auth.is_none() && api_key.is_none() {
-            return self.download_with_adaptive_ranges(
-                &public_download_url(id),
-                None,
-                None,
-                out,
-                title,
-            );
+            return self
+                .download_with_adaptive_ranges(&public_download_url(id), None, None, out, title)
+                .await;
         }
 
         let url = format!(
@@ -753,20 +820,23 @@ impl GDriveRegistry {
             DRIVE_FILES_API, id
         );
         self.download_with_adaptive_ranges(&url, auth.as_deref(), api_key.as_deref(), out, title)
+            .await
     }
 
-    fn download_public_url_to_path(&self, url: &str, out: &Path, title: &str) -> Result<()> {
+    async fn download_public_url_to_path(&self, url: &str, out: &Path, title: &str) -> Result<()> {
         self.download_with_adaptive_ranges(url, None, None, out, title)
+            .await
     }
 
-    fn stream_response_to_path(
+    async fn stream_response_to_path(
         &self,
-        req: reqwest::blocking::RequestBuilder,
+        req: reqwest::RequestBuilder,
         out: &Path,
         title: &str,
     ) -> Result<()> {
-        let mut resp = req
+        let resp = req
             .send()
+            .await
             .with_context(|| format!("failed downloading {}", title))?
             .error_for_status()
             .with_context(|| format!("download failed: {}", title))?;
@@ -789,15 +859,12 @@ impl GDriveRegistry {
 
         let mut file = fs::File::create(out)
             .with_context(|| format!("failed creating output file {}", out.display()))?;
-        let mut buf = [0u8; 1024 * 64];
-        loop {
-            let n = resp.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            file.write_all(&buf[..n])?;
+        let mut resp = resp;
+        use std::io::Write;
+        while let Some(chunk) = resp.chunk().await? {
+            file.write_all(&chunk)?;
             if let Some(pb) = &pb {
-                pb.inc(n as u64);
+                pb.inc(chunk.len() as u64);
             }
         }
         if let Some(pb) = pb {
@@ -806,8 +873,8 @@ impl GDriveRegistry {
         Ok(())
     }
 
-    fn download_file_bytes(&self, id: &str) -> Result<Vec<u8>> {
-        let auth = self.auth_header_optional()?;
+    async fn download_file_bytes(&self, id: &str) -> Result<Vec<u8>> {
+        let auth = self.auth_header_optional().await?;
         let api_key = self.api_key_optional();
 
         let mut req = if auth.is_none() && api_key.is_none() {
@@ -826,20 +893,22 @@ impl GDriveRegistry {
 
         let bytes = req
             .send()
+            .await
             .with_context(|| format!("failed downloading {} from Google Drive", id))?
             .error_for_status()
             .with_context(|| format!("Google Drive download failed for {}", id))?
             .bytes()
+            .await
             .context("failed reading Google Drive response bytes")?;
         Ok(bytes.to_vec())
     }
 
-    fn find_single_by_name(&self, name: &str) -> Result<DriveFile> {
+    async fn find_single_by_name(&self, name: &str) -> Result<DriveFile> {
         let q = format!(
             "'{}' in parents and trashed = false and name = '{}'",
             self.folder_id, name
         );
-        let mut files = self.query_files(&q)?;
+        let mut files = self.query_files(&q).await?;
         files
             .drain(..)
             .next()
@@ -847,8 +916,9 @@ impl GDriveRegistry {
     }
 }
 
+#[async_trait]
 impl RegistryDriver for GDriveRegistry {
-    fn push(
+    async fn push(
         &self,
         _registry_name: &str,
         bag: &BagRef,
@@ -859,7 +929,9 @@ impl RegistryDriver for GDriveRegistry {
         let metadata_name = self.metadata_name(bag);
         let manifest_name = self.public_manifest_name(bag);
 
-        let bundle_id = self.upload_named_file(&bundle_name, "application/gzip", packed_file)?;
+        let bundle_id = self
+            .upload_named_file(&bundle_name, "application/gzip", packed_file)
+            .await?;
 
         let metadata = MetaFile {
             bag: bag.clone().without_attachment(),
@@ -871,8 +943,9 @@ impl RegistryDriver for GDriveRegistry {
             pushed_at: Some(meta.pushed_at),
         };
         let metadata_bytes = serde_json::to_vec_pretty(&metadata)?;
-        let metadata_id =
-            self.upload_named_bytes(&metadata_name, "application/json", metadata_bytes)?;
+        let metadata_id = self
+            .upload_named_bytes(&metadata_name, "application/json", metadata_bytes)
+            .await?;
 
         let manifest = PublicManifest {
             bag: bag.clone().without_attachment(),
@@ -884,18 +957,19 @@ impl RegistryDriver for GDriveRegistry {
             metadata_url: public_download_url(&metadata_id),
         };
         let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
-        self.upload_named_bytes(&manifest_name, "application/json", manifest_bytes)?;
+        self.upload_named_bytes(&manifest_name, "application/json", manifest_bytes)
+            .await?;
 
         Ok(())
     }
 
-    fn bag_info(&self, bag: &BagRef) -> Result<Option<BagInfo>> {
+    async fn bag_info(&self, bag: &BagRef) -> Result<Option<BagInfo>> {
         let metadata_name = self.metadata_name(bag);
-        let file = match self.find_single_by_name(&metadata_name) {
+        let file = match self.find_single_by_name(&metadata_name).await {
             Ok(f) => f,
             Err(_) => return Ok(None),
         };
-        let bytes = self.download_file_bytes(&file.id)?;
+        let bytes = self.download_file_bytes(&file.id).await?;
         let meta: MetaFile = serde_json::from_slice(&bytes)?;
         Ok(Some(BagInfo {
             bundle_hash: meta.bundle_hash,
@@ -907,14 +981,14 @@ impl RegistryDriver for GDriveRegistry {
         }))
     }
 
-    fn pull(&self, bag: &BagRef, out_packed_file: &Path) -> Result<RemoteDescriptor> {
-        let auth = self.auth_header_optional()?;
+    async fn pull(&self, bag: &BagRef, out_packed_file: &Path) -> Result<RemoteDescriptor> {
+        let auth = self.auth_header_optional().await?;
         let api_key = self.api_key_optional();
 
         if auth.is_none() && api_key.is_none() {
             let manifest_name = self.public_manifest_name(bag);
-            let manifest_file = self.find_single_by_name(&manifest_name)?;
-            let manifest_bytes = self.download_file_bytes(&manifest_file.id)?;
+            let manifest_file = self.find_single_by_name(&manifest_name).await?;
+            let manifest_bytes = self.download_file_bytes(&manifest_file.id).await?;
             let manifest: PublicManifest = serde_json::from_slice(&manifest_bytes)
                 .context("failed parsing public manifest from gdrive")?;
 
@@ -925,7 +999,8 @@ impl RegistryDriver for GDriveRegistry {
                 &manifest.bundle_url,
                 out_packed_file,
                 &format!("downloading {}", bag.without_attachment()),
-            )?;
+            )
+            .await?;
 
             return Ok(RemoteDescriptor {
                 registry_name: self.name.clone(),
@@ -938,8 +1013,8 @@ impl RegistryDriver for GDriveRegistry {
         let bundle_name = self.bundle_name(bag);
         let metadata_name = self.metadata_name(bag);
 
-        let bundle = self.find_single_by_name(&bundle_name)?;
-        let metadata_file = self.find_single_by_name(&metadata_name)?;
+        let bundle = self.find_single_by_name(&bundle_name).await?;
+        let metadata_file = self.find_single_by_name(&metadata_name).await?;
 
         if let Some(parent) = out_packed_file.parent() {
             fs::create_dir_all(parent)?;
@@ -948,9 +1023,10 @@ impl RegistryDriver for GDriveRegistry {
             &bundle.id,
             out_packed_file,
             &format!("{}", bag.without_attachment()),
-        )?;
+        )
+        .await?;
 
-        let meta_bytes = self.download_file_bytes(&metadata_file.id)?;
+        let meta_bytes = self.download_file_bytes(&metadata_file.id).await?;
         let meta: MetaFile = serde_json::from_slice(&meta_bytes)
             .context("failed parsing metadata.json from gdrive")?;
 
@@ -962,18 +1038,18 @@ impl RegistryDriver for GDriveRegistry {
         })
     }
 
-    fn list(&self, filter: &str) -> Result<Vec<BagRef>> {
+    async fn list(&self, filter: &str) -> Result<Vec<BagRef>> {
         let pattern = Pattern::new(filter).or_else(|_| Pattern::new("*"))?;
 
         let manifest_query = format!(
             "'{}' in parents and trashed = false and name contains '.public.json'",
             self.folder_id
         );
-        let manifest_files = self.query_files(&manifest_query)?;
+        let manifest_files = self.query_files(&manifest_query).await?;
 
         let mut out = Vec::new();
         for file in manifest_files {
-            let bytes = self.download_file_bytes(&file.id)?;
+            let bytes = self.download_file_bytes(&file.id).await?;
             let manifest: PublicManifest = match serde_json::from_slice(&bytes) {
                 Ok(v) => v,
                 Err(_) => continue,
@@ -994,10 +1070,10 @@ impl RegistryDriver for GDriveRegistry {
             "'{}' in parents and trashed = false and name contains '.metadata.json'",
             self.folder_id
         );
-        let files = self.query_files(&q)?;
+        let files = self.query_files(&q).await?;
 
         for file in files {
-            let bytes = self.download_file_bytes(&file.id)?;
+            let bytes = self.download_file_bytes(&file.id).await?;
             let meta: MetaFile = serde_json::from_slice(&bytes)
                 .with_context(|| format!("failed parsing metadata file {}", file.name))?;
             let bag = meta.bag.without_attachment();
@@ -1011,7 +1087,7 @@ impl RegistryDriver for GDriveRegistry {
         Ok(out)
     }
 
-    fn list_with_info(&self, filter: &str) -> Result<Vec<(BagRef, Option<BagInfo>)>> {
+    async fn list_with_info(&self, filter: &str) -> Result<Vec<(BagRef, Option<BagInfo>)>> {
         let pattern = Pattern::new(filter).or_else(|_| Pattern::new("*"))?;
 
         // Query metadata files once — each one contains both bag identity and encoding info.
@@ -1019,11 +1095,11 @@ impl RegistryDriver for GDriveRegistry {
             "'{}' in parents and trashed = false and name contains '.metadata.json'",
             self.folder_id
         );
-        let files = self.query_files(&q)?;
+        let files = self.query_files(&q).await?;
 
         let mut result: Vec<(BagRef, Option<BagInfo>)> = Vec::new();
         for file in files {
-            let bytes = match self.download_file_bytes(&file.id) {
+            let bytes = match self.download_file_bytes(&file.id).await {
                 Ok(b) => b,
                 Err(_) => continue,
             };
@@ -1057,9 +1133,9 @@ impl RegistryDriver for GDriveRegistry {
             "'{}' in parents and trashed = false and name contains '.public.json'",
             self.folder_id
         );
-        let manifest_files = self.query_files(&manifest_query)?;
+        let manifest_files = self.query_files(&manifest_query).await?;
         for file in manifest_files {
-            let bytes = match self.download_file_bytes(&file.id) {
+            let bytes = match self.download_file_bytes(&file.id).await {
                 Ok(b) => b,
                 Err(_) => continue,
             };
@@ -1078,19 +1154,19 @@ impl RegistryDriver for GDriveRegistry {
         Ok(result)
     }
 
-    fn remove(&self, bag: &BagRef) -> Result<()> {
-        self.delete_by_name(&self.bundle_name(bag))?;
-        self.delete_by_name(&self.metadata_name(bag))?;
-        self.delete_by_name(&self.public_manifest_name(bag))?;
+    async fn remove(&self, bag: &BagRef) -> Result<()> {
+        self.delete_by_name(&self.bundle_name(bag)).await?;
+        self.delete_by_name(&self.metadata_name(bag)).await?;
+        self.delete_by_name(&self.public_manifest_name(bag)).await?;
         Ok(())
     }
 
-    fn check_connection(&self) -> Result<()> {
+    async fn check_connection(&self) -> Result<()> {
         if cfg!(test) {
             return Ok(());
         }
 
-        let auth = self.auth_header_optional()?;
+        let auth = self.auth_header_optional().await?;
         let mut req = self
             .client
             .get(DRIVE_FILES_API)
@@ -1113,30 +1189,35 @@ impl RegistryDriver for GDriveRegistry {
         }
 
         req.send()
+            .await
             .context("failed checking gdrive connectivity")?
             .error_for_status()
             .context("drive connectivity check returned error")?;
         Ok(())
     }
 
-    fn check_write_access(&self) -> Result<()> {
+    async fn check_write_access(&self) -> Result<()> {
         let probe_name = format!(".marina_write_probe_{}_{}", self.name, now_secs());
         let file_id = self
             .create_drive_file(&probe_name, "application/octet-stream")
+            .await
             .context("failed creating write probe file in Google Drive")?;
 
-        let upload_result = self.upload_media(
-            &file_id,
-            "application/octet-stream",
-            Body::new(std::io::Cursor::new(vec![0u8])),
-            &probe_name,
-        );
+        let upload_result = self
+            .upload_media(
+                &file_id,
+                "application/octet-stream",
+                reqwest::Body::from(vec![0u8]),
+                &probe_name,
+            )
+            .await;
         if let Err(err) = upload_result {
-            let _ = self.delete_file(&file_id);
+            let _ = self.delete_file(&file_id).await;
             return Err(err).context("failed writing probe content to Google Drive");
         }
 
         self.delete_file(&file_id)
+            .await
             .context("failed deleting Google Drive write probe file")
     }
 }
@@ -1178,27 +1259,6 @@ fn transfer_bar(total: u64, message: &str) -> ProgressBar {
     );
     pb.set_message(message.to_string());
     pb
-}
-
-struct ProgressReader<R> {
-    inner: R,
-    pb: Option<ProgressBar>,
-}
-
-impl<R> ProgressReader<R> {
-    fn new(inner: R, pb: Option<ProgressBar>) -> Self {
-        Self { inner, pb }
-    }
-}
-
-impl<R: Read> Read for ProgressReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let n = self.inner.read(buf)?;
-        if let Some(pb) = &self.pb {
-            pb.inc(n as u64);
-        }
-        Ok(n)
-    }
 }
 
 fn public_file_regex() -> &'static Regex {

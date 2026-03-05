@@ -3,18 +3,86 @@
 `marina` is a dataset manager for robotics to organize, share, and discover datasets and metadata across storage backends so we can finally stop emailing download links around.
 The focus lies primarily on ROS 2 bagfiles but plain folders are supported as well.
 
-## Quickstart
+## Installation
 
-After installation, you can download the `Minot` demo bag like this:
+Install a recent Rust toolchain.
 
 ```bash
-marina pull dlg2023:cutted
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+rustup default stable
+rustup update
 ```
 
-The bag will be placed in your local marina cache. You can get the path to it with the `resolve` subcommand.
+We also need a C++ 20 compiler and `cmake`. Make sure they are installed.
+
+Then install marina.
 ```bash
-
+cargo install marina
 ```
+
+Now you can download the demo bag like this.
+
+```bash
+marina pull dlg_feldtage_24:cut
+```
+
+The bag will be placed in your local marina cache. You can get the path to it with the `resolve` command.
+```bash
+marina resolve dlg_feldtage_24:cut
+```
+
+## Shell Completions
+
+Get automatic expansions in the shell with `Tab`.
+
+### Bash
+Add this to your `~/.bashrc` (or `~/.bash_profile` on Mac):
+
+*Linux*
+```bash
+marina completions bash | sudo tee /etc/bash_completion.d/marina > /dev/null
+```
+
+*MacOS*
+```bash
+marina completions bash > $(brew --prefix)/etc/bash_completion.d/marina
+```
+
+### Zsh
+
+```bash
+mkdir -p ~/.zsh/completions
+marina completions zsh > ~/.zsh/completions/_marina
+```
+
+Add these lines to `~/.zshrc` (before compinit)
+
+```bash
+fpath=(~/.zsh/completions $fpath)
+autoload -U compinit && compinit
+```
+
+### Fish
+
+```bash
+marina completions fish > ~/.config/fish/completions/marina.fish
+```
+
+## ROS 2
+
+Marina provides a ROS package to extend the `ros2 bag` CLI.
+
+```bash
+cd ~/ros2_ws/src
+git clone ssh://git@codeberg.org/stelzo/marina.git
+cd ..
+colcon build
+```
+
+After sourcing you can `ros2 bag pull` etc. like with marina.
+
+> [!WARNING]
+> `ros2 bag list` was already taken, so the `list` command from marina is named `datasets` or `ds` in the ROS 2 CLI extension.
 
 ## Compression
 
@@ -31,10 +99,10 @@ uri = "gdrive://10hjoMIyWTOVNOo3zDOfHoSb1S55gO3rJ"
 
 [compression]
 pointcloud_mode = "lossy"             # off | lossy | lossless
-pointcloud_accuracy_mm = 1.0             # float
-packed_mcap_compression = "zstd"         # none | zstd | lz4
-packed_archive_compression = "gzip"      # gzip | none
-unpacked_mcap_compression = "zstd"       # none | zstd | lz4
+pointcloud_accuracy_mm = 1.0          # float
+packed_mcap_compression = "zstd"      # none | zstd | lz4
+packed_archive_compression = "none"   # gzip | none
+unpacked_mcap_compression = "lz4"     # none | zstd | lz4
 ```
 
 If compression flags are provided on the CLI, those values override the config for that command only.
@@ -56,6 +124,14 @@ Use `ssh-copy-id` to set up passwordless SSH key auth for your registry server. 
 ```bash
 ssh-copy-id -i ~/.ssh/<key_name>.pub <user>@your-registry-server.org
 ```
+
+> [!NOTE]
+> If your key has no typical names and marina still asks you for the password, add the key to the ssh-agent.
+> ```bash
+> eval "$(ssh-agent -s)"
+> ssh-add ~/.ssh/privatekey
+> ```
+
 
 Alternatively, set key auth env `--auth-env MARINA_SSH_KEY` to the path of your private key instead of relying on SSH agent to pick the correct key.
 

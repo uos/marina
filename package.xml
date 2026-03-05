@@ -2,18 +2,20 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>marina</name>
-  <version>0.0.1</version>
+  <version>0.0.4</version>
   <description>A dataset manager for robotics to organize, share, and discover datasets and metadata across storage backends.</description>
   <maintainer email="stelzo@steado.de">Christopher Sieh</maintainer>
   <license>MIT</license>
   <author>Christopher Sieh</author>
 
+  <buildtool_depend>ament_cmake</buildtool_depend>
   <build_depend>cargo</build_depend>
-  <build_depend>python3-catkin-pkg-modules</build_depend>
   <depend>ros2bag</depend>
   <depend>ros2cli</depend>
+  <depend>libssl-dev</depend>
+  <depend>libclang-dev</depend>
 
   <export>
-    <build_type>ament_python</build_type>
+    <build_type>ament_cmake</build_type>
   </export>
 </package>

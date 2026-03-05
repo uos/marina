@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use sha2::{Digest, Sha256};
@@ -30,8 +31,12 @@ pub struct MirrorStats {
     pub skipped: u32,
 }
 
-pub fn connection_warning(name: &str, uri: &str, driver: &dyn RegistryDriver) -> Option<String> {
-    if let Err(e) = driver.check_connection() {
+pub async fn connection_warning(
+    name: &str,
+    uri: &str,
+    driver: &dyn RegistryDriver,
+) -> Option<String> {
+    if let Err(e) = driver.check_connection().await {
         Some(format!(
             "warning: default registry '{}' ({}) appears unreachable: {}",
             name, uri, e
@@ -129,7 +134,7 @@ impl Default for PullOptions {
 
 /// High-level marina runtime that owns registry drivers and local catalog state.
 pub struct Marina {
-    registries: HashMap<String, (RegistryConfig, Box<dyn RegistryDriver>)>,
+    registries: HashMap<String, (RegistryConfig, Arc<dyn RegistryDriver>)>,
     catalog: Catalog,
 }
 
@@ -142,7 +147,6 @@ impl Marina {
 
         for reg in registry_file.registry {
             let driver = make_registry_driver(&reg)?;
-
             registries.insert(reg.name.clone(), (reg, driver));
         }
 
@@ -217,7 +221,7 @@ impl Marina {
     fn choose_registry(
         &self,
         name: Option<&str>,
-    ) -> Result<(&RegistryConfig, &dyn RegistryDriver)> {
+    ) -> Result<(RegistryConfig, Arc<dyn RegistryDriver>)> {
         if self.registries.is_empty() {
             return Err(anyhow!(
                 "no registries configured. Add one with: marina registry add <uri> --name <name> --kind <kind>"
@@ -230,7 +234,7 @@ impl Marina {
                     .registries
                     .get(n)
                     .ok_or_else(|| anyhow!("registry '{}' not found", n))?;
-                Ok((cfg, drv.as_ref()))
+                Ok((cfg.clone(), Arc::clone(drv)))
             }
             None => {
                 let (_, (cfg, drv)) = self
@@ -238,7 +242,7 @@ impl Marina {
                     .iter()
                     .next()
                     .ok_or_else(|| anyhow!("no registries available"))?;
-                Ok((cfg, drv.as_ref()))
+                Ok((cfg.clone(), Arc::clone(drv)))
             }
         }
     }
@@ -259,7 +263,12 @@ impl Marina {
         Ok(())
     }
 
-    pub fn push(&mut self, bag: &BagRef, source_dir: &Path, registry: Option<&str>) -> Result<()> {
+    pub async fn push(
+        &mut self,
+        bag: &BagRef,
+        source_dir: &Path,
+        registry: Option<&str>,
+    ) -> Result<()> {
         let mut progress = ProgressReporter::silent();
         self.push_with_progress_and_options(
             bag,
@@ -268,10 +277,11 @@ impl Marina {
             PushOptions::default(),
             &mut progress,
         )
+        .await
     }
 
     /// Pushes a bag to a registry and emits phase progress events.
-    pub fn push_with_progress(
+    pub async fn push_with_progress(
         &mut self,
         bag: &BagRef,
         source_dir: &Path,
@@ -285,10 +295,11 @@ impl Marina {
             PushOptions::default(),
             progress,
         )
+        .await
     }
 
     /// Pushes a bag to a registry with explicit compression options.
-    pub fn push_with_progress_and_options(
+    pub async fn push_with_progress_and_options(
         &mut self,
         bag: &BagRef,
         source_dir: &Path,
@@ -297,13 +308,14 @@ impl Marina {
         progress: &mut ProgressReporter<'_>,
     ) -> Result<()> {
         let (cfg, driver) = self.choose_registry(registry)?;
-        Self::ensure_auth(cfg, true)?;
+        Self::ensure_auth(&cfg, true)?;
         progress.emit(
             "push",
             format!("checking write access for registry '{}'", cfg.name),
         );
         driver
             .check_write_access()
+            .await
             .with_context(|| format!("write preflight failed for registry '{}'", cfg.name))?;
 
         let source = bag::discover_bag(source_dir)?;
@@ -360,30 +372,30 @@ impl Marina {
             },
             pushed_at: now_unix_secs(),
         };
-        driver.push(
-            &cfg.name,
-            &bag.without_attachment(),
-            &packed_file,
-            &push_meta,
-        )?;
+        driver
+            .push(
+                &cfg.name,
+                &bag.without_attachment(),
+                &packed_file,
+                &push_meta,
+            )
+            .await?;
+        fs::remove_file(&packed_file)?;
 
         if options.write_http_index || cfg.kind == "ssh" {
             progress.emit(
                 "push",
                 format!("writing http index.json for registry '{}'", cfg.name),
             );
-            driver.write_http_index()?;
+            driver.write_http_index().await?;
         }
 
-        let ready_dir = cache_dir.join("ready");
-        progress.emit("push", "refreshing local ready-to-use cache");
-        copy_source(source_dir, &ready_dir)?;
-
+        // Point directly to the source directory — no copy needed.
         self.catalog.entries.insert(
             bag.without_attachment().to_string(),
             CacheEntry {
                 bag: bag.without_attachment(),
-                local_dir: ready_dir,
+                local_dir: source_dir.to_path_buf(),
                 packed_bytes: packed_meta.packed_bytes,
                 original_bytes: packed_meta.original_bytes,
             },
@@ -394,7 +406,11 @@ impl Marina {
     }
 
     /// Pulls all remote bags matching `pattern`.
-    pub fn pull_pattern(&mut self, pattern: &str, registry: Option<&str>) -> Result<Vec<BagRef>> {
+    pub async fn pull_pattern(
+        &mut self,
+        pattern: &str,
+        registry: Option<&str>,
+    ) -> Result<Vec<BagRef>> {
         let mut progress = ProgressReporter::silent();
         self.pull_pattern_with_progress_and_options(
             pattern,
@@ -402,10 +418,11 @@ impl Marina {
             PullOptions::default(),
             &mut progress,
         )
+        .await
     }
 
     /// Pulls all remote bags matching `pattern` and emits progress events.
-    pub fn pull_pattern_with_progress(
+    pub async fn pull_pattern_with_progress(
         &mut self,
         pattern: &str,
         registry: Option<&str>,
@@ -417,10 +434,11 @@ impl Marina {
             PullOptions::default(),
             progress,
         )
+        .await
     }
 
     /// Pulls all remote bags matching `pattern` and applies explicit unpack options.
-    pub fn pull_pattern_with_progress_and_options(
+    pub async fn pull_pattern_with_progress_and_options(
         &mut self,
         pattern: &str,
         registry: Option<&str>,
@@ -428,7 +446,7 @@ impl Marina {
         progress: &mut ProgressReporter<'_>,
     ) -> Result<Vec<BagRef>> {
         let (_cfg, driver) = self.choose_registry(registry)?;
-        let refs = driver.list(pattern)?;
+        let refs = driver.list(pattern).await?;
         let mut pulled = Vec::new();
 
         progress.emit(
@@ -436,14 +454,15 @@ impl Marina {
             format!("found {} matching bag(s) for '{}'", refs.len(), pattern),
         );
         for bag in refs {
-            self.pull_exact_with_progress_and_options(&bag, registry, options, progress)?;
+            self.pull_exact_with_progress_and_options(&bag, registry, options, progress)
+                .await?;
             pulled.push(bag);
         }
 
         Ok(pulled)
     }
 
-    pub fn pull_exact(&mut self, bag: &BagRef, registry: Option<&str>) -> Result<PathBuf> {
+    pub async fn pull_exact(&mut self, bag: &BagRef, registry: Option<&str>) -> Result<PathBuf> {
         let mut progress = ProgressReporter::silent();
         self.pull_exact_with_progress_and_options(
             bag,
@@ -451,20 +470,22 @@ impl Marina {
             PullOptions::default(),
             &mut progress,
         )
+        .await
     }
 
     /// Pulls one exact bag and emits phase progress events.
-    pub fn pull_exact_with_progress(
+    pub async fn pull_exact_with_progress(
         &mut self,
         bag: &BagRef,
         registry: Option<&str>,
         progress: &mut ProgressReporter<'_>,
     ) -> Result<PathBuf> {
         self.pull_exact_with_progress_and_options(bag, registry, PullOptions::default(), progress)
+            .await
     }
 
     /// Pulls one exact bag and applies explicit unpack options.
-    pub fn pull_exact_with_progress_and_options(
+    pub async fn pull_exact_with_progress_and_options(
         &mut self,
         bag: &BagRef,
         registry: Option<&str>,
@@ -472,7 +493,7 @@ impl Marina {
         progress: &mut ProgressReporter<'_>,
     ) -> Result<PathBuf> {
         let (cfg, driver) = self.choose_registry(registry)?;
-        Self::ensure_auth(cfg, false)?;
+        Self::ensure_auth(&cfg, false)?;
         progress.emit(
             "pull",
             format!("downloading from registry '{}' ({})", cfg.name, cfg.kind),
@@ -485,7 +506,7 @@ impl Marina {
         crate::cleanup::register(packed_file.clone());
         crate::cleanup::register(ready_dir.clone());
 
-        let descriptor = driver.pull(&bag.without_attachment(), &packed_file)?;
+        let descriptor = driver.pull(&bag.without_attachment(), &packed_file).await?;
         if ready_dir.exists() {
             fs::remove_dir_all(&ready_dir)?;
         }
@@ -500,6 +521,7 @@ impl Marina {
             },
             progress,
         )?;
+        fs::remove_file(&packed_file)?;
 
         self.catalog.entries.insert(
             bag.without_attachment().to_string(),
@@ -516,7 +538,12 @@ impl Marina {
 
         Ok(ready_dir)
     }
-    pub fn resolve_target(&self, target: &str, registry: Option<&str>) -> Result<ResolveResult> {
+
+    pub async fn resolve_target(
+        &self,
+        target: &str,
+        registry: Option<&str>,
+    ) -> Result<ResolveResult> {
         let path = Path::new(target);
         if bag::has_direct_mcap(path)? {
             return Ok(ResolveResult::LocalPath(path.to_path_buf()));
@@ -548,7 +575,8 @@ impl Marina {
         if let Some(registry_name) = registry {
             let (cfg, drv) = self.choose_registry(Some(registry_name))?;
             if drv
-                .list(&exact)?
+                .list(&exact)
+                .await?
                 .iter()
                 .any(|b| b == &bag_ref.without_attachment())
             {
@@ -557,35 +585,33 @@ impl Marina {
         } else {
             let mut names: Vec<_> = self.registries.keys().cloned().collect();
             names.sort();
-            std::thread::scope(|s| {
-                let handles: Vec<_> = names
-                    .iter()
-                    .filter_map(|name| {
-                        self.registries.get(name).map(|(_, drv)| {
-                            let name = name.clone();
-                            let exact = exact.clone();
-                            let bag_ref = bag_ref.without_attachment();
-                            s.spawn(move || {
-                                if drv
-                                    .list(&exact)
-                                    .ok()
-                                    .is_some_and(|list| list.iter().any(|b| b == &bag_ref))
-                                {
-                                    Some((name, bag_ref))
-                                } else {
-                                    None
-                                }
-                            })
-                        })
-                    })
-                    .collect();
 
-                for handle in handles {
-                    if let Some(hit) = handle.join().ok().flatten() {
-                        matches.push(hit);
-                    }
+            let mut join_set = tokio::task::JoinSet::new();
+            for name in names {
+                if let Some((_, drv)) = self.registries.get(&name) {
+                    let drv = Arc::clone(drv);
+                    let exact = exact.clone();
+                    let bag_ref_clone = bag_ref.without_attachment();
+                    join_set.spawn(async move {
+                        if drv
+                            .list(&exact)
+                            .await
+                            .ok()
+                            .is_some_and(|list| list.iter().any(|b| b == &bag_ref_clone))
+                        {
+                            Some((name, bag_ref_clone))
+                        } else {
+                            None
+                        }
+                    });
                 }
-            });
+            }
+
+            while let Some(Ok(result)) = join_set.join_next().await {
+                if let Some(hit) = result {
+                    matches.push(hit);
+                }
+            }
         }
         matches.sort_by_key(|(name, _)| name.clone());
 
@@ -634,10 +660,12 @@ impl Marina {
     pub fn remove_local(&mut self, bag: &BagRef) -> Result<()> {
         let key = bag.without_attachment().to_string();
         if let Some(entry) = self.catalog.entries.remove(&key) {
-            if entry.local_dir.exists() {
+            let root = cache::bag_cache_dir(&bag.without_attachment())?;
+            // Only delete local_dir if it lives inside the marina cache; pushed bags
+            // point at the original source directory and must not be deleted.
+            if entry.local_dir.starts_with(&root) && entry.local_dir.exists() {
                 fs::remove_dir_all(&entry.local_dir)?;
             }
-            let root = cache::bag_cache_dir(&bag.without_attachment())?;
             if root.exists() {
                 fs::remove_dir_all(root)?;
             }
@@ -647,16 +675,29 @@ impl Marina {
     }
 
     /// Removes one bag from a remote registry.
-    pub fn remove_remote(&self, bag: &BagRef, registry: Option<&str>) -> Result<()> {
+    pub async fn remove_remote(
+        &self,
+        bag: &BagRef,
+        registry: Option<&str>,
+        write_http_index: bool,
+    ) -> Result<()> {
         let (cfg, driver) = self.choose_registry(registry)?;
-        Self::ensure_auth(cfg, true)?;
-        driver.remove(&bag.without_attachment())
+        Self::ensure_auth(&cfg, true)?;
+        driver.remove(&bag.without_attachment()).await?;
+        if write_http_index || cfg.kind == "ssh" {
+            driver.write_http_index().await?;
+        }
+        Ok(())
     }
 
     /// Searches one registry using glob-like `pattern`.
-    pub fn search_remote(&self, pattern: &str, registry: Option<&str>) -> Result<Vec<BagRef>> {
+    pub async fn search_remote(
+        &self,
+        pattern: &str,
+        registry: Option<&str>,
+    ) -> Result<Vec<BagRef>> {
         let (_cfg, driver) = self.choose_registry(registry)?;
-        driver.list(pattern)
+        driver.list(pattern).await
     }
 
     /// Deletes local cache resources.
@@ -714,38 +755,36 @@ impl Marina {
 
     /// Searches all registries and returns tagged hits with registry names.
     /// Queries all registries concurrently.
-    pub fn search_all_remotes(&self, pattern: &str) -> Vec<RemoteBagHit> {
+    pub async fn search_all_remotes(&self, pattern: &str) -> Vec<RemoteBagHit> {
         let mut names = self.registries.keys().cloned().collect::<Vec<_>>();
         names.sort();
 
-        let mut hits: Vec<RemoteBagHit> = Vec::new();
-        std::thread::scope(|s| {
-            let handles: Vec<_> = names
-                .iter()
-                .filter_map(|name| {
-                    self.registries.get(name).map(|(_, driver)| {
-                        let name = name.clone();
-                        let pattern = pattern.to_string();
-                        s.spawn(move || {
-                            driver
-                                .list(&pattern)
-                                .ok()
-                                .unwrap_or_default()
-                                .into_iter()
-                                .map(|bag| RemoteBagHit {
-                                    registry: name.clone(),
-                                    bag,
-                                })
-                                .collect::<Vec<_>>()
+        let mut join_set = tokio::task::JoinSet::new();
+        for name in names {
+            if let Some((_, driver)) = self.registries.get(&name) {
+                let driver = Arc::clone(driver);
+                let pattern = pattern.to_string();
+                let name = name.clone();
+                join_set.spawn(async move {
+                    driver
+                        .list(&pattern)
+                        .await
+                        .ok()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|bag| RemoteBagHit {
+                            registry: name.clone(),
+                            bag,
                         })
-                    })
-                })
-                .collect();
-
-            for handle in handles {
-                hits.extend(handle.join().unwrap_or_default());
+                        .collect::<Vec<_>>()
+                });
             }
-        });
+        }
+
+        let mut hits: Vec<RemoteBagHit> = Vec::new();
+        while let Some(Ok(chunk)) = join_set.join_next().await {
+            hits.extend(chunk);
+        }
 
         hits.sort_by(|a, b| {
             a.registry
@@ -756,50 +795,50 @@ impl Marina {
     }
 
     /// Fetch lightweight metadata for a bag in a specific registry.
-    pub fn bag_info(&self, registry: &str, bag: &BagRef) -> Option<BagInfo> {
-        self.registries
-            .get(registry)
-            .and_then(|(_, drv)| drv.bag_info(bag).ok().flatten())
+    pub async fn bag_info(&self, registry: &str, bag: &BagRef) -> Option<BagInfo> {
+        if let Some((_, drv)) = self.registries.get(registry) {
+            drv.bag_info(bag).await.ok().flatten()
+        } else {
+            None
+        }
     }
 
     /// List all bags across all registries with their stored metadata.
     /// Queries all registries concurrently.
-    pub fn list_all_remotes_with_info(&self) -> Vec<(RemoteBagHit, Option<BagInfo>)> {
+    pub async fn list_all_remotes_with_info(&self) -> Vec<(RemoteBagHit, Option<BagInfo>)> {
         let mut names = self.registries.keys().cloned().collect::<Vec<_>>();
         names.sort();
 
-        let mut result: Vec<(RemoteBagHit, Option<BagInfo>)> = Vec::new();
-        std::thread::scope(|s| {
-            let handles: Vec<_> = names
-                .iter()
-                .filter_map(|name| {
-                    self.registries.get(name).map(|(_, driver)| {
-                        let name = name.clone();
-                        s.spawn(move || {
-                            driver
-                                .list_with_info("*")
-                                .ok()
-                                .unwrap_or_default()
-                                .into_iter()
-                                .map(|(bag, info)| {
-                                    (
-                                        RemoteBagHit {
-                                            registry: name.clone(),
-                                            bag,
-                                        },
-                                        info,
-                                    )
-                                })
-                                .collect::<Vec<_>>()
+        let mut join_set = tokio::task::JoinSet::new();
+        for name in names {
+            if let Some((_, driver)) = self.registries.get(&name) {
+                let driver = Arc::clone(driver);
+                let name = name.clone();
+                join_set.spawn(async move {
+                    driver
+                        .list_with_info("*")
+                        .await
+                        .ok()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|(bag, info)| {
+                            (
+                                RemoteBagHit {
+                                    registry: name.clone(),
+                                    bag,
+                                },
+                                info,
+                            )
                         })
-                    })
-                })
-                .collect();
-
-            for handle in handles {
-                result.extend(handle.join().unwrap_or_default());
+                        .collect::<Vec<_>>()
+                });
             }
-        });
+        }
+
+        let mut result: Vec<(RemoteBagHit, Option<BagInfo>)> = Vec::new();
+        while let Some(Ok(chunk)) = join_set.join_next().await {
+            result.extend(chunk);
+        }
 
         result.sort_by(|(a, _), (b, _)| {
             a.registry
@@ -810,38 +849,38 @@ impl Marina {
     }
 
     /// Mirror all bags from `source` registry into `target` registry.
-    ///
-    /// - Bags absent from target are pushed.
-    /// - Bags present in both with matching hashes are skipped.
-    /// - Bags present in both with different hashes are replaced.
-    /// - Missing metadata or hash on either side is treated as an error.
-    pub fn mirror_registry(
+    pub async fn mirror_registry(
         &self,
         source_name: &str,
         target_name: &str,
         progress: &mut ProgressReporter<'_>,
     ) -> Result<MirrorStats> {
-        let (_, source_drv) = self
+        let source_drv = self
             .registries
             .get(source_name)
-            .ok_or_else(|| anyhow!("source registry '{}' not found", source_name))?;
-        let (_, target_drv) = self
+            .ok_or_else(|| anyhow!("source registry '{}' not found", source_name))?
+            .1
+            .clone();
+        let target_drv = self
             .registries
             .get(target_name)
-            .ok_or_else(|| anyhow!("target registry '{}' not found", target_name))?;
+            .ok_or_else(|| anyhow!("target registry '{}' not found", target_name))?
+            .1
+            .clone();
 
         progress.emit(
             "mirror",
             format!("listing source registry '{}'", source_name),
         );
-        let source_items = source_drv.list_with_info("*")?;
+        let source_items = source_drv.list_with_info("*").await?;
 
         progress.emit(
             "mirror",
             format!("listing target registry '{}'", target_name),
         );
         let target_map: HashMap<String, String> = target_drv
-            .list_with_info("*")?
+            .list_with_info("*")
+            .await?
             .into_iter()
             .map(|(bag, info)| {
                 let hash = info
@@ -878,6 +917,7 @@ impl Marina {
             progress.emit("mirror", format!("downloading from '{}'", source_name));
             source_drv
                 .pull(&bag, &tmp_bundle)
+                .await
                 .with_context(|| format!("failed to pull '{}' from '{}'", bag, source_name))?;
 
             let bundle_hash = compute_bundle_hash(&tmp_bundle)?;
@@ -895,6 +935,7 @@ impl Marina {
             progress.emit("mirror", format!("uploading {} to '{}'", bag, target_name));
             target_drv
                 .push(target_name, &bag, &tmp_bundle, &push_meta)
+                .await
                 .with_context(|| format!("failed to push '{}' to '{}'", bag, target_name))?;
 
             if target_map.contains_key(&bag_key) {
@@ -908,33 +949,34 @@ impl Marina {
     }
 
     /// List bags in a specific registry with their stored metadata.
-    pub fn search_remote_with_info(
+    pub async fn search_remote_with_info(
         &self,
         registry: &str,
         pattern: &str,
     ) -> Vec<(BagRef, Option<BagInfo>)> {
-        self.registries
-            .get(registry)
-            .and_then(|(_, drv)| drv.list_with_info(pattern).ok())
-            .unwrap_or_default()
+        if let Some((_, drv)) = self.registries.get(registry) {
+            drv.list_with_info(pattern).await.ok().unwrap_or_default()
+        } else {
+            Vec::new()
+        }
     }
 }
 
-fn make_registry_driver(registry: &RegistryConfig) -> Result<Box<dyn RegistryDriver>> {
-    let driver: Box<dyn RegistryDriver> = match registry.kind.as_str() {
+fn make_registry_driver(registry: &RegistryConfig) -> Result<Arc<dyn RegistryDriver>> {
+    let driver: Arc<dyn RegistryDriver> = match registry.kind.as_str() {
         "folder" | "directory" => {
-            Box::new(FolderRegistry::from_uri(&registry.name, &registry.uri)?)
+            Arc::new(FolderRegistry::from_uri(&registry.name, &registry.uri)?)
         }
-        "ssh" => Box::new(SshRegistry::from_uri(
+        "ssh" => Arc::new(SshRegistry::from_uri(
             &registry.name,
             &registry.uri,
             registry.auth_env.clone(),
         )?),
-        "http" => Box::new(HttpRegistry::from_uri(&registry.name, &registry.uri)?),
+        "http" => Arc::new(HttpRegistry::from_uri(&registry.name, &registry.uri)?),
         "gdrive" => {
             #[cfg(feature = "gdrive")]
             {
-                Box::new(GDriveRegistry::from_uri(
+                Arc::new(GDriveRegistry::from_uri(
                     &registry.name,
                     &registry.uri,
                     registry.auth_env.clone(),
@@ -942,14 +984,14 @@ fn make_registry_driver(registry: &RegistryConfig) -> Result<Box<dyn RegistryDri
             }
             #[cfg(not(feature = "gdrive"))]
             {
-                Box::new(StubRegistry::new(
+                Arc::new(StubRegistry::new(
                     "gdrive",
                     &registry.uri,
                     registry.auth_env.clone(),
                 ))
             }
         }
-        other => Box::new(StubRegistry::new(
+        other => Arc::new(StubRegistry::new(
             other,
             &registry.uri,
             registry.auth_env.clone(),
@@ -1014,20 +1056,6 @@ fn normalize_local_registry_path(uri: &str) -> PathBuf {
     } else {
         PathBuf::from(uri)
     }
-}
-
-fn copy_source(src: &Path, dst: &Path) -> Result<()> {
-    if src.is_file() {
-        fs::create_dir_all(dst)?;
-        let name = src
-            .file_name()
-            .ok_or_else(|| anyhow!("source file has no file name: {}", src.display()))?;
-        fs::copy(src, dst.join(name))
-            .with_context(|| format!("failed copying {} into {}", src.display(), dst.display()))?;
-        return Ok(());
-    }
-
-    copy_dir(src, dst)
 }
 
 fn copy_dir(src: &Path, dst: &Path) -> Result<()> {

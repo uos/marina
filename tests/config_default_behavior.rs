@@ -32,11 +32,11 @@ fn no_config_file_yields_default() -> Result<()> {
     ));
     assert!(matches!(
         regs.compression.packed_archive_compression,
-        config::ConfigArchiveCompression::Gzip
+        config::ConfigArchiveCompression::None
     ));
     assert!(matches!(
         regs.compression.unpacked_mcap_compression,
-        config::ConfigMcapCompression::Zstd
+        config::ConfigMcapCompression::Lz4
     ));
     Ok(())
 }
@@ -71,11 +71,11 @@ fn existing_empty_config_does_not_add_default() -> Result<()> {
     ));
     assert!(matches!(
         regs.compression.packed_archive_compression,
-        config::ConfigArchiveCompression::Gzip
+        config::ConfigArchiveCompression::None
     ));
     assert!(matches!(
         regs.compression.unpacked_mcap_compression,
-        config::ConfigMcapCompression::Zstd
+        config::ConfigMcapCompression::Lz4
     ));
     Ok(())
 }

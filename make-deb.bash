@@ -6,7 +6,7 @@
 sudo apt-get install --no-install-recommends -y debhelper sed grep
 
 # deps from the package.xml
-sudo apt-get install --no-install-recommends -y cargo libclang-dev python3-catkin-pkg-modules
+sudo apt-get install --no-install-recommends -y cargo libclang-dev python3-catkin-pkg-modules libssl-dev
 
 cargo_ver=$(grep -Po '^\s*version\s*=\s*"\K[^"]+' Cargo.toml)
 xml_ver=$(grep -Po '<\s*version\s*>\K[^<]+' package.xml)

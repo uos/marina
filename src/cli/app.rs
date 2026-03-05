@@ -205,6 +205,8 @@ struct RemoveArgs {
     remote: bool,
     #[arg(long)]
     registry: Option<String>,
+    #[arg(long)]
+    write_http_index: bool,
 }
 
 #[derive(Args)]
@@ -226,20 +228,20 @@ struct CompletionsArgs {
     shell: clap_complete::Shell,
 }
 
-pub fn run() -> Result<()> {
+pub async fn run() -> Result<()> {
     let mut args = std::env::args().collect::<Vec<_>>();
     if let Ok(prog_name) = std::env::var("MARINA_PROG_NAME") {
         if let Some(first) = args.first_mut() {
             *first = prog_name;
         }
     }
-    run_with_args(args)
+    run_with_args(args).await
 }
 
-pub fn run_with_args(args: Vec<String>) -> Result<()> {
+pub async fn run_with_args(args: Vec<String>) -> Result<()> {
     let raw_yes = args.iter().any(|arg| arg == "-y" || arg == "--yes");
     let cli = Cli::parse_from(args);
-    run_parsed(cli, raw_yes)
+    run_parsed(cli, raw_yes).await
 }
 
 /// Prompt the user to pick one registry from a list, or auto-accept the first if `yes` is set.
@@ -327,7 +329,7 @@ fn pick_pull_candidate(
         .collect();
 
     let headers = [
-        "IDX", "DATASET", "REGISTRY", "HASH", "ORIGINAL", "PACKED", "CLOUDS", "MCAP", "PUSHED",
+        "IDX", "DATASET", "REGISTRY", "HASH", "ORIGINAL", "PACKED", "CLOUDS", "ARCHIVE", "PUSHED",
     ];
     let mut widths = headers.map(|h| h.len());
     for row in &rows {
@@ -400,7 +402,7 @@ fn print_remote_detail_table(
         })
         .collect();
     let headers = [
-        "DATASET", "REGISTRY", "HASH", "ORIGINAL", "PACKED", "CLOUDS", "MCAP", "PUSHED",
+        "DATASET", "REGISTRY", "HASH", "ORIGINAL", "PACKED", "CLOUDS", "ARCHIVE", "PUSHED",
     ];
     let mut widths = headers.map(|h| h.len());
     for row in &rows {
@@ -428,7 +430,7 @@ fn print_remote_detail_table(
     }
 }
 
-fn pull_and_print(
+async fn pull_and_print(
     marina: &mut Marina,
     bag: &BagRef,
     registry: Option<&str>,
@@ -438,7 +440,9 @@ fn pull_and_print(
         let mut stdout = std::io::stdout();
         let mut sink = WriterProgress::new(&mut stdout);
         let mut progress = ProgressReporter::new(&mut sink);
-        marina.pull_exact_with_progress_and_options(bag, registry, pull_options, &mut progress)?
+        marina
+            .pull_exact_with_progress_and_options(bag, registry, pull_options, &mut progress)
+            .await?
     };
     println!("pulled {} -> {}", bag.without_attachment(), path.display());
     if let Some(stats) = marina.cached_size_stats(bag) {
@@ -447,7 +451,7 @@ fn pull_and_print(
     Ok(())
 }
 
-fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
+async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
     crate::cleanup::init();
     let yes = cli.yes || raw_yes;
     let compression = config::load_compression_config()?;
@@ -516,7 +520,7 @@ fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                 #[cfg(feature = "gdrive")]
                 {
                     if args.status {
-                        let status = gdrive_auth::oauth_status(&args.name)?;
+                        let status = gdrive_auth::oauth_status(&args.name).await?;
                         println!("registry: {}", args.name);
                         println!("token file: {}", status.token_path.display());
                         if !status.token_present {
@@ -543,14 +547,16 @@ fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                         args.client_id,
                         args.client_secret,
                     )?;
-                    gdrive_auth::run_oauth_flow(&args.name, &client_id, &client_secret)?;
+                    gdrive_auth::run_oauth_flow(&args.name, &client_id, &client_secret).await?;
                 }
             }
             RegistrySub::Mirror(args) => {
                 let mut out = std::io::stdout();
                 let mut sink = WriterProgress::new(&mut out);
                 let mut progress = ProgressReporter::new(&mut sink);
-                let stats = marina.mirror_registry(&args.source, &args.target, &mut progress)?;
+                let stats = marina
+                    .mirror_registry(&args.source, &args.target, &mut progress)
+                    .await?;
                 println!(
                     "mirror complete: {} pushed, {} updated, {} skipped",
                     stats.pushed, stats.updated, stats.skipped
@@ -579,25 +585,17 @@ fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                 let all = if let Some(reg) = args.registry.as_deref() {
                     marina
                         .search_remote_with_info(reg, "*")
+                        .await
                         .into_iter()
                         .map(|(bag, info)| (reg.to_string(), bag, info))
                         .collect::<Vec<_>>()
                 } else {
-                    let mut rows = Vec::new();
-                    for cfg in marina.list_registry_configs() {
-                        match marina.search_remote("*", Some(&cfg.name)) {
-                            Ok(bags) => {
-                                rows.extend(bags.into_iter().map(|bag| {
-                                    let info = marina.bag_info(&cfg.name, &bag);
-                                    (cfg.name.clone(), bag, info)
-                                }));
-                            }
-                            Err(err) => {
-                                warn!("failed listing remote registry '{}': {}", cfg.name, err);
-                            }
-                        }
-                    }
-                    rows
+                    marina
+                        .list_all_remotes_with_info()
+                        .await
+                        .into_iter()
+                        .map(|(hit, info)| (hit.registry, hit.bag, info))
+                        .collect::<Vec<_>>()
                 };
                 let time_display = config::load_registries()
                     .map(|f| f.settings.time_display)
@@ -624,21 +622,27 @@ fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
             let rows = if let Some(registry) = args.registry.as_deref() {
                 marina
                     .search_remote_with_info(registry, &args.pattern)
+                    .await
                     .into_iter()
                     .map(|(bag, info)| (registry.to_string(), bag, info))
                     .collect::<Vec<_>>()
             } else {
                 let mut rows = Vec::new();
-                for cfg in marina.list_registry_configs() {
-                    match marina.search_remote(&args.pattern, Some(&cfg.name)) {
+                let cfg_names: Vec<String> = marina
+                    .list_registry_configs()
+                    .into_iter()
+                    .map(|c| c.name.clone())
+                    .collect();
+                for name in cfg_names {
+                    match marina.search_remote(&args.pattern, Some(&name)).await {
                         Ok(bags) => {
-                            rows.extend(bags.into_iter().map(|bag| {
-                                let info = marina.bag_info(&cfg.name, &bag);
-                                (cfg.name.clone(), bag, info)
-                            }));
+                            for bag in bags {
+                                let info = marina.bag_info(&name, &bag).await;
+                                rows.push((name.clone(), bag, info));
+                            }
                         }
                         Err(err) => {
-                            warn!("failed searching registry '{}': {}", cfg.name, err);
+                            warn!("failed searching registry '{}': {}", name, err);
                         }
                     }
                 }
@@ -697,22 +701,26 @@ fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                 let mut stdout = std::io::stdout();
                 let mut sink = WriterProgress::new(&mut stdout);
                 let mut progress = ProgressReporter::new(&mut sink);
-                marina.push_with_progress_and_options(
-                    &args.bag,
-                    &args.source,
-                    registry.as_deref(),
-                    push_options,
-                    &mut progress,
-                )?;
+                marina
+                    .push_with_progress_and_options(
+                        &args.bag,
+                        &args.source,
+                        registry.as_deref(),
+                        push_options,
+                        &mut progress,
+                    )
+                    .await?;
             } else {
                 let mut progress = ProgressReporter::silent();
-                marina.push_with_progress_and_options(
-                    &args.bag,
-                    &args.source,
-                    registry.as_deref(),
-                    push_options,
-                    &mut progress,
-                )?;
+                marina
+                    .push_with_progress_and_options(
+                        &args.bag,
+                        &args.source,
+                        registry.as_deref(),
+                        push_options,
+                        &mut progress,
+                    )
+                    .await?;
             }
             if args.dry_run {
                 println!(
@@ -762,21 +770,26 @@ fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                 Some(r) => Some(r),
                 None => {
                     let mut unique: Vec<(String, String)> = Vec::new();
-                    for cfg in marina.list_registry_configs() {
-                        match marina.search_remote(&args.target, Some(&cfg.name)) {
+                    let cfg_names: Vec<String> = marina
+                        .list_registry_configs()
+                        .into_iter()
+                        .map(|c| c.name.clone())
+                        .collect();
+                    for name in cfg_names {
+                        match marina.search_remote(&args.target, Some(&name)).await {
                             Ok(bags) => {
                                 if let Some(bag) = bags.first() {
                                     let hash = marina
-                                        .bag_info(&cfg.name, bag)
+                                        .bag_info(&name, bag)
+                                        .await
                                         .and_then(|i| i.bundle_hash)
                                         .map(|hx| format!("hash:{hx}"))
                                         .unwrap_or_default();
-                                    unique
-                                        .push((cfg.name.clone(), format!("{} {}", cfg.name, hash)));
+                                    unique.push((name.clone(), format!("{} {}", name, hash)));
                                 }
                             }
                             Err(err) => {
-                                warn!("failed searching registry '{}': {}", cfg.name, err);
+                                warn!("failed searching registry '{}': {}", name, err);
                             }
                         }
                     }
@@ -795,24 +808,28 @@ fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                 }
             };
             if args.target.contains('*') {
-                let pulled = if !args.no_progress {
+                let pulled: Vec<BagRef> = if !args.no_progress {
                     let mut stdout = std::io::stdout();
                     let mut sink = WriterProgress::new(&mut stdout);
                     let mut progress = ProgressReporter::new(&mut sink);
-                    marina.pull_pattern_with_progress_and_options(
-                        &args.target,
-                        registry.as_deref(),
-                        pull_options,
-                        &mut progress,
-                    )?
+                    marina
+                        .pull_pattern_with_progress_and_options(
+                            &args.target,
+                            registry.as_deref(),
+                            pull_options,
+                            &mut progress,
+                        )
+                        .await?
                 } else {
                     let mut progress = ProgressReporter::silent();
-                    marina.pull_pattern_with_progress_and_options(
-                        &args.target,
-                        registry.as_deref(),
-                        pull_options,
-                        &mut progress,
-                    )?
+                    marina
+                        .pull_pattern_with_progress_and_options(
+                            &args.target,
+                            registry.as_deref(),
+                            pull_options,
+                            &mut progress,
+                        )
+                        .await?
                 };
                 for bag in &pulled {
                     println!("pulled {}", bag);
@@ -822,18 +839,20 @@ fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                 let bag: BagRef = args.target.parse()?;
                 if args.no_progress {
                     let mut progress = ProgressReporter::silent();
-                    let path = marina.pull_exact_with_progress_and_options(
-                        &bag,
-                        registry.as_deref(),
-                        pull_options,
-                        &mut progress,
-                    )?;
+                    let path = marina
+                        .pull_exact_with_progress_and_options(
+                            &bag,
+                            registry.as_deref(),
+                            pull_options,
+                            &mut progress,
+                        )
+                        .await?;
                     println!("pulled {} -> {}", bag.without_attachment(), path.display());
                     if let Some(stats) = marina.cached_size_stats(&bag) {
                         print_size_summary("cached size", stats.original_bytes, stats.packed_bytes);
                     }
                 } else {
-                    pull_and_print(&mut marina, &bag, registry.as_deref(), pull_options)?;
+                    pull_and_print(&mut marina, &bag, registry.as_deref(), pull_options).await?;
                 }
             }
         }
@@ -841,7 +860,10 @@ fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
             let interactive = is_interactive_shell();
             let quiet_non_interactive_yes = yes && !interactive;
 
-            match marina.resolve_target(&args.target, args.registry.as_deref())? {
+            match marina
+                .resolve_target(&args.target, args.registry.as_deref())
+                .await?
+            {
                 ResolveResult::LocalPath(p) => println!("{}", p.display()),
                 ResolveResult::Cached(p) => println!("{}", p.display()),
                 ResolveResult::RemoteAvailable {
@@ -880,23 +902,27 @@ fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                             };
                             if quiet_non_interactive_yes {
                                 let mut progress = ProgressReporter::silent();
-                                marina.pull_exact_with_progress_and_options(
-                                    &bag,
-                                    Some(registry.as_str()),
-                                    pull_options,
-                                    &mut progress,
-                                )?;
-                            } else {
-                                let path = {
-                                    let mut stdout = std::io::stdout();
-                                    let mut sink = WriterProgress::new(&mut stdout);
-                                    let mut progress = ProgressReporter::new(&mut sink);
-                                    marina.pull_exact_with_progress_and_options(
+                                marina
+                                    .pull_exact_with_progress_and_options(
                                         &bag,
                                         Some(registry.as_str()),
                                         pull_options,
                                         &mut progress,
-                                    )?
+                                    )
+                                    .await?;
+                            } else {
+                                let path: std::path::PathBuf = {
+                                    let mut stdout = std::io::stdout();
+                                    let mut sink = WriterProgress::new(&mut stdout);
+                                    let mut progress = ProgressReporter::new(&mut sink);
+                                    marina
+                                        .pull_exact_with_progress_and_options(
+                                            &bag,
+                                            Some(registry.as_str()),
+                                            pull_options,
+                                            &mut progress,
+                                        )
+                                        .await?
                                 };
                                 println!(
                                     "pulled {} -> {}",
@@ -911,7 +937,10 @@ fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                                     );
                                 }
                             }
-                            match marina.resolve_target(&args.target, args.registry.as_deref())? {
+                            match marina
+                                .resolve_target(&args.target, args.registry.as_deref())
+                                .await?
+                            {
                                 ResolveResult::LocalPath(resolved)
                                 | ResolveResult::Cached(resolved) => {
                                     println!("{}", resolved.display())
@@ -928,13 +957,11 @@ fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                 }
                 ResolveResult::Ambiguous { candidates } => {
                     if interactive {
-                        let items: Vec<(String, BagRef, Option<BagInfo>)> = candidates
-                            .iter()
-                            .map(|(registry, bag)| {
-                                let info = marina.bag_info(registry, bag);
-                                (registry.clone(), bag.clone(), info)
-                            })
-                            .collect();
+                        let mut items: Vec<(String, BagRef, Option<BagInfo>)> = Vec::new();
+                        for (registry, bag) in &candidates {
+                            let info = marina.bag_info(registry, bag).await;
+                            items.push((registry.clone(), bag.clone(), info));
+                        }
 
                         let time_display = config::load_registries()
                             .map(|f| f.settings.time_display)
@@ -960,13 +987,12 @@ fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                                     compression.unpacked_mcap_compression,
                                 ),
                             };
-                            pull_and_print(
-                                &mut marina,
-                                bag,
-                                Some(registry.as_str()),
-                                pull_options,
-                            )?;
-                            match marina.resolve_target(&args.target, args.registry.as_deref())? {
+                            pull_and_print(&mut marina, bag, Some(registry.as_str()), pull_options)
+                                .await?;
+                            match marina
+                                .resolve_target(&args.target, args.registry.as_deref())
+                                .await?
+                            {
                                 ResolveResult::LocalPath(resolved)
                                 | ResolveResult::Cached(resolved) => {
                                     println!("{}", resolved.display())
@@ -989,13 +1015,18 @@ fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                             ),
                         };
                         let mut progress = ProgressReporter::silent();
-                        marina.pull_exact_with_progress_and_options(
-                            bag,
-                            Some(registry.as_str()),
-                            pull_options,
-                            &mut progress,
-                        )?;
-                        match marina.resolve_target(&args.target, args.registry.as_deref())? {
+                        marina
+                            .pull_exact_with_progress_and_options(
+                                bag,
+                                Some(registry.as_str()),
+                                pull_options,
+                                &mut progress,
+                            )
+                            .await?;
+                        match marina
+                            .resolve_target(&args.target, args.registry.as_deref())
+                            .await?
+                        {
                             ResolveResult::LocalPath(resolved)
                             | ResolveResult::Cached(resolved) => {
                                 println!("{}", resolved.display())
@@ -1012,6 +1043,7 @@ fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                         for (registry, bag) in &candidates {
                             let hash = marina
                                 .bag_info(registry, bag)
+                                .await
                                 .and_then(|i| i.bundle_hash)
                                 .map(|h| format!("  [hash:{h}]"))
                                 .unwrap_or_default();
@@ -1029,7 +1061,9 @@ fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
             marina.remove_local(&args.bag)?;
             println!("removed local cache for {}", args.bag.without_attachment());
             if args.remote {
-                marina.remove_remote(&args.bag, args.registry.as_deref())?;
+                marina
+                    .remove_remote(&args.bag, args.registry.as_deref(), args.write_http_index)
+                    .await?;
                 println!("removed remote {}", args.bag.without_attachment());
             }
         }
@@ -1043,7 +1077,9 @@ fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
         }
         Commands::Complete(args) => {
             let query = format!("{}*", args.prefix);
-            let out = marina.search_remote(&query, args.registry.as_deref())?;
+            let out = marina
+                .search_remote(&query, args.registry.as_deref())
+                .await?;
             for bag in out {
                 println!("{}", bag);
             }

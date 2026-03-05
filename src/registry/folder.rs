@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
+use async_trait::async_trait;
 use glob::Pattern;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
@@ -84,8 +85,9 @@ impl FolderRegistry {
     }
 }
 
+#[async_trait]
 impl RegistryDriver for FolderRegistry {
-    fn push(
+    async fn push(
         &self,
         _registry_name: &str,
         bag: &BagRef,
@@ -116,7 +118,7 @@ impl RegistryDriver for FolderRegistry {
         Ok(())
     }
 
-    fn bag_info(&self, bag: &BagRef) -> Result<Option<BagInfo>> {
+    async fn bag_info(&self, bag: &BagRef) -> Result<Option<BagInfo>> {
         let meta = self.read_meta(bag)?;
         Ok(Some(BagInfo {
             bundle_hash: meta.bundle_hash,
@@ -128,7 +130,7 @@ impl RegistryDriver for FolderRegistry {
         }))
     }
 
-    fn pull(&self, bag: &BagRef, out_packed_file: &Path) -> Result<RemoteDescriptor> {
+    async fn pull(&self, bag: &BagRef, out_packed_file: &Path) -> Result<RemoteDescriptor> {
         let src = self.data_path(bag);
         if !src.exists() {
             return Err(anyhow!("bag not found in folder registry: {}", bag));
@@ -148,7 +150,7 @@ impl RegistryDriver for FolderRegistry {
         })
     }
 
-    fn list(&self, filter: &str) -> Result<Vec<BagRef>> {
+    async fn list(&self, filter: &str) -> Result<Vec<BagRef>> {
         let pattern = Pattern::new(filter).or_else(|_| Pattern::new("*"))?;
         let mut out = Vec::new();
 
@@ -172,7 +174,7 @@ impl RegistryDriver for FolderRegistry {
         Ok(out)
     }
 
-    fn remove(&self, bag: &BagRef) -> Result<()> {
+    async fn remove(&self, bag: &BagRef) -> Result<()> {
         let dir = self.object_dir(bag);
         if dir.exists() {
             fs::remove_dir_all(dir)?;
@@ -180,7 +182,7 @@ impl RegistryDriver for FolderRegistry {
         Ok(())
     }
 
-    fn write_http_index(&self) -> Result<()> {
+    async fn write_http_index(&self) -> Result<()> {
         let mut bags = Vec::new();
         for entry in WalkDir::new(&self.root) {
             let entry = entry?;
@@ -209,7 +211,7 @@ impl RegistryDriver for FolderRegistry {
         Ok(())
     }
 
-    fn check_write_access(&self) -> Result<()> {
+    async fn check_write_access(&self) -> Result<()> {
         let probe = self.root.join(".marina_write_probe");
         fs::create_dir_all(&probe).with_context(|| {
             format!(

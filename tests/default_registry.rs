@@ -9,8 +9,9 @@ use tempfile::tempdir;
 
 struct FailingDriver;
 
+#[async_trait::async_trait]
 impl RegistryDriver for FailingDriver {
-    fn push(
+    async fn push(
         &self,
         _registry_name: &str,
         _bag: &BagRef,
@@ -20,7 +21,7 @@ impl RegistryDriver for FailingDriver {
         Err(anyhow::anyhow!("unexpected"))
     }
 
-    fn pull(
+    async fn pull(
         &self,
         _bag: &BagRef,
         _out_packed_file: &std::path::Path,
@@ -28,15 +29,15 @@ impl RegistryDriver for FailingDriver {
         Err(anyhow::anyhow!("unexpected"))
     }
 
-    fn list(&self, _filter: &str) -> Result<Vec<BagRef>> {
+    async fn list(&self, _filter: &str) -> Result<Vec<BagRef>> {
         Err(anyhow::anyhow!("unreachable"))
     }
 
-    fn remove(&self, _bag: &BagRef) -> Result<()> {
+    async fn remove(&self, _bag: &BagRef) -> Result<()> {
         Err(anyhow::anyhow!("unexpected"))
     }
 
-    fn check_connection(&self) -> Result<()> {
+    async fn check_connection(&self) -> Result<()> {
         Err(anyhow::anyhow!("connection failed"))
     }
 }
@@ -59,10 +60,10 @@ fn default_registry_present_in_empty_config() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn connection_warning_helper_returns_message() {
+#[tokio::test]
+async fn connection_warning_helper_returns_message() {
     // use a non-default name to emphasize the helper is generic
-    let msg = connection_warning("my-registry", "some://uri", &FailingDriver);
+    let msg = connection_warning("my-registry", "some://uri", &FailingDriver).await;
     assert!(msg.is_some(), "expected a warning string");
     let text = msg.unwrap();
     assert!(text.contains("my-registry"));

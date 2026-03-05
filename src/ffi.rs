@@ -133,20 +133,28 @@ fn do_pull_with_progress(
         }
     };
 
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(v) => v,
+        Err(e) => {
+            set_last_error(format!("failed to create tokio runtime: {e}"));
+            return std::ptr::null_mut();
+        }
+    };
+
     let path = if let Some(cb) = callback {
         let mut sink = CCallbackProgress {
             callback: cb,
             user_data,
         };
         let mut progress = ProgressReporter::new(&mut sink);
-        marina.pull_exact_with_progress(&bag, registry.as_deref(), &mut progress)
+        rt.block_on(marina.pull_exact_with_progress(&bag, registry.as_deref(), &mut progress))
     } else if progress_mode == MARINA_PROGRESS_MODE_STDOUT {
         let mut stdout = std::io::stdout();
         let mut sink = WriterProgress::new(&mut stdout);
         let mut progress = ProgressReporter::new(&mut sink);
-        marina.pull_exact_with_progress(&bag, registry.as_deref(), &mut progress)
+        rt.block_on(marina.pull_exact_with_progress(&bag, registry.as_deref(), &mut progress))
     } else {
-        marina.pull_exact(&bag, registry.as_deref())
+        rt.block_on(marina.pull_exact(&bag, registry.as_deref()))
     };
 
     match path {
@@ -194,7 +202,12 @@ pub unsafe extern "C" fn marina_resolve_detailed(
         Err(e) => return detailed_error(format!("failed to load marina: {e}")),
     };
 
-    match marina.resolve_target(&target, registry.as_deref()) {
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(v) => v,
+        Err(e) => return detailed_error(format!("failed to create tokio runtime: {e}")),
+    };
+
+    match rt.block_on(marina.resolve_target(&target, registry.as_deref())) {
         Ok(ResolveResult::LocalPath(p)) => MarinaResolveDetailed {
             kind: MARINA_RESOLVE_LOCAL,
             path: cstring_from_string(p.display().to_string()),

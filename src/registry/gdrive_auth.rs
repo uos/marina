@@ -1,9 +1,8 @@
-use std::io::{Read, Write};
-use std::net::TcpListener;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::storage::config;
 
@@ -57,14 +56,14 @@ fn save_stored_token(registry_name: &str, token: &StoredToken) -> Result<()> {
 
 /// Returns a valid access token for the registry, refreshing if expired.
 /// Returns `None` if no stored token exists (fall through to other auth methods).
-pub fn get_access_token(registry_name: &str) -> Result<Option<String>> {
+pub async fn get_access_token(registry_name: &str) -> Result<Option<String>> {
     let mut token = match load_stored_token(registry_name) {
         Some(t) => t,
         None => return Ok(None),
     };
 
     if token.is_expired() {
-        token = do_refresh(&token.client_id, &token.client_secret, &token.refresh_token)?;
+        token = do_refresh(&token.client_id, &token.client_secret, &token.refresh_token).await?;
         save_stored_token(registry_name, &token)?;
     }
 
@@ -80,7 +79,7 @@ pub struct OAuthStatus {
     pub refresh_error: Option<String>,
 }
 
-pub fn oauth_status(registry_name: &str) -> Result<OAuthStatus> {
+pub async fn oauth_status(registry_name: &str) -> Result<OAuthStatus> {
     let path =
         token_path(registry_name).ok_or_else(|| anyhow!("could not determine config directory"))?;
 
@@ -98,7 +97,7 @@ pub fn oauth_status(registry_name: &str) -> Result<OAuthStatus> {
     };
 
     if token.is_expired() {
-        match do_refresh(&token.client_id, &token.client_secret, &token.refresh_token) {
+        match do_refresh(&token.client_id, &token.client_secret, &token.refresh_token).await {
             Ok(refreshed) => {
                 save_stored_token(registry_name, &refreshed)?;
                 token = refreshed;
@@ -147,9 +146,14 @@ pub fn resolve_client_credentials(
 }
 
 /// Runs the full OAuth2 authorization code flow and stores the resulting token.
-pub fn run_oauth_flow(registry_name: &str, client_id: &str, client_secret: &str) -> Result<()> {
-    let listener =
-        TcpListener::bind("127.0.0.1:0").context("failed to start local callback server")?;
+pub async fn run_oauth_flow(
+    registry_name: &str,
+    client_id: &str,
+    client_secret: &str,
+) -> Result<()> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("failed to start local callback server")?;
     let port = listener.local_addr()?.port();
     let redirect_uri = format!("http://127.0.0.1:{}/callback", port);
 
@@ -175,10 +179,10 @@ pub fn run_oauth_flow(registry_name: &str, client_id: &str, client_secret: &str)
     }
 
     eprintln!("Waiting for Google to redirect back...");
-    let code = wait_for_code(listener)?;
+    let code = wait_for_code(listener).await?;
     eprintln!("Authorization code received, exchanging for tokens...");
 
-    let token = exchange_code(client_id, client_secret, &code, &redirect_uri)?;
+    let token = exchange_code(client_id, client_secret, &code, &redirect_uri).await?;
     save_stored_token(registry_name, &token)?;
 
     eprintln!(
@@ -188,14 +192,16 @@ pub fn run_oauth_flow(registry_name: &str, client_id: &str, client_secret: &str)
     Ok(())
 }
 
-fn wait_for_code(listener: TcpListener) -> Result<String> {
+async fn wait_for_code(listener: tokio::net::TcpListener) -> Result<String> {
     let (mut stream, _) = listener
         .accept()
+        .await
         .context("failed to accept OAuth callback")?;
 
     let mut buf = [0u8; 4096];
     let n = stream
         .read(&mut buf)
+        .await
         .context("failed to read callback request")?;
     let request = std::str::from_utf8(&buf[..n]).unwrap_or("");
 
@@ -221,18 +227,18 @@ fn wait_for_code(listener: TcpListener) -> Result<String> {
         html.len(),
         html
     );
-    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.write_all(response.as_bytes()).await;
 
     Ok(code)
 }
 
-fn exchange_code(
+async fn exchange_code(
     client_id: &str,
     client_secret: &str,
     code: &str,
     redirect_uri: &str,
 ) -> Result<StoredToken> {
-    let client = reqwest::blocking::Client::new();
+    let client = reqwest::Client::new();
     let resp: serde_json::Value = client
         .post(TOKEN_ENDPOINT)
         .form(&[
@@ -243,8 +249,10 @@ fn exchange_code(
             ("grant_type", "authorization_code"),
         ])
         .send()
+        .await
         .context("token exchange request failed")?
         .json()
+        .await
         .context("failed to parse token exchange response")?;
 
     if let Some(err) = resp["error"].as_str() {
@@ -277,8 +285,12 @@ fn exchange_code(
     ))
 }
 
-fn do_refresh(client_id: &str, client_secret: &str, refresh_token: &str) -> Result<StoredToken> {
-    let client = reqwest::blocking::Client::new();
+async fn do_refresh(
+    client_id: &str,
+    client_secret: &str,
+    refresh_token: &str,
+) -> Result<StoredToken> {
+    let client = reqwest::Client::new();
     let resp: serde_json::Value = client
         .post(TOKEN_ENDPOINT)
         .form(&[
@@ -288,8 +300,10 @@ fn do_refresh(client_id: &str, client_secret: &str, refresh_token: &str) -> Resu
             ("grant_type", "refresh_token"),
         ])
         .send()
+        .await
         .context("token refresh request failed")?
         .json()
+        .await
         .context("failed to parse token refresh response")?;
 
     if let Some(err) = resp["error"].as_str() {

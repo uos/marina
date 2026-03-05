@@ -21,16 +21,15 @@ jobs:
     runs-on: ubuntu-dev-noble-arm
     steps:
       - uses: actions/checkout@v4
-      - name: Check
+      - name: Deps
         run: |
+          apt-get update && apt-get install -y pkg-config cmake libclang-dev clang openssl libssl-dev libsqlite3-dev
           rustup toolchain uninstall stable
           rustup toolchain install stable
-          cargo check
-      - name: Validate packaging files versions
+      - name: Check
         run: |
           set -euo pipefail
           ulimit -n 65536
-          apt-get install -y cmake
           VERSION=$(toml get --raw Cargo.toml package.version)
           echo "Workspace version: $VERSION"
 
@@ -84,14 +83,14 @@ jobs:
         run: |
           set -euo pipefail
           ulimit -n 65536
-          apt-get install -y cmake
+          apt-get update && apt-get install -y pkg-config cmake libclang-dev clang openssl libssl-dev libsqlite3-dev
           rustup toolchain uninstall stable
           rustup toolchain install stable
           mkdir -p "dist/${ARCH}"
 
           # ------- RAW
           cargo build --release
-          mv target/release/marina dist/${ARCH}/
+          cp target/release/marina dist/${ARCH}/
 
           # ------- DEB
           cargo deb --no-build
@@ -166,6 +165,7 @@ jobs:
       - name: Build
         run: |
           ulimit -n 65536
+          apt-get update && apt-get install -y pkg-config cmake libclang-dev clang openssl libssl-dev libsqlite3-dev
           rustup toolchain uninstall stable
           rustup toolchain install stable
 
@@ -183,7 +183,7 @@ jobs:
             exit 1
           fi
 
-          bash ./scripts/make-deb.bash
+          bash ./make-deb.bash
 
       - name: Upload deb
         uses: actions/upload-artifact@v3
@@ -213,6 +213,7 @@ jobs:
           ARCH: ${{ matrix.arch }}
         run: |
           ulimit -n 65536
+          apt-get update && apt-get install -y pkg-config cmake libclang-dev clang openssl libssl-dev libsqlite3-dev
           rustup toolchain uninstall stable
           rustup toolchain install stable
           rustup target add $TARGET
@@ -275,6 +276,7 @@ jobs:
       - name: Build wheels
         run: |
           ulimit -n 65536
+          apt-get update && apt-get install -y pkg-config cmake libclang-dev clang openssl libssl-dev libsqlite3-dev
           rustup toolchain uninstall stable
           rustup toolchain install stable
           rustup target add "$TARGET"

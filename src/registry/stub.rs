@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
+use async_trait::async_trait;
 
 use crate::model::bag_ref::BagRef;
 use crate::registry::driver::{PushMeta, RegistryDriver, RemoteDescriptor};
@@ -32,8 +33,9 @@ impl StubRegistry {
     }
 }
 
+#[async_trait]
 impl RegistryDriver for StubRegistry {
-    fn push(
+    async fn push(
         &self,
         _registry_name: &str,
         _bag: &BagRef,
@@ -43,15 +45,15 @@ impl RegistryDriver for StubRegistry {
         Err(self.unsupported())
     }
 
-    fn pull(&self, _bag: &BagRef, _out_packed_file: &Path) -> Result<RemoteDescriptor> {
+    async fn pull(&self, _bag: &BagRef, _out_packed_file: &Path) -> Result<RemoteDescriptor> {
         Err(self.unsupported())
     }
 
-    fn list(&self, _filter: &str) -> Result<Vec<BagRef>> {
+    async fn list(&self, _filter: &str) -> Result<Vec<BagRef>> {
         Err(self.unsupported())
     }
 
-    fn remove(&self, _bag: &BagRef) -> Result<()> {
+    async fn remove(&self, _bag: &BagRef) -> Result<()> {
         Err(self.unsupported())
     }
 }

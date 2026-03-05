@@ -1,4 +1,5 @@
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
-    marina::cli::run()
+    marina::cli::run().await
 }

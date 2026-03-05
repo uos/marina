@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::model::bag_ref::BagRef;
@@ -39,8 +40,9 @@ pub struct BagInfo {
     pub pushed_at: Option<u64>,
 }
 
+#[async_trait]
 pub trait RegistryDriver: Send + Sync {
-    fn push(
+    async fn push(
         &self,
         registry_name: &str,
         bag: &BagRef,
@@ -48,40 +50,40 @@ pub trait RegistryDriver: Send + Sync {
         meta: &PushMeta,
     ) -> Result<()>;
 
-    fn pull(&self, bag: &BagRef, out_packed_file: &Path) -> Result<RemoteDescriptor>;
+    async fn pull(&self, bag: &BagRef, out_packed_file: &Path) -> Result<RemoteDescriptor>;
 
-    fn list(&self, filter: &str) -> Result<Vec<BagRef>>;
+    async fn list(&self, filter: &str) -> Result<Vec<BagRef>>;
 
-    fn remove(&self, bag: &BagRef) -> Result<()>;
+    async fn remove(&self, bag: &BagRef) -> Result<()>;
 
     /// Fetch lightweight metadata for a specific bag. Returns `None` if unsupported.
-    fn bag_info(&self, _bag: &BagRef) -> Result<Option<BagInfo>> {
+    async fn bag_info(&self, _bag: &BagRef) -> Result<Option<BagInfo>> {
         Ok(None)
     }
 
     /// List all matching bags together with their metadata in one operation.
     /// Drivers that can batch this more efficiently should override the default.
-    fn list_with_info(&self, filter: &str) -> Result<Vec<(BagRef, Option<BagInfo>)>> {
-        let bags = self.list(filter)?;
-        bags.into_iter()
-            .map(|bag| {
-                let info = self.bag_info(&bag).ok().flatten();
-                Ok((bag, info))
-            })
-            .collect()
+    async fn list_with_info(&self, filter: &str) -> Result<Vec<(BagRef, Option<BagInfo>)>> {
+        let bags = self.list(filter).await?;
+        let mut result = Vec::new();
+        for bag in bags {
+            let info = self.bag_info(&bag).await.ok().flatten();
+            result.push((bag, info));
+        }
+        Ok(result)
     }
 
-    fn write_http_index(&self) -> Result<()> {
+    async fn write_http_index(&self) -> Result<()> {
         Err(anyhow!(
             "http index generation is not supported for this registry type"
         ))
     }
 
-    fn check_connection(&self) -> Result<()> {
+    async fn check_connection(&self) -> Result<()> {
         Ok(())
     }
 
-    fn check_write_access(&self) -> Result<()> {
-        self.check_connection()
+    async fn check_write_access(&self) -> Result<()> {
+        self.check_connection().await
     }
 }

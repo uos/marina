@@ -1,6 +1,22 @@
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
+#[cfg(unix)]
+fn restore_terminal_echo_best_effort() {
+    use std::fs::File;
+    use std::process::{Command, Stdio};
+
+    if let Ok(tty) = File::open("/dev/tty") {
+        let _ = Command::new("stty")
+            .arg("echo")
+            .stdin(Stdio::from(tty))
+            .status();
+    }
+}
+
+#[cfg(not(unix))]
+fn restore_terminal_echo_best_effort() {}
+
 fn paths() -> &'static Mutex<Vec<PathBuf>> {
     static PATHS: OnceLock<Mutex<Vec<PathBuf>>> = OnceLock::new();
     PATHS.get_or_init(|| Mutex::new(Vec::new()))
@@ -10,6 +26,7 @@ fn paths() -> &'static Mutex<Vec<PathBuf>> {
 /// Should be called once at startup.
 pub fn init() {
     let _ = ctrlc::set_handler(|| {
+        restore_terminal_echo_best_effort();
         if let Ok(guard) = paths().lock() {
             for path in guard.iter() {
                 if path.is_dir() {
