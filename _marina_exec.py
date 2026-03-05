@@ -18,5 +18,7 @@ def _packaged_marina_executable():
 def run_marina(subcommand, forwarded_args=None):
     forwarded_args = forwarded_args or []
     executable = _packaged_marina_executable() or shutil.which('marina') or 'marina'
-    result = subprocess.run([executable, subcommand] + forwarded_args)
+    env = os.environ.copy()
+    env['MARINA_PROG_NAME'] = 'ros2 bag'
+    result = subprocess.run([executable, subcommand] + forwarded_args, env=env)
     return result.returncode

@@ -30,7 +30,7 @@ anyhow = "1.0"
 ctrlc = "3"
 clap = { version = "4.5", features = ["derive"] }
 clap_complete = "4.5"
-cloudini = "0.2.0"
+cloudini = { version = "0.2.0", default-features = false, features = ["ros"] }
 cdr = "0.2"
 dirs = "6.0"
 flate2 = "1.1"

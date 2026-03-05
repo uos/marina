@@ -227,7 +227,13 @@ struct CompletionsArgs {
 }
 
 pub fn run() -> Result<()> {
-    run_with_args(std::env::args().collect::<Vec<_>>())
+    let mut args = std::env::args().collect::<Vec<_>>();
+    if let Ok(prog_name) = std::env::var("MARINA_PROG_NAME") {
+        if let Some(first) = args.first_mut() {
+            *first = prog_name;
+        }
+    }
+    run_with_args(args)
 }
 
 pub fn run_with_args(args: Vec<String>) -> Result<()> {

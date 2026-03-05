@@ -17,13 +17,13 @@ BIN_NAME = 'marina.exe' if os.name == 'nt' else 'marina'
 
 
 def _build_marina_binary():
-	cmd = ['cargo', 'build', '--release', '-p', 'marina']
+	cmd = ['cargo', 'build', '--profile', 'colcon', '-p', 'marina']
 	try:
 		subprocess.run(cmd, cwd=WORKSPACE_ROOT, check=True)
 	except FileNotFoundError as exc:
 		raise RuntimeError('cargo not found. Install Rust toolchain to build marina.') from exc
 
-	built_binary = WORKSPACE_ROOT / 'target' / 'release' / BIN_NAME
+	built_binary = WORKSPACE_ROOT / 'target' / 'colcon' / BIN_NAME
 	if not built_binary.exists():
 		raise RuntimeError(f'expected built marina binary at {built_binary}, but it was not found')
 
