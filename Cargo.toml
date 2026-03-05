@@ -1,6 +1,6 @@
 [package]
 name = "marina"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 include = ["**/*.rs", "**/*.md", "**/Cargo.toml", "**/LICENSE*"]
 keywords = ["robotics"]
@@ -38,11 +38,22 @@ glob = "0.3"
 indicatif = "0.17"
 jsonwebtoken = { version = "9.3", optional = true }
 mcap = { version = "0.24", features = ["zstd", "lz4"] }
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = [
+  "blocking",
+  "json",
+  "multipart",
+  "rustls-tls",
+] }
 regex = { version = "1.11", optional = true }
 rusqlite = { version = "0.38", optional = true }
-ros2-interfaces-jazzy-serde = { version = "0.0.4", features = ["sensor_msgs", "std_msgs", "builtin_interfaces"] }
-ros_pointcloud2 = { version = "1.0.0-rc.3", features = ["ros2_interfaces_jazzy_serde"] }
+ros2-interfaces-jazzy-serde = { version = "0.0.4", features = [
+  "sensor_msgs",
+  "std_msgs",
+  "builtin_interfaces",
+] }
+ros_pointcloud2 = { version = "1.0.0-rc.3", features = [
+  "ros2_interfaces_jazzy_serde",
+] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
@@ -84,4 +95,3 @@ assets = [["target/release/marina", "usr/bin/marina", "755"]]
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target }.tar.gz"
 bin-dir = "{ name }-{ version }/{ bin }{ binary-ext }"
-
