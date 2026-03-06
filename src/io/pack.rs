@@ -13,7 +13,7 @@ fn available_space(path: &Path) -> Result<u64> {
         return Err(anyhow!("statvfs failed for {}", path.display()));
     }
     #[allow(clippy::unnecessary_cast)]
-    Ok(stat.f_bavail as u64 * stat.f_frsize)
+    Ok((stat.f_bavail as u64) * (stat.f_frsize as u64))
 }
 
 #[cfg(not(unix))]

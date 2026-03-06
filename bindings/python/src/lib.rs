@@ -1,9 +1,18 @@
 use ::marina as marina_rs;
-use marina_rs::{Marina, ProgressEvent, ProgressReporter, ProgressSink, ResolveResult, WriterProgress};
+use marina_rs::{
+    Marina, ProgressEvent, ProgressReporter, ProgressSink, ResolveResult, WriterProgress,
+};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyAnyMethods;
 use pyo3::types::PyModuleMethods;
+
+fn tokio_rt() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build tokio runtime")
+}
 
 #[pyclass]
 struct ResolveDetailed {
@@ -31,8 +40,8 @@ impl ResolveDetailed {
 #[pyo3(signature = (target, registry=None))]
 fn resolve(target: &str, registry: Option<&str>) -> PyResult<String> {
     let marina = Marina::load().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-    match marina
-        .resolve_target(target, registry)
+    match tokio_rt()
+        .block_on(marina.resolve_target(target, registry))
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
     {
         ResolveResult::LocalPath(p) | ResolveResult::Cached(p) => Ok(p.display().to_string()),
@@ -57,8 +66,8 @@ fn pull(bag_ref: &str, registry: Option<&str>) -> PyResult<String> {
         .parse::<marina_rs::BagRef>()
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     let mut marina = Marina::load().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-    let pulled = marina
-        .pull_exact(&bag, registry)
+    let pulled = tokio_rt()
+        .block_on(marina.pull_exact(&bag, registry))
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     Ok(pulled.display().to_string())
 }
@@ -91,19 +100,26 @@ fn pull_with_progress(
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     let mut marina = Marina::load().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
-    let pulled = if let Some(writer) = writer {
-        let mut sink = PyWriterProgressSink { writer };
-        let mut reporter = ProgressReporter::new(&mut sink);
-        marina.pull_exact_with_progress(&bag, registry, &mut reporter)
-    } else if progress {
-        let mut stdout = std::io::stdout();
-        let mut sink = WriterProgress::new(&mut stdout);
-        let mut reporter = ProgressReporter::new(&mut sink);
-        marina.pull_exact_with_progress(&bag, registry, &mut reporter)
-    } else {
-        marina.pull_exact(&bag, registry)
-    }
-    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    let pulled = tokio_rt()
+        .block_on(async {
+            if let Some(writer) = writer {
+                let mut sink = PyWriterProgressSink { writer };
+                let mut reporter = ProgressReporter::new(&mut sink);
+                marina
+                    .pull_exact_with_progress(&bag, registry, &mut reporter)
+                    .await
+            } else if progress {
+                let mut stdout = std::io::stdout();
+                let mut sink = WriterProgress::new(&mut stdout);
+                let mut reporter = ProgressReporter::new(&mut sink);
+                marina
+                    .pull_exact_with_progress(&bag, registry, &mut reporter)
+                    .await
+            } else {
+                marina.pull_exact(&bag, registry).await
+            }
+        })
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
     Ok(pulled.display().to_string())
 }
@@ -120,11 +136,11 @@ fn resolve_detailed(target: &str, registry: Option<&str>) -> ResolveDetailed {
                 bag: None,
                 registry: None,
                 message: Some(format!("failed to load marina: {e}")),
-            }
+            };
         }
     };
 
-    match marina.resolve_target(target, registry) {
+    match tokio_rt().block_on(marina.resolve_target(target, registry)) {
         Ok(ResolveResult::LocalPath(p)) => ResolveDetailed {
             kind: "local".to_string(),
             path: Some(p.display().to_string()),
@@ -187,7 +203,9 @@ fn cli_main(py: Python<'_>) -> PyResult<()> {
     } else {
         argv
     };
-    marina_rs::cli::app::run_with_args(args).map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    tokio_rt()
+        .block_on(marina_rs::cli::app::run_with_args(args))
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))
 }
 
 #[pymodule]

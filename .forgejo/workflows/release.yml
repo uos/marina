@@ -276,7 +276,7 @@ jobs:
       - name: Build wheels
         run: |
           ulimit -n 65536
-          apt-get update && apt-get install -y pkg-config cmake libclang-dev clang openssl libssl-dev libsqlite3-dev
+          apt-get update && apt-get install -y pkg-config cmake libclang-dev clang openssl libssl-dev libsqlite3-dev python3 python3-dev
           rustup toolchain uninstall stable
           rustup toolchain install stable
           rustup target add "$TARGET"
@@ -284,13 +284,29 @@ jobs:
           # for ring
           export CFLAGS_aarch64_unknown_linux_gnu="-D__ARM_ARCH=8"
 
+          if [[ "$TARGET" == *apple-darwin* ]]; then
+            export SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
+            export RUSTFLAGS="-C link-arg=-F${SDKROOT}/System/Library/Frameworks -C link-arg=-L${SDKROOT}/usr/lib -C link-arg=-isysroot -C link-arg=${SDKROOT}"
+          fi
+
+          export PATH="/usr/bin:/bin:${PATH}"
+          if command -v python3.12 >/dev/null 2>&1; then
+            PYTHON_KIND=python3.12
+          else
+            PYTHON_KIND=python3
+          fi
+
+          echo "Using interpreter kind: $PYTHON_KIND"
+          command -v "$PYTHON_KIND"
+          "$PYTHON_KIND" -V
+
           # binary
           MATURIN_ARGS="build --zig --manifest-path Cargo.toml --release --target-dir wheels"
-          maturin $MATURIN_ARGS --target "$TARGET"
+          maturin $MATURIN_ARGS --target "$TARGET" -i "$PYTHON_KIND"
 
           # bindings
           MATURIN_ARGS="build --zig --manifest-path bindings/python/Cargo.toml --release --target-dir wheels"
-          maturin $MATURIN_ARGS --target "$TARGET"
+          maturin $MATURIN_ARGS --target "$TARGET" -i "$PYTHON_KIND"
 
       - name: Upload wheels
         uses: actions/upload-artifact@v3
