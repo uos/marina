@@ -582,7 +582,8 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
         },
         Commands::List(args) => {
             if args.remote {
-                let all = if let Some(reg) = args.registry.as_deref() {
+                let eff_registry = args.registry.as_deref().or(marina.default_registry());
+                let all = if let Some(reg) = eff_registry {
                     marina
                         .search_remote_with_info(reg, "*")
                         .await
@@ -619,7 +620,8 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
             }
         }
         Commands::Search(args) => {
-            let rows = if let Some(registry) = args.registry.as_deref() {
+            let eff_registry = args.registry.as_deref().or(marina.default_registry());
+            let rows = if let Some(registry) = eff_registry {
                 marina
                     .search_remote_with_info(registry, &args.pattern)
                     .await
@@ -654,8 +656,8 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
             print_remote_detail_table(rows, time_display);
         }
         Commands::Push(args) => {
-            let registry = match args.registry.clone() {
-                Some(r) => Some(r),
+            let registry = match args.registry.as_deref().or(marina.default_registry()) {
+                Some(r) => Some(r.to_string()),
                 None => {
                     let cfgs = marina.list_registry_configs();
                     if cfgs.len() > 1 {
@@ -766,8 +768,12 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                     }),
             };
             // Resolve which registry to use, disambiguating if needed
-            let registry: Option<String> = match args.registry.clone() {
-                Some(r) => Some(r),
+            let registry: Option<String> = match args
+                .registry
+                .as_deref()
+                .or(marina.default_registry())
+            {
+                Some(r) => Some(r.to_string()),
                 None => {
                     let mut unique: Vec<(String, String)> = Vec::new();
                     let cfg_names: Vec<String> = marina
@@ -859,9 +865,13 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
         Commands::Resolve(args) => {
             let interactive = is_interactive_shell();
             let quiet_non_interactive_yes = yes && !interactive;
+            let eff_registry: Option<String> = args
+                .registry
+                .clone()
+                .or_else(|| marina.default_registry().map(|s| s.to_string()));
 
             match marina
-                .resolve_target(&args.target, args.registry.as_deref())
+                .resolve_target(&args.target, eff_registry.as_deref())
                 .await?
             {
                 ResolveResult::LocalPath(p) => println!("{}", p.display()),
@@ -938,7 +948,7 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                                 }
                             }
                             match marina
-                                .resolve_target(&args.target, args.registry.as_deref())
+                                .resolve_target(&args.target, eff_registry.as_deref())
                                 .await?
                             {
                                 ResolveResult::LocalPath(resolved)
@@ -990,7 +1000,7 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                             pull_and_print(&mut marina, bag, Some(registry.as_str()), pull_options)
                                 .await?;
                             match marina
-                                .resolve_target(&args.target, args.registry.as_deref())
+                                .resolve_target(&args.target, eff_registry.as_deref())
                                 .await?
                             {
                                 ResolveResult::LocalPath(resolved)
@@ -1062,7 +1072,11 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
             println!("removed local cache for {}", args.bag.without_attachment());
             if args.remote {
                 marina
-                    .remove_remote(&args.bag, args.registry.as_deref(), args.write_http_index)
+                    .remove_remote(
+                        &args.bag,
+                        args.registry.as_deref().or(marina.default_registry()),
+                        args.write_http_index,
+                    )
                     .await?;
                 println!("removed remote {}", args.bag.without_attachment());
             }
@@ -1078,7 +1092,10 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
         Commands::Complete(args) => {
             let query = format!("{}*", args.prefix);
             let out = marina
-                .search_remote(&query, args.registry.as_deref())
+                .search_remote(
+                    &query,
+                    args.registry.as_deref().or(marina.default_registry()),
+                )
                 .await?;
             for bag in out {
                 println!("{}", bag);

@@ -136,12 +136,14 @@ impl Default for PullOptions {
 pub struct Marina {
     registries: HashMap<String, (RegistryConfig, Arc<dyn RegistryDriver>)>,
     catalog: Catalog,
+    default_registry: Option<String>,
 }
 
 impl Marina {
     /// Loads marina configuration, registry drivers, and local cache catalog.
     pub fn load() -> Result<Self> {
         let registry_file = config::load_registries()?;
+        let default_registry = registry_file.settings.default_registry.clone();
 
         let mut registries = HashMap::new();
 
@@ -154,7 +156,13 @@ impl Marina {
         Ok(Self {
             registries,
             catalog,
+            default_registry,
         })
+    }
+
+    /// Returns the configured default registry name, if any.
+    pub fn default_registry(&self) -> Option<&str> {
+        self.default_registry.as_deref()
     }
 
     /// Adds a new registry and persists it to `registries.toml`.
@@ -539,6 +547,70 @@ impl Marina {
         Ok(ready_dir)
     }
 
+    /// Returns true if `s` could be a hash prefix (all hex digits, at least 4 chars).
+    fn looks_like_hash_prefix(s: &str) -> bool {
+        s.len() >= 4 && s.chars().all(|c| c.is_ascii_hexdigit())
+    }
+
+    /// Searches registries for bags whose bundle hash starts with `prefix`.
+    /// Respects the `registry` scope if provided.
+    async fn find_by_hash_prefix(
+        &self,
+        prefix: &str,
+        registry: Option<&str>,
+    ) -> Vec<(String, BagRef)> {
+        let prefix = prefix.to_ascii_lowercase();
+        let mut matches: Vec<(String, BagRef)> = Vec::new();
+
+        if let Some(reg_name) = registry {
+            if let Some((_, drv)) = self.registries.get(reg_name) {
+                if let Ok(bags) = drv.list_with_info("*").await {
+                    for (bag, info) in bags {
+                        if info
+                            .and_then(|i| i.bundle_hash)
+                            .is_some_and(|h| h.to_ascii_lowercase().starts_with(&prefix))
+                        {
+                            matches.push((reg_name.to_string(), bag));
+                        }
+                    }
+                }
+            }
+        } else {
+            let mut names = self.registries.keys().cloned().collect::<Vec<_>>();
+            names.sort();
+            let mut join_set = tokio::task::JoinSet::new();
+            for name in names {
+                if let Some((_, drv)) = self.registries.get(&name) {
+                    let drv = Arc::clone(drv);
+                    let prefix = prefix.clone();
+                    let name = name.clone();
+                    join_set.spawn(async move {
+                        drv.list_with_info("*")
+                            .await
+                            .ok()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter_map(|(bag, info)| {
+                                let hash = info?.bundle_hash?;
+                                if hash.to_ascii_lowercase().starts_with(&prefix) {
+                                    Some((name.clone(), bag))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    });
+                }
+            }
+            while let Some(Ok(chunk)) = join_set.join_next().await {
+                matches.extend(chunk);
+            }
+        }
+
+        matches.sort_by_key(|(name, _)| name.clone());
+        matches
+    }
+
     pub async fn resolve_target(
         &self,
         target: &str,
@@ -547,6 +619,27 @@ impl Marina {
         let path = Path::new(target);
         if bag::has_direct_mcap(path)? {
             return Ok(ResolveResult::LocalPath(path.to_path_buf()));
+        }
+
+        // Hash-prefix lookup: if the target looks like a hex prefix, search by hash first.
+        if Self::looks_like_hash_prefix(target) {
+            let hash_matches = self.find_by_hash_prefix(target, registry).await;
+            match hash_matches.len() {
+                0 => {}
+                1 => {
+                    let (reg, bag) = hash_matches.into_iter().next().unwrap();
+                    return Ok(ResolveResult::RemoteAvailable {
+                        registry: reg,
+                        bag,
+                        needs_pull: true,
+                    });
+                }
+                _ => {
+                    return Ok(ResolveResult::Ambiguous {
+                        candidates: hash_matches,
+                    });
+                }
+            }
         }
 
         let bag_ref: BagRef = target.parse()?;
