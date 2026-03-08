@@ -2,7 +2,7 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>marina</name>
-  <version>0.0.4</version>
+  <version>0.1.0</version>
   <description>A dataset manager for robotics to organize, share, and discover datasets and metadata across storage backends.</description>
   <maintainer email="stelzo@steado.de">Christopher Sieh</maintainer>
   <license>MIT</license>
@@ -12,7 +12,6 @@
   <build_depend>cargo</build_depend>
   <depend>ros2bag</depend>
   <depend>ros2cli</depend>
-  <depend>libssl-dev</depend>
   <depend>libclang-dev</depend>
 
   <export>
