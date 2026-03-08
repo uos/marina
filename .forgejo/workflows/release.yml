@@ -34,6 +34,8 @@ jobs:
           echo "Workspace version: $VERSION"
 
           cargo check --all-features
+          cargo publish --dry-run
+          cargo clippy --all-targets -- -D warnings
 
   sanity:
     needs:
@@ -697,6 +699,24 @@ jobs:
           git commit -m "marina ${VERSION}"
           git push origin
           shred -u ~/.ssh/tap_key || rm -f ~/.ssh/tap_key
+
+  publish-crates:
+    needs:
+      - release
+    runs-on: ubuntu-dev-noble-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deps
+        run: |
+          apt-get update && apt-get install -y pkg-config cmake libclang-dev clang openssl libssl-dev libsqlite3-dev
+          rustup toolchain uninstall stable
+          rustup toolchain install stable
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          cargo publish
 
   publish-pypi:
     needs:
