@@ -98,4 +98,5 @@ assets = [["target/release/marina", "usr/bin/marina", "755"]]
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target }.tar.gz"
+pkg-fmt = "tgz"
 bin-dir = "{ name }-{ version }/{ bin }{ binary-ext }"
