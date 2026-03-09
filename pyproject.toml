@@ -3,11 +3,18 @@ requires = ["maturin>=1.7,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "marina"
+name = "marina-cli"
 description = "A dataset manager for robotics to organize, share, and discover datasets and metadata across storage backends."
 dynamic = ["version", "entry-points"]
 license = { text = "MIT OR Apache-2.0" }
-keywords = ["robotics", "ros2", "datasets", "data management", "point clouds", "bag files"]
+keywords = [
+  "robotics",
+  "ros2",
+  "datasets",
+  "data management",
+  "point clouds",
+  "bag files",
+]
 classifiers = [
   "Intended Audience :: Developers",
   "Intended Audience :: Science/Research",

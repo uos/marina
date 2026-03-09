@@ -16,6 +16,7 @@ conflicts=('marina')
 
 build() {
   export CARGO_TARGET_DIR="$srcdir/target"
+  cd $srcdir/$pkgname
   cargo build --release --locked
 
   mkdir -p "$srcdir/completions"
@@ -26,11 +27,6 @@ build() {
 
 package() {
   install -Dm755 "$srcdir/target/release/marina" "$pkgdir/usr/bin/marina"
-
-  install -Dm644 "$srcdir/$pkgname-$pkgver/LICENSE-MIT" "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
-  install -Dm644 "$srcdir/$pkgname-$pkgver/LICENSE-APACHE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE-APACHE"
-
-  install -Dm644 "$srcdir/$pkgname-$pkgver/README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
 
   install -Dm644 "$srcdir/completions/bash" "$pkgdir/usr/share/bash-completion/completions/marina"
   install -Dm644 "$srcdir/completions/_zsh" "$pkgdir/usr/share/zsh/site-functions/_marina"
