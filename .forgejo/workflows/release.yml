@@ -628,7 +628,7 @@ jobs:
     steps:
       - name: Deps
         run: |
-          pacman -Sy openssh git nodejs
+          pacman -Sy --noconfirm openssh git nodejs
       - uses: actions/checkout@v4
       - name: Update AUR
         env:
@@ -662,7 +662,7 @@ jobs:
     steps:
       - name: Deps
         run: |
-          pacman -Sy openssh git nodejs
+          pacman -Sy --noconfirm openssh git nodejs
       - uses: actions/checkout@v4
       - name: Update AUR
         env:
