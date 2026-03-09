@@ -84,7 +84,6 @@ pub struct CachedBagInfo {
     pub bag: BagRef,
     pub local_dir: PathBuf,
     pub original_bytes: u64,
-    pub packed_bytes: u64,
 }
 
 /// A single remote search hit across configured registries.
@@ -92,6 +91,36 @@ pub struct CachedBagInfo {
 pub struct RemoteBagHit {
     pub registry: String,
     pub bag: BagRef,
+}
+
+/// One file found inside an inspected bag.
+#[derive(Debug, Clone)]
+pub struct InspectFile {
+    /// Path relative to the bag root.
+    pub relative_path: String,
+    pub size_bytes: u64,
+    /// `true` for the primary recording file (.mcap or .db3).
+    pub is_recording: bool,
+}
+
+/// Remote registry hit returned by [`Marina::inspect_bag`].
+#[derive(Debug, Clone)]
+pub struct InspectRemoteHit {
+    pub registry: String,
+    pub info: Option<BagInfo>,
+    pub timed_out: bool,
+}
+
+/// Full inspection result for one dataset.
+#[derive(Debug, Clone)]
+pub struct InspectResult {
+    pub bag: BagRef,
+    /// Present when the bag is in the local cache.
+    pub local_dir: Option<PathBuf>,
+    /// File listing from the local cache; empty when not cached.
+    pub local_files: Vec<InspectFile>,
+    /// Metadata from each queried remote registry.
+    pub remote_hits: Vec<InspectRemoteHit>,
 }
 
 /// Compression options used while pushing a bag into a packed archive.
@@ -103,6 +132,8 @@ pub struct PushOptions {
     pub packed_archive_compression: pack::ArchiveCompression,
     pub write_http_index: bool,
     pub dry_run: bool,
+    /// Move the source into the cache instead of copying it.
+    pub move_source_to_cache: bool,
 }
 
 impl Default for PushOptions {
@@ -114,6 +145,7 @@ impl Default for PushOptions {
             packed_archive_compression: pack::ArchiveCompression::Gzip,
             write_http_index: false,
             dry_run: false,
+            move_source_to_cache: false,
         }
     }
 }
@@ -122,12 +154,15 @@ impl Default for PushOptions {
 #[derive(Debug, Clone, Copy)]
 pub struct PullOptions {
     pub unpacked_mcap_compression: McapChunkCompression,
+    /// Skip the local hash check and always re-download from the remote.
+    pub force: bool,
 }
 
 impl Default for PullOptions {
     fn default() -> Self {
         Self {
             unpacked_mcap_compression: McapChunkCompression::Lz4,
+            force: false,
         }
     }
 }
@@ -232,7 +267,7 @@ impl Marina {
     ) -> Result<(RegistryConfig, Arc<dyn RegistryDriver>)> {
         if self.registries.is_empty() {
             return Err(anyhow!(
-                "no registries configured. Add one with: marina registry add <uri> --name <name> --kind <kind>"
+                "no registries configured. Add one with: marina registry add <name> <uri>"
             ));
         }
 
@@ -369,7 +404,16 @@ impl Marina {
             packed_bytes: packed_meta.packed_bytes,
             bundle_hash,
             pointcloud: if ros_pipeline_applies {
-                pointcloud_mode_label(options.pointcloud_mode).to_string()
+                let label = pointcloud_mode_label(options.pointcloud_mode);
+                if options.pointcloud_mode == PointCloudCompressionMode::Lossy {
+                    format!(
+                        "{} {}",
+                        label,
+                        format_precision(options.pointcloud_precision_m)
+                    )
+                } else {
+                    label.to_string()
+                }
             } else {
                 "n/a".to_string()
             },
@@ -398,14 +442,31 @@ impl Marina {
             driver.write_http_index().await?;
         }
 
-        // Point directly to the source directory — no copy needed.
+        // Ensure the bag lives in our cache so local_dir is always under our
+        // control.  If the caller already pushed from the cache path we skip
+        // the copy/move.
+        let ready_dir = cache_dir.join("ready");
+        let canonical_source = source_dir.canonicalize()?;
+        if canonical_source != ready_dir.canonicalize().unwrap_or_default() {
+            if ready_dir.exists() {
+                fs::remove_dir_all(&ready_dir)?;
+            }
+            if options.move_source_to_cache {
+                progress.emit("push", "moving source to local cache");
+                move_or_copy(&canonical_source, &ready_dir)?;
+            } else {
+                progress.emit("push", "copying to local cache");
+                copy_dir(&canonical_source, &ready_dir)?;
+            }
+        }
+
         self.catalog.entries.insert(
             bag.without_attachment().to_string(),
             CacheEntry {
                 bag: bag.without_attachment(),
-                local_dir: source_dir.to_path_buf(),
+                local_dir: ready_dir,
                 packed_bytes: packed_meta.packed_bytes,
-                original_bytes: packed_meta.original_bytes,
+                bundle_hash: Some(push_meta.bundle_hash.clone()),
             },
         );
         cache::save_catalog(&self.catalog)?;
@@ -502,6 +563,42 @@ impl Marina {
     ) -> Result<PathBuf> {
         let (cfg, driver) = self.choose_registry(registry)?;
         Self::ensure_auth(&cfg, false)?;
+
+        let key = bag.without_attachment().to_string();
+
+        if !options.force {
+            // Fast path: stored hash + local dir present → skip without any network call.
+            if let Some(entry) = self.catalog.entries.get(&key) {
+                if entry.local_dir.exists() && entry.bundle_hash.is_some() {
+                    let cached_path = entry.local_dir.clone();
+                    progress.emit("pull", "already up to date");
+                    return Ok(cached_path);
+                }
+            }
+
+            // No stored hash (old entry) — fetch remote metadata to verify and migrate.
+            let remote_info = driver
+                .bag_info(&bag.without_attachment())
+                .await
+                .ok()
+                .flatten();
+
+            if let Some(ref info) = remote_info {
+                if let Some(entry) = self.catalog.entries.get(&key) {
+                    if entry.local_dir.exists() && entry.packed_bytes == info.packed_bytes {
+                        let cached_path = entry.local_dir.clone();
+                        if let Some(rh) = &info.bundle_hash {
+                            if let Some(e) = self.catalog.entries.get_mut(&key) {
+                                e.bundle_hash = Some(rh.clone());
+                            }
+                            cache::save_catalog(&self.catalog)?;
+                        }
+                        progress.emit("pull", "already up to date");
+                        return Ok(cached_path);
+                    }
+                }
+            }
+        }
         progress.emit(
             "pull",
             format!("downloading from registry '{}' ({})", cfg.name, cfg.kind),
@@ -515,6 +612,10 @@ impl Marina {
         crate::cleanup::register(ready_dir.clone());
 
         let descriptor = driver.pull(&bag.without_attachment(), &packed_file).await?;
+
+        // Compute hash from the downloaded bundle so the catalog is always up to date.
+        let remote_hash = compute_bundle_hash(&packed_file).ok();
+
         if ready_dir.exists() {
             fs::remove_dir_all(&ready_dir)?;
         }
@@ -537,7 +638,7 @@ impl Marina {
                 bag: bag.without_attachment(),
                 local_dir: ready_dir.clone(),
                 packed_bytes: descriptor.packed_bytes,
-                original_bytes: descriptor.original_bytes,
+                bundle_hash: remote_hash,
             },
         );
         cache::save_catalog(&self.catalog)?;
@@ -783,6 +884,15 @@ impl Marina {
         Ok(())
     }
 
+    /// Checks whether the caller has write (delete) access to a registry.
+    /// Returns the resolved registry name on success.
+    pub async fn check_write_access(&self, registry: Option<&str>) -> Result<String> {
+        let (cfg, driver) = self.choose_registry(registry)?;
+        Self::ensure_auth(&cfg, true)?;
+        driver.check_write_access().await?;
+        Ok(cfg.name.clone())
+    }
+
     /// Searches one registry using glob-like `pattern`.
     pub async fn search_remote(
         &self,
@@ -791,6 +901,54 @@ impl Marina {
     ) -> Result<Vec<BagRef>> {
         let (_cfg, driver) = self.choose_registry(registry)?;
         driver.list(pattern).await
+    }
+
+    /// Registers a local bag in the catalog without pushing to a registry.
+    ///
+    /// If `path` is `Some`, the bag is copied into the marina cache so that
+    /// `local_dir` is always under our control.
+    /// If `path` is `None`, a new cache directory is prepared and returned so
+    /// the caller (e.g. `ros2 bag record`) can record directly into it.
+    pub fn import_local(
+        &mut self,
+        bag: &BagRef,
+        path: Option<&Path>,
+        move_to_cache: bool,
+    ) -> Result<PathBuf> {
+        let bag = bag.without_attachment();
+        let key = bag.to_string();
+
+        let cache_dir = cache::bag_cache_dir(&bag)?;
+        let ready_dir = cache_dir.join("ready");
+
+        if let Some(p) = path {
+            if !p.exists() {
+                return Err(anyhow!("path does not exist: {}", p.display()));
+            }
+            let canonical = p.canonicalize()?;
+            if canonical != ready_dir.canonicalize().unwrap_or_default() {
+                if ready_dir.exists() {
+                    fs::remove_dir_all(&ready_dir)?;
+                }
+                if move_to_cache {
+                    move_or_copy(&canonical, &ready_dir)?;
+                } else {
+                    copy_dir(&canonical, &ready_dir)?;
+                }
+            }
+        }
+
+        self.catalog.entries.insert(
+            key,
+            cache::CacheEntry {
+                bag,
+                local_dir: ready_dir.clone(),
+                packed_bytes: 0,
+                bundle_hash: None,
+            },
+        );
+        cache::save_catalog(&self.catalog)?;
+        Ok(ready_dir)
     }
 
     /// Deletes local cache resources.
@@ -809,10 +967,11 @@ impl Marina {
             .entries
             .get(&bag.without_attachment().to_string())
             .map(|entry| {
+                let original_bytes = disk_size(&entry.local_dir);
                 format!(
                     "{}: original {} bytes, packed {} bytes",
                     bag.without_attachment(),
-                    entry.original_bytes,
+                    original_bytes,
                     entry.packed_bytes
                 )
             })
@@ -824,7 +983,7 @@ impl Marina {
             .entries
             .get(&bag.without_attachment().to_string())
             .map(|entry| CachedSizeStats {
-                original_bytes: entry.original_bytes,
+                original_bytes: disk_size(&entry.local_dir),
                 packed_bytes: entry.packed_bytes,
             })
     }
@@ -838,8 +997,7 @@ impl Marina {
             .map(|entry| CachedBagInfo {
                 bag: entry.bag.clone(),
                 local_dir: entry.local_dir.clone(),
-                original_bytes: entry.original_bytes,
-                packed_bytes: entry.packed_bytes,
+                original_bytes: disk_size(&entry.local_dir),
             })
             .collect::<Vec<_>>();
         out.sort_by(|a, b| a.bag.to_string().cmp(&b.bag.to_string()));
@@ -1053,6 +1211,122 @@ impl Marina {
             Vec::new()
         }
     }
+
+    /// Inspect a dataset: collect local file listing and remote metadata.
+    ///
+    /// `registry` scopes the remote lookup to a single registry when provided.
+    pub async fn inspect_bag(
+        &self,
+        target: &str,
+        registry: Option<&str>,
+        timeout_secs: u64,
+    ) -> Result<InspectResult> {
+        let bag_ref: BagRef = target.parse()?;
+        let key = bag_ref.without_attachment().to_string();
+
+        // Local files.
+        let (local_dir, local_files) = if let Some(entry) = self.catalog.entries.get(&key) {
+            if entry.local_dir.exists() {
+                let source = crate::io::bag::discover_bag(&entry.local_dir).ok();
+                let files = if let Some(src) = source {
+                    let root = &src.root;
+                    let mut files: Vec<InspectFile> = Vec::new();
+
+                    // recording file
+                    if let Some(ref mcap) = src.mcap {
+                        let size = fs::metadata(mcap).map(|m| m.len()).unwrap_or(0);
+                        let rel = mcap
+                            .strip_prefix(root)
+                            .ok()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| mcap.to_string_lossy().into_owned());
+                        files.push(InspectFile {
+                            relative_path: rel,
+                            size_bytes: size,
+                            is_recording: true,
+                        });
+                    }
+
+                    // attachments
+                    for att in &src.attachments {
+                        let size = fs::metadata(att).map(|m| m.len()).unwrap_or(0);
+                        let rel = att
+                            .strip_prefix(root)
+                            .ok()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| att.to_string_lossy().into_owned());
+                        let is_recording = att
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .is_some_and(|e| e == "db3");
+                        files.push(InspectFile {
+                            relative_path: rel,
+                            size_bytes: size,
+                            is_recording,
+                        });
+                    }
+
+                    files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+                    files
+                } else {
+                    Vec::new()
+                };
+                (Some(entry.local_dir.clone()), files)
+            } else {
+                (None, Vec::new())
+            }
+        } else {
+            (None, Vec::new())
+        };
+
+        // Remote metadata.
+        let bag_no_att = bag_ref.without_attachment();
+        let names: Vec<String> = match registry {
+            Some(r) => vec![r.to_string()],
+            None => {
+                let mut n = self.registries.keys().cloned().collect::<Vec<_>>();
+                n.sort();
+                n
+            }
+        };
+
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+        let mut join_set = tokio::task::JoinSet::new();
+        for name in names {
+            if let Some((_, drv)) = self.registries.get(&name) {
+                let drv = Arc::clone(drv);
+                let bag = bag_no_att.clone();
+                let name = name.clone();
+                join_set.spawn(async move {
+                    match tokio::time::timeout(timeout, drv.bag_info(&bag)).await {
+                        Ok(r) => InspectRemoteHit {
+                            registry: name,
+                            info: r.ok().flatten(),
+                            timed_out: false,
+                        },
+                        Err(_) => InspectRemoteHit {
+                            registry: name,
+                            info: None,
+                            timed_out: true,
+                        },
+                    }
+                });
+            }
+        }
+
+        let mut remote_hits: Vec<InspectRemoteHit> = Vec::new();
+        while let Some(Ok(hit)) = join_set.join_next().await {
+            remote_hits.push(hit);
+        }
+        remote_hits.sort_by(|a, b| a.registry.cmp(&b.registry));
+
+        Ok(InspectResult {
+            bag: bag_no_att,
+            local_dir,
+            local_files,
+            remote_hits,
+        })
+    }
 }
 
 fn make_registry_driver(registry: &RegistryConfig) -> Result<Arc<dyn RegistryDriver>> {
@@ -1093,6 +1367,14 @@ fn make_registry_driver(registry: &RegistryConfig) -> Result<Arc<dyn RegistryDri
     Ok(driver)
 }
 
+/// Scans `path` on disk and returns the total byte count of all files found.
+/// Returns 0 if the path does not exist or cannot be read.
+fn disk_size(path: &Path) -> u64 {
+    crate::io::bag::discover_bag(path)
+        .map(|s| s.original_bytes)
+        .unwrap_or(0)
+}
+
 fn now_unix_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1119,6 +1401,27 @@ fn compute_bundle_hash(path: &Path) -> Result<String> {
         .map(|b| format!("{:02x}", b))
         .collect();
     Ok(hash[..12].to_string())
+}
+
+fn format_precision(precision_m: f64) -> String {
+    let fmt = |v: f64, unit: &str| -> String {
+        if v.fract() == 0.0 {
+            format!("{}{}", v as u64, unit)
+        } else {
+            format!("{:.3}{}", v, unit)
+                .trim_end_matches('0')
+                .trim_end_matches('.')
+                .to_string()
+                + unit
+        }
+    };
+    if precision_m >= 1.0 {
+        fmt(precision_m, "m")
+    } else if precision_m >= 0.001 {
+        fmt(precision_m * 1_000.0, "mm")
+    } else {
+        fmt(precision_m * 1_000_000.0, "µm")
+    }
 }
 
 fn pointcloud_mode_label(mode: PointCloudCompressionMode) -> &'static str {
@@ -1149,6 +1452,16 @@ fn normalize_local_registry_path(uri: &str) -> PathBuf {
     } else {
         PathBuf::from(uri)
     }
+}
+
+/// Tries a cheap `rename` first; falls back to copy+delete on cross-device errors.
+fn move_or_copy(src: &Path, dst: &Path) -> Result<()> {
+    if fs::rename(src, dst).is_ok() {
+        return Ok(());
+    }
+    copy_dir(src, dst)?;
+    fs::remove_dir_all(src)?;
+    Ok(())
 }
 
 fn copy_dir(src: &Path, dst: &Path) -> Result<()> {

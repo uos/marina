@@ -45,7 +45,7 @@ struct HttpIndexFile {
 
 impl FolderRegistry {
     pub fn from_uri(name: &str, uri: &str) -> Result<Self> {
-        let root = if let Some(rest) = uri.strip_prefix("folder://") {
+        let raw = if let Some(rest) = uri.strip_prefix("folder://") {
             PathBuf::from(rest)
         } else if let Some(rest) = uri.strip_prefix("folder::") {
             PathBuf::from(rest)
@@ -55,6 +55,13 @@ impl FolderRegistry {
             PathBuf::from(rest)
         } else {
             PathBuf::from(uri)
+        };
+        let root = if raw.is_relative() {
+            std::env::current_dir()
+                .context("failed to determine current directory")?
+                .join(&raw)
+        } else {
+            raw
         };
         fs::create_dir_all(&root)?;
         Ok(Self {

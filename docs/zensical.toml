@@ -1,0 +1,123 @@
+# ============================================================================
+#
+# Marina documentation site configuration for Zensical.
+#
+# ============================================================================
+
+[project]
+
+site_name = "Marina"
+site_description = "Dataset manager with first-class ROS 2 bag support."
+site_author = "Christopher Sieh"
+
+repo_url = "https://codeberg.org/stelzo/marina"
+repo_name = "stelzo/marina"
+
+copyright = """
+Copyright &copy; 2026 The authors
+"""
+
+nav = [
+  {"Home" = "index.md"},
+  {"Installation" = [
+    "installation/packages.md",
+    "installation/ros.md",
+    "installation/archives.md",
+    "features/shell/completions.md",
+  ]},
+  {"Usage" = [
+    "features/registries.md",
+    "features/datasets.md",
+    "features/compression.md",
+  ]},
+  {"Configuration" = "config.md"},
+]
+
+[project.theme]
+
+# change this to "classic" to use the traditional Material for MkDocs look.
+#variant = "classic"
+
+language = "en"
+
+features = [
+    "announce.dismiss",
+    "content.code.annotate",
+    "content.code.copy",
+    "content.code.select",
+    "content.footnote.tooltips",
+    "content.tabs.link",
+    "content.tooltips",
+    "navigation.expand",
+    "navigation.footer",
+    "navigation.indexes",
+    "navigation.instant",
+    "navigation.instant.prefetch",
+    "navigation.path",
+    "navigation.sections",
+    "navigation.tabs",
+    "navigation.top",
+    "navigation.tracking",
+    "search.highlight",
+    "toc.integrate",
+]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme)"
+toggle.icon = "lucide/sun-moon"
+toggle.name = "Switch to light mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+primary = "indigo"
+accent = "blue"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to system preference"
+
+primary = "indigo"
+accent = "blue"
+
+[project.theme.icon]
+repo = "fontawesome/brands/git-alt"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/uos/marina"
+
+# Extensions
+[project.markdown_extensions.attr_list]
+[project.markdown_extensions.md_in_html]
+[project.markdown_extensions.pymdownx.blocks.caption]
+
+[project.markdown_extensions.pymdownx.highlight]
+anchor_linenums = true
+line_spans = "__span"
+pygments_lang_class = true
+[project.markdown_extensions.admonition]
+[project.markdown_extensions.pymdownx.details]
+[project.markdown_extensions.pymdownx.inlinehilite]
+[project.markdown_extensions.pymdownx.snippets]
+[project.markdown_extensions.pymdownx.superfences]
+[project.markdown_extensions.abbr]
+
+[project.markdown_extensions.pymdownx.emoji]
+emoji_index = "zensical.extensions.emoji.twemoji"
+emoji_generator = "zensical.extensions.emoji.to_svg"
+
+[project.markdown_extensions.pymdownx.tabbed]
+alternate_style = true
+combine_header_slug = true
+
+[project.markdown_extensions.pymdownx.tabbed.slugify]
+object = "pymdownx.slugs.slugify"
+kwds = { case = "lower" }
+
+[project.plugins.offline]

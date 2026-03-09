@@ -1,8 +1,8 @@
 [package]
 name = "marina"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
-include = ["**/*.rs", "**/*.md", "**/Cargo.toml", "**/LICENSE*"]
+include = ["**/*.rs", "**/*.md", "**/Cargo.toml", "**/LICENSE*", "default.rl"]
 keywords = ["robotics"]
 license = "MIT OR Apache-2.0"
 repository = "https://codeberg.org/stelzo/marina"
@@ -29,8 +29,9 @@ cloudini-cpp = ["cloudini/use_cpp"]
 [dependencies]
 anyhow = "1.0"
 ctrlc = "3.5"
+futures = "0.3"
 clap = { version = "4.5", features = ["derive"] }
-clap_complete = "4.5"
+clap_complete = { version = "4.5", features = ["unstable-dynamic"] }
 cloudini = { version = "0.3", default-features = false, features = ["ros"]}
 cdr = "0.2"
 dirs = "6.0"
@@ -65,7 +66,7 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", 
 async-trait = "0.1"
 rpassword = "7"
 tar = "0.4"
-toml = "0.9"
+ratslang = "0.4"
 walkdir = "2.5"
 libc = "0.2"
 log = "0.4"
@@ -98,4 +99,5 @@ assets = [["target/release/marina", "usr/bin/marina", "755"]]
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target }.tar.gz"
+pkg-fmt = "tgz"
 bin-dir = "{ name }-{ version }/{ bin }{ binary-ext }"

@@ -2,3 +2,4 @@ target/
 test
 .DS_Store
 .claude
+docs/site

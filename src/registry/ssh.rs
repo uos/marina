@@ -144,7 +144,7 @@ impl SshRegistry {
             None => {
                 let mut authed = false;
 
-                // 1. Try ssh-agent
+                // Try ssh-agent
                 if let Ok(sock) = std::env::var("SSH_AUTH_SOCK") {
                     if let Ok(mut agent) =
                         russh::keys::agent::client::AgentClient::connect_uds(&sock).await
@@ -165,7 +165,7 @@ impl SshRegistry {
                     }
                 }
 
-                // 2. Try default key files
+                // Try default key files
                 if !authed {
                     if let Some(home) = dirs::home_dir() {
                         let ssh_dir = home.join(".ssh");
@@ -191,7 +191,7 @@ impl SshRegistry {
                     }
                 }
 
-                // 3. Fall back to interactive password prompt
+                // Fall back to interactive password prompt
                 if !authed {
                     let password =
                         rpassword::prompt_password(format!("Password for {}@{}: ", user, host))
