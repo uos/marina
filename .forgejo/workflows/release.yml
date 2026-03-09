@@ -356,6 +356,7 @@ jobs:
             for f in "$@"; do
               [ -f "$f" ] && cp "$f" "$dest/"
             done
+            chmod +x "$dest"/marina 2>/dev/null || true
             # only create if we actually copied files
             if [ "$(ls -A "$dest" 2>/dev/null)" ]; then
               tar -czf "release/${archive_name}.tar.gz" -C "$staging" "marina-${VERSION}"
@@ -617,7 +618,7 @@ jobs:
           echo ""
           echo "=== PPA published ==="
 
-  aur:
+  aur-bin:
     runs-on: ubuntu-dev-noble
     needs:
       - release
@@ -645,6 +646,40 @@ jobs:
           git clone ssh://aur@aur.archlinux.org/marina-bin.git marina-bin
           cp packaging/arch-bin/PKGBUILD marina-bin/
           cd marina-bin
+          makepkg --printsrcinfo > .SRCINFO
+          git add -f .SRCINFO PKGBUILD
+          git commit -m "Update package from $GITHUB_REPOSITORY@$GITHUB_SHA"
+          git push origin
+          shred -u ~/.ssh/aur_key || rm -f ~/.ssh/aur_key
+
+  aur-src:
+    runs-on: ubuntu-dev-noble
+    needs:
+      - release
+      - publish-ppa
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Deps
+        run: |
+          sudo pacman -Sy openssh git nodejs
+      - uses: actions/checkout@v4
+      - name: Update AUR
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur_key
+          chmod 600 ~/.ssh/aur_key
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND='ssh -i ~/.ssh/aur_key -o UserKnownHostsFile=~/.ssh/known_hosts -o StrictHostKeyChecking=yes'
+
+          git config --global user.email $(git log -1 --pretty=format:'%ae')
+          git config --global user.name $(git log -1 --pretty=format:'%an')
+
+          git clone ssh://aur@aur.archlinux.org/marina.git marina-src
+          cp packaging/arch/PKGBUILD marina-src/
+          cd marina-src
           makepkg --printsrcinfo > .SRCINFO
           git add -f .SRCINFO PKGBUILD
           git commit -m "Update package from $GITHUB_REPOSITORY@$GITHUB_SHA"
