@@ -14,6 +14,10 @@
   }:
     flake-utils.lib.eachDefaultSystem (
       system: let
+         pkgs = import nixpkgs {
+          inherit system;
+        };
+
         docsBuildScripts = import ./nix/BuildDocs.nix {inherit pkgs;};
       in {
         apps = {
