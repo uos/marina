@@ -16,7 +16,7 @@ uv tool install marina-cli
 pip install marina-cli
 ~~~
 
-## Ubuntu / Debian (PPA)
+## Ubuntu (PPA)
 
 Supported Distributions
 

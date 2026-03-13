@@ -1,0 +1,36 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/SchemaStore/schemastore/refs/heads/master/src/schemas/json/github-workflow.json
+
+name: Docs
+
+on:
+  push:
+    paths:
+      - docs/**
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-dev-noble-arm
+    steps:
+      - name: checkout code
+        uses: actions/checkout@v6
+      - name: Install sudo
+        run: apt-get update && apt-get install -y sudo
+      - name: install nix
+        uses: https://github.com/cachix/install-nix-action@v31
+        with:
+          install_options: --no-daemon
+      - name: build pages
+        run: nix run .#buildDocs
+      - uses: https://codeberg.org/git-pages/action@v2
+        with:
+          site: "https://${{ forge.repository_owner }}.codeberg.page/marina/"
+          token: ${{ forge.token }}
+          source: docs/site/

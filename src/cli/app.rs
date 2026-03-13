@@ -21,7 +21,9 @@ use crate::storage::config::{
 
 #[derive(Parser)]
 #[command(name = "marina")]
-#[command(about = "Dataset manager with first-class ROS bag support")]
+#[command(
+    about = "A dataset manager for robotics built to organize, share, and discover ROS 2 bagfiles or datasets across teams and storage backends."
+)]
 #[command(version)]
 struct Cli {
     #[arg(short = 'y', long = "yes", global = true)]
@@ -42,14 +44,11 @@ enum Commands {
     Export(ExportArgs),
     Rm(RemoveArgs),
     Clean(CleanArgs),
-    /// Add a local bag to the cache, or prepare a directory for ros2 bag record
     Import(ImportArgs),
-    /// Show metadata and file listing for a dataset
     Inspect(InspectArgs),
     #[command(hide = true)]
     CompleteRefresh,
     Completions(CompletionsArgs),
-    /// Print the current version
     Version,
 }
 
@@ -165,10 +164,8 @@ struct PushArgs {
     packed_archive_compression: Option<CliArchiveCompression>,
     #[arg(long)]
     write_http_index: bool,
-    /// Run full packing/rewrite pipeline but do not upload or modify remote state
     #[arg(long)]
     dry_run: bool,
-    /// After push, keep the ready cache and optionally delete the original source to complete a move
     #[arg(long)]
     move_to_cache: bool,
     #[arg(long)]
@@ -185,7 +182,6 @@ struct PullArgs {
     unpacked_mcap_compression: Option<CliMcapCompression>,
     #[arg(long)]
     no_progress: bool,
-    /// Re-download even if the dataset is already cached.
     #[arg(long)]
     force: bool,
 }
@@ -207,7 +203,6 @@ struct ExportArgs {
 
 #[derive(Args)]
 struct RemoveArgs {
-    /// Glob pattern matching one or more datasets (e.g. "my-dataset:*")
     #[arg(value_name = "PATTERN", add = ArgValueCompleter::new(complete_datasets))]
     pattern: String,
     #[arg(long)]
@@ -220,18 +215,14 @@ struct RemoveArgs {
 
 #[derive(Args)]
 struct CleanArgs {
-    /// Remove the added registries as well
     #[arg(short = 'a', long = "all")]
     all: bool,
 }
 
 #[derive(Args)]
 struct ImportArgs {
-    /// Dataset name to register (e.g. my_recording:session1)
     target: BagRef,
-    /// Existing bag directory to import. Omit to prepare a new recording directory.
     path: Option<PathBuf>,
-    /// After importing, delete the original source to complete a move into the cache.
     #[arg(long)]
     move_to_cache: bool,
 }
@@ -240,7 +231,6 @@ struct ImportArgs {
 struct InspectArgs {
     #[arg(value_name = "DATASET", add = ArgValueCompleter::new(complete_datasets))]
     target: String,
-    /// Limit remote lookup to this registry
     #[arg(long)]
     registry: Option<String>,
 }
@@ -316,7 +306,6 @@ fn complete_datasets(current: &std::ffi::OsStr) -> Vec<CompletionCandidate> {
         })
         .collect();
 
-    // Remote names from disk cache — instant, refreshed in background.
     let (index, needs_refresh) = load_completion_index();
 
     if let Some(ref idx) = index {
@@ -340,7 +329,6 @@ fn complete_datasets(current: &std::ffi::OsStr) -> Vec<CompletionCandidate> {
     candidates
 }
 
-/// Remote-only completions — used for commands that fetch from a registry (pull).
 fn complete_remote_datasets(current: &std::ffi::OsStr) -> Vec<CompletionCandidate> {
     let prefix = current.to_string_lossy();
     let (index, needs_refresh) = load_completion_index();
@@ -526,7 +514,6 @@ fn print_remote_detail_table(
     struct Row {
         namespace: Option<String>,
         base_name: String,
-        /// Dataset string with namespace prefix stripped — used for display and column width.
         display_name: String,
         rest_cols: [String; 7],
     }
@@ -575,7 +562,6 @@ fn print_remote_detail_table(
     }
     println!("{}", header_line);
 
-    // Count entries per (namespace, base_name) group so we know when to show a name header.
     let mut group_counts: std::collections::HashMap<(Option<String>, &str), usize> =
         std::collections::HashMap::new();
     for row in &rows {
@@ -609,15 +595,15 @@ fn print_remote_detail_table(
             prev_base = None;
         }
 
-        // Name group header within namespace section.
-        if base_changed && is_grouped {
+        if base_changed && !ns_changed && prev_base.is_some() {
             let prev_key = (row.namespace.clone(), prev_base.as_deref().unwrap_or(""));
-            if !ns_changed
-                && prev_base.is_some()
-                && group_counts.get(&prev_key).copied().unwrap_or(0) > 1
-            {
-                println!(); // blank between name groups within the same namespace
+            let prev_was_grouped = group_counts.get(&prev_key).copied().unwrap_or(0) > 1;
+            if is_grouped || prev_was_grouped {
+                println!();
             }
+        }
+
+        if base_changed && is_grouped {
             if is_tty {
                 println!("\x1b[1;4m{}\x1b[0m", row.base_name);
             } else {
@@ -692,8 +678,6 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                 let kind = args
                     .kind
                     .unwrap_or_else(|| config::infer_kind_from_uri(&args.uri).to_string());
-                // For folder registries, resolve relative paths to absolute so the
-                // config is portable regardless of the working directory on later runs.
                 let uri = if kind == "folder" {
                     let scheme_end = args.uri.find("://").map(|i| i + 3).unwrap_or(0);
                     let path_part = &args.uri[scheme_end..];
@@ -1371,10 +1355,9 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                 .map(|b| b.bag)
                 .collect();
 
-            // Collect remote matches: (bag, registry_name).
-            // When --registry is given, check only that one and warn on failure.
-            // When no --registry is given, iterate all configured registries so a
-            // pattern like "dlg*" finds datasets regardless of which registry they live on.
+            // Collect remote matches: search all relevant registries, filter by pattern,
+            // then verify write access for each registry that has at least one match.
+            // Registries without write access are silently excluded from the candidate list.
             let remote: Vec<(BagRef, String)> = if args.remote {
                 let registries: Vec<String> = if let Some(ref r) = args.registry {
                     vec![r.clone()]
@@ -1387,20 +1370,20 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                 };
                 let mut hits: Vec<(BagRef, String)> = Vec::new();
                 for reg_name in registries {
-                    match marina.check_write_access(Some(&reg_name)).await {
-                        Ok(_) => {
-                            let bags = marina
-                                .search_remote("*", Some(&reg_name))
-                                .await
-                                .unwrap_or_default()
-                                .into_iter()
-                                .filter(|b| pat.matches(&b.to_string()));
-                            for b in bags {
-                                hits.push((b, reg_name.clone()));
-                            }
-                        }
-                        Err(e) => {
-                            warn!("skipping registry '{}' — no delete access: {}", reg_name, e);
+                    let matches: Vec<BagRef> = marina
+                        .search_remote("*", Some(&reg_name))
+                        .await
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|b| pat.matches(&b.to_string()))
+                        .collect();
+                    if matches.is_empty() {
+                        continue;
+                    }
+                    // Only include this registry if we can actually delete from it.
+                    if marina.check_write_access(Some(&reg_name)).await.is_ok() {
+                        for b in matches {
+                            hits.push((b, reg_name.clone()));
                         }
                     }
                 }

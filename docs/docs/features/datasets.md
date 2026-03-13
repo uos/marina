@@ -61,16 +61,15 @@ Marina searches all configured registries by default. Target a specific one with
 marina pull outdoor-run:v2 --registry team-ssh
 ~~~
 
-By default, pulled bags are decompressed with LZ4 for the MCAP chunks. Override the decompression format:
+Force a re-download even if the dataset is already cached:
 
 ~~~bash
-marina pull outdoor-run:v2 --unpacked-mcap-compression zstd
-marina pull outdoor-run:v2 --unpacked-mcap-compression none
+marina pull outdoor-run:v2 --force
 ~~~
 
 !!! info "Cache"
 
-    Pulled datasets are stored in `~/.cache/marina/`. Pulling the same dataset a second time is a no-op — Marina detects the cached version and returns immediately.
+    Pulled datasets are stored in `~/.cache/marina/`. Pulling the same dataset a second time is a no-op. Marina detects the cached version and returns immediately.
 
 ## Resolve
 
@@ -93,10 +92,6 @@ If the dataset is not yet cached, Marina pulls it first.
 Upload a local bagfile directory to a registry:
 
 ~~~bash
-marina push <dataset> <path>
-~~~
-
-~~~bash
 marina push outdoor-run:v2 /path/to/outdoor-run/
 ~~~
 
@@ -106,7 +101,7 @@ Push to a specific registry:
 marina push outdoor-run:v2 /path/to/outdoor-run/ --registry team-ssh
 ~~~
 
-Compression settings can be overridden per push — see the [Compression](./compression.md) page for details.
+Compression settings can be overridden per push. See the [Compression](./compression.md) page for details.
 
 ### Additional Push Options
 
@@ -130,16 +125,16 @@ marina -y push outdoor-run:v2 /path/to/bag/ --registry team-ssh
 Register an existing local bag directory in the marina catalog without pushing it to a registry:
 
 ~~~bash
-marina import <dataset> <path>
-~~~
-
-~~~bash
 marina import outdoor-run:v2 /path/to/outdoor-run/
 ~~~
 
-The bag is copied into the marina cache and appears immediately in `marina ls` and shell completions. Pass `--move-to-cache` to move instead of copy (free when source and cache are on the same filesystem).
+The bag is copied into the marina cache and appears immediately in `marina ls` and shell completions.
 
-### Recording directly with ros2 bag
+| Flag | Description |
+|---|---|
+| `--move-to-cache` | Move instead of copy. Free when source and cache are on the same filesystem |
+
+### Recording directly with `ros2 bag`
 
 Omitting the path prepares a new cache directory and prints its path, making it usable as a recording target:
 
@@ -154,14 +149,10 @@ Marina registers the dataset name before recording starts. Once recording finish
 Show metadata and file listing for a dataset:
 
 ~~~bash
-marina inspect <dataset>
-~~~
-
-~~~bash
 marina inspect outdoor-run:v2
 ~~~
 
-For a locally cached dataset, inspect lists all files with their sizes and marks the primary recording file. For a remote-only dataset, it queries the configured registries for stored metadata (original size, packed size, hash, push date) and notes that a pull is required to see the full file listing.
+For a locally cached dataset, inspect lists all files with their sizes and marks the primary recording file.
 
 Limit the remote lookup to a specific registry:
 
@@ -173,17 +164,17 @@ If a registry does not respond within the configured [`registry_timeout`](../con
 
 ## Export
 
-Export a cached dataset to a specific directory (unpacked):
-
-~~~bash
-marina export <dataset> <output-path>
-~~~
+Copy a cached dataset to a directory outside the marina cache (unpacked, ready to use with other tools):
 
 ~~~bash
 marina export outdoor-run:v2 /tmp/exported-run/
 ~~~
 
+The dataset must already be cached locally. Run `marina pull` first if needed.
+
 ## Remove
+
+The argument is a glob pattern. Use `*` to match multiple datasets at once.
 
 Remove a dataset from the local cache:
 
@@ -191,13 +182,26 @@ Remove a dataset from the local cache:
 marina rm outdoor-run:v2
 ~~~
 
-Remove from a remote registry:
+Use a glob to remove all variants of a dataset:
 
 ~~~bash
+marina rm "outdoor-run:*"
+~~~
+
+Pass `-y` to skip confirmation prompts:
+
+~~~bash
+marina -y rm "outdoor-run:*"
+~~~
+
+Remove from remote registries (if write access is available):
+
+~~~bash
+marina rm outdoor-run:v2 --remote
 marina rm outdoor-run:v2 --remote --registry team-ssh
 ~~~
 
-Update the HTTP index after removing from a registry that has a paired HTTP mirror:
+Update the HTTP index after removing from a registry with a paired HTTP mirror:
 
 ~~~bash
 marina rm outdoor-run:v2 --remote --registry team-ssh --write-http-index

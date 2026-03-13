@@ -1,6 +1,6 @@
 # Introduction
 
-**Marina** is a dataset manager for robotics built to organize, share, and discover ROS 2 bagfiles across teams and storage backends.
+**Marina** is a dataset manager for robotics built to organize, share, and discover ROS 2 bagfiles or datasets across teams and storage backends.
 
 ~~~bash
 # Pull a dataset from any configured registry
@@ -8,9 +8,12 @@ marina pull dlg_feldtage_24:cut
 
 # Pass it straight to your tools
 ros2 bag play $(marina resolve dlg_feldtage_24:cut)
+
+# Directly record to local cache with ROS integration
+ros2 bag record --all -o $(ros2 bag import my_recording:session1)
 ~~~
 
-Datasets are pulled from registries. You can easily create your own using SSH, Google Drive, HTTP or any filesystem folder.
+Datasets are pulled from remote registries. You can easily create your own using SSH, Google Drive, HTTP or any filesystem folder.
 
 ~~~bash
 marina registry add team ssh://user@your-server.org:/data/bags
@@ -39,4 +42,4 @@ Plain folders are supported as well, for non-ROS datasets and metadata.
 
 ---
 
-Get the binary on your machine: [Installation](installation/packages.md)
+Get started by installing the CLI on your machine: [Installation](installation/packages.md)
