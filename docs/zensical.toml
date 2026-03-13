@@ -32,6 +32,11 @@ nav = [
     "features/ci.md",
   ]},
   {"Configuration" = "config.md"},
+  {"Libraries" = [
+    "libraries/rust.md",
+    "libraries/python.md",
+    "libraries/c.md",
+  ]},
 ]
 
 [project.theme]

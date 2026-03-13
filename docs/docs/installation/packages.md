@@ -6,14 +6,19 @@ The following options give you the standalone `marina` binary. See the [ROS 2 se
 
 ## PyPI
 
-Marina provides a Python wheel for Linux and MacOS. It gives you both the `marina` CLI and a Python API.
+Marina publishes two wheels to PyPI.
+
+- `marina-cli` Marina binary
+- `marina-py` The python module
 
 ~~~bash
-# CLI via uv
+# CLI only
 uv tool install marina-cli
-
-# or both with pip
+# or
 pip install marina-cli
+
+# Python API
+pip install marina-py
 ~~~
 
 ## Ubuntu (PPA)

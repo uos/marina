@@ -789,7 +789,11 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
-          cargo publish
+          if ! output=$(cargo publish 2>&1); then
+            echo "$output"
+            echo "$output" | grep -q "already exists" || exit 1
+            echo "Version already published, skipping."
+          fi
 
   publish-pypi:
     needs:

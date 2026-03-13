@@ -62,6 +62,10 @@ sed_i 's/set -gx MARINA_VERSION "*[0-9][^" ]*/set -gx MARINA_VERSION '"${NEW_VER
 # flake.nix
 sed_i 's/version = "[0-9]*\.[0-9]*\.[0-9]*";/version = "'"${NEW_VERSION}"'";/' flake.nix
 
+# docs/docs/libraries/rust.md (marina = "x.y" — major.minor only)
+MINOR_VERSION="$(echo "${NEW_VERSION}" | cut -d. -f1,2)"
+sed_i 's/marina = "[0-9]*\.[0-9]*"/marina = "'"${MINOR_VERSION}"'"/' docs/docs/libraries/rust.md
+
 echo ""
 echo "Updated files:"
 echo "  Cargo.toml"
@@ -73,6 +77,7 @@ echo "  packaging/arch/PKGBUILD"
 echo "  packaging/arch-bin/PKGBUILD"
 echo "  packaging/homebrew/marina.rb"
 echo "  docs/docs/installation/archives.md"
+echo "  docs/docs/libraries/rust.md"
 echo "  flake.nix"
 echo ""
 echo "── git diff ──────────────────────────────────────────────────────────"
