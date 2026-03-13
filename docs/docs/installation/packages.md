@@ -55,6 +55,24 @@ cargo binstall marina
 ~~~
 
 
+## Nix
+
+Marina ships a flake. Run it directly or add it to your configuration:
+
+~~~bash
+# Run without installing
+nix run git+https://codeberg.org/stelzo/marina
+
+# Install into your profile
+nix profile install git+https://codeberg.org/stelzo/marina
+~~~
+
+Or as a flake input:
+
+~~~nix
+inputs.marina.url = "git+https://codeberg.org/stelzo/marina";
+~~~
+
 ## Cargo
 
 Marina is on [crates.io](https://crates.io/crates/marina), so Rustaceans can install it directly with Cargo.

@@ -122,13 +122,13 @@ marina -y push outdoor-run:v2 /path/to/bag/ --registry team-ssh
 
 ## Import
 
-Register an existing local bag directory in the marina catalog without pushing it to a registry:
+Register an existing local bag directory in the Marina catalog without pushing it to a registry:
 
 ~~~bash
 marina import outdoor-run:v2 /path/to/outdoor-run/
 ~~~
 
-The bag is copied into the marina cache and appears immediately in `marina ls` and shell completions.
+The bag is copied into the Marina cache and appears immediately in `marina ls` and shell completions.
 
 | Flag | Description |
 |---|---|
@@ -164,7 +164,7 @@ If a registry does not respond within the configured [`registry_timeout`](../con
 
 ## Export
 
-Copy a cached dataset to a directory outside the marina cache (unpacked, ready to use with other tools):
+Copy a cached dataset to a directory outside the Marina cache (unpacked, ready to use with other tools):
 
 ~~~bash
 marina export outdoor-run:v2 /tmp/exported-run/

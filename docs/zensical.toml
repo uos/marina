@@ -29,6 +29,7 @@ nav = [
     "features/registries.md",
     "features/datasets.md",
     "features/compression.md",
+    "features/ci.md",
   ]},
   {"Configuration" = "config.md"},
 ]

@@ -14,12 +14,32 @@
   }:
     flake-utils.lib.eachDefaultSystem (
       system: let
-         pkgs = import nixpkgs {
+        pkgs = import nixpkgs {
           inherit system;
         };
 
         docsBuildScripts = import ./nix/BuildDocs.nix {inherit pkgs;};
+
+        marina = pkgs.rustPlatform.buildRustPackage {
+          pname = "marina";
+          version = "0.2.0";
+          src = ./.;
+          cargoLock.lockFile = ./Cargo.lock;
+          nativeBuildInputs = [pkgs.pkg-config pkgs.installShellFiles];
+          doCheck = false;
+          postInstall = ''
+            installShellCompletion --cmd marina \
+              --bash <($out/bin/marina completions bash) \
+              --zsh <($out/bin/marina completions zsh) \
+              --fish <($out/bin/marina completions fish)
+          '';
+        };
       in {
+        packages = {
+          marina = marina;
+          default = marina;
+        };
+
         apps = {
           buildDocs = {
             type = "app";

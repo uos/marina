@@ -6,6 +6,8 @@ Marina stores its configuration in a single file:
 ~/.config/marina/marina.rl
 ~~~
 
+The directory defaults to `~/.config/marina` but can be overridden with `MARINA_CONFIG_DIR` (see [Environment Variables](#environment-variables)).
+
 The file is created automatically on first run. You can also create or edit it manually.
 The format is [ratslang](https://codeberg.org/stelzo/ratslang), which supports physical units directly.
 
@@ -54,7 +56,7 @@ Each block inside `registries { }` defines a storage backend. The block name is 
 |---|---|---|
 | `uri` | yes | Connection URI (see below) |
 | `kind` | no | Explicit backend type; inferred from URI scheme if omitted |
-| `auth_env` | no | Environment variable holding an SSH private-key path |
+| `auth_env` | no | Name of the environment variable holding credentials at runtime (SSH key path/password or GDrive service-account JSON) |
 
 ### URI Schemes
 
@@ -97,11 +99,10 @@ Global behaviour settings live under the `settings` block.
 
 ## Environment Variables
 
-These variables are usually only used in automated scenarios and are just included here for completeness.
-
 | Variable | Description |
 |---|---|
-| `MARINA_SSH_KEY` | Path to an SSH private key used for registry auth when set via `--auth-env` |
+| `MARINA_CONFIG_DIR` | Override the config directory (default: `~/.config/marina`). Useful in CI to point Marina at a config committed to the repo. |
+| `MARINA_CACHE_DIR` | Override the dataset cache directory (default: `~/.cache/marina`). |
 | `MARINA_GDRIVE_CLIENT_ID` | OAuth client ID for Google Drive auth (alternative to `--client-id` flag) |
 | `MARINA_GDRIVE_CLIENT_SECRET` | OAuth client secret for Google Drive auth (alternative to `--client-secret` flag) |
 | `MARINA_PROG_NAME` | Override the program name used in CLI help output (used by ROS verb wrapper) |
@@ -113,6 +114,8 @@ Downloaded datasets are stored in:
 ~~~
 ~/.cache/marina/
 ~~~
+
+Override the location with `MARINA_CACHE_DIR`. This is useful in CI to control where datasets land or to share a cache across pipeline steps.
 
 Clear the cache with:
 

@@ -59,6 +59,9 @@ sed_i "s/version \".*\"/version \"${NEW_VERSION}\"/" packaging/homebrew/marina.r
 sed_i 's/export MARINA_VERSION="[^"]*"/export MARINA_VERSION="'"${NEW_VERSION}"'"/' docs/docs/installation/archives.md
 sed_i 's/set -gx MARINA_VERSION "*[0-9][^" ]*/set -gx MARINA_VERSION '"${NEW_VERSION}"'/' docs/docs/installation/archives.md
 
+# flake.nix
+sed_i 's/version = "[0-9]*\.[0-9]*\.[0-9]*";/version = "'"${NEW_VERSION}"'";/' flake.nix
+
 echo ""
 echo "Updated files:"
 echo "  Cargo.toml"
@@ -70,6 +73,7 @@ echo "  packaging/arch/PKGBUILD"
 echo "  packaging/arch-bin/PKGBUILD"
 echo "  packaging/homebrew/marina.rb"
 echo "  docs/docs/installation/archives.md"
+echo "  flake.nix"
 echo ""
 echo "── git diff ──────────────────────────────────────────────────────────"
 git diff
