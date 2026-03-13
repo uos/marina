@@ -32,11 +32,10 @@ async fn main() -> anyhow::Result<()> {
     // Read local catalog.
     for entry in marina.list_cached_bags() {
         println!(
-            "{} -> {} ({} -> {} bytes)",
+            "{} -> {} ({} bytes)",
             entry.bag,
             entry.local_dir.display(),
             entry.original_bytes,
-            entry.packed_bytes
         );
     }
 

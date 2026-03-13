@@ -1,0 +1,31 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/SchemaStore/schemastore/refs/heads/master/src/schemas/json/github-workflow.json
+
+name: Test
+
+on:
+  push:
+  workflow_dispatch:
+
+env:
+  RUST_FONTCONFIG_DLOPEN: 1
+  CARGO_BUILD_JOBS: 2
+
+jobs:
+  sanity-check:
+    runs-on: ubuntu-dev-noble-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deps
+        run: |
+          rustup toolchain uninstall stable
+          rustup toolchain install stable
+      - name: Check
+        run: |
+          set -euo pipefail
+          ulimit -n 65536
+          VERSION=$(toml get --raw Cargo.toml package.version)
+          echo "Workspace version: $VERSION"
+
+          cargo check --all-features --all-targets
+          cargo publish --dry-run
+          cargo clippy --all-targets -- -D warnings
