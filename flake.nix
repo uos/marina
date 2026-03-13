@@ -28,6 +28,8 @@
           nativeBuildInputs = [pkgs.pkg-config pkgs.installShellFiles];
           doCheck = false;
           postInstall = ''
+            export MARINA_CONFIG_DIR=$(mktemp -d)
+            export MARINA_CACHE_DIR=$(mktemp -d)
             installShellCompletion --cmd marina \
               --bash <($out/bin/marina completions bash) \
               --zsh <($out/bin/marina completions zsh) \
