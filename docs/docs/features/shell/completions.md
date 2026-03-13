@@ -4,7 +4,7 @@ Once installed, pressing <kbd>Tab</kbd> expands subcommands, flags, and dataset 
 
 !!! info "Packages"
 
-    If you installed Marina via the AUR or the Homebrew tap, completion scripts get automatically installed.
+    If you installed Marina via the AUR, the Homebrew tap or non-ROS deb package (PPA), completion scripts get automatically installed.
 
 ## Setup
 

@@ -25,6 +25,8 @@ build() {
   chmod 755 $MARINA
 
   mkdir -p "$srcdir/completions"
+  export MARINA_CONFIG_DIR=$(mktemp -d)
+  export MARINA_CACHE_DIR=$(mktemp -d)
   "$MARINA" completions bash > "$srcdir/completions/bash"
   "$MARINA" completions zsh  > "$srcdir/completions/_zsh"
   "$MARINA" completions fish > "$srcdir/completions/fish"

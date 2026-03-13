@@ -93,6 +93,14 @@ jobs:
           cargo build --release
           cp target/release/marina dist/${ARCH}/
 
+          # ------- completions (needed by deb assets)
+          mkdir -p completions
+          export MARINA_CONFIG_DIR=$(mktemp -d)
+          export MARINA_CACHE_DIR=$(mktemp -d)
+          target/release/marina completions bash > completions/marina.bash
+          target/release/marina completions zsh  > completions/_marina
+          target/release/marina completions fish > completions/marina.fish
+
           # ------- DEB
           cargo deb --no-build
 

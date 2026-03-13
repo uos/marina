@@ -61,7 +61,7 @@ Marina ships a flake. Run it directly or add it to your configuration:
 
 ~~~bash
 # Run without installing
-nix run git+https://codeberg.org/stelzo/marina
+nix run git+https://codeberg.org/stelzo/marina -- ls --remote
 
 # Install into your profile
 nix profile install git+https://codeberg.org/stelzo/marina
