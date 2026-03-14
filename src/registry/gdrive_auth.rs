@@ -54,9 +54,9 @@ fn save_stored_token(registry_name: &str, token: &StoredToken) -> Result<()> {
     Ok(())
 }
 
-/// Returns a valid access token for the registry, refreshing if expired.
-/// Returns `None` if no stored token exists (fall through to other auth methods).
-pub async fn get_access_token(registry_name: &str) -> Result<Option<String>> {
+/// Returns a valid access token and its expiry (unix seconds) for the registry,
+/// refreshing if expired. Returns `None` if no stored token exists.
+pub async fn get_access_token(registry_name: &str) -> Result<Option<(String, u64)>> {
     let mut token = match load_stored_token(registry_name) {
         Some(t) => t,
         None => return Ok(None),
@@ -67,7 +67,7 @@ pub async fn get_access_token(registry_name: &str) -> Result<Option<String>> {
         save_stored_token(registry_name, &token)?;
     }
 
-    Ok(Some(token.access_token))
+    Ok(Some((token.access_token, token.expires_at)))
 }
 
 #[derive(Debug, Clone)]

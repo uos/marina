@@ -1,6 +1,6 @@
 # Introduction
 
-**Marina** is a dataset manager for robotics built to organize, share, and discover ROS 2 bagfiles or datasets across teams and storage backends.
+**Marina** is a dataset manager for robotics built to organize, share, and discover datasets and bags across teams and storage backends.
 
 ~~~bash
 # Pull a dataset from any configured registry

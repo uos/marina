@@ -1,9 +1,115 @@
-//! marina is a dataset manager for robotics to organize, share, and discover datasets and metadata across storage backends.
+//! Marina is a dataset manager for robotics built to organize, share, and discover datasets and bags across teams and storage backends.
 //!
-//! It supports:
-//! - resolving bag references to local cache paths,
-//! - pushing/pulling packed bag bundles,
-//! - optional phase-based progress reporting via [`ProgressSink`].
+//! ## Add the dependency
+//!
+//! ```toml
+//! [dependencies]
+//! marina = "0.2"
+//! tokio = { version = "1", features = ["rt", "macros"] }
+//! ```
+//!
+//! Marina's async methods require a **tokio** runtime. A single-threaded runtime
+//! (`#[tokio::main(flavor = "current_thread")]`) is sufficient.
+//!
+//! ## Resolve a dataset
+//!
+//! [`Marina::resolve_target`] checks whether a dataset is already cached, available locally,
+//! or only reachable via a remote registry.
+//!
+//! ```no_run
+//! use marina::{Marina, ResolveResult};
+//!
+//! #[tokio::main]
+//! async fn main() -> anyhow::Result<()> {
+//!     let marina = Marina::load()?;
+//!
+//!     match marina.resolve_target("outdoor-run:v2", None).await? {
+//!         ResolveResult::LocalPath(p) | ResolveResult::Cached(p) => {
+//!             println!("ready at {}", p.display());
+//!         }
+//!         ResolveResult::RemoteAvailable { bag, registry, .. } => {
+//!             println!("remote: {bag} in {registry}");
+//!         }
+//!         ResolveResult::Ambiguous { candidates } => {
+//!             println!("found in {} registries", candidates.len());
+//!         }
+//!     }
+//!     Ok(())
+//! }
+//! ```
+//!
+//! Pass a registry name as the second argument to restrict the search:
+//!
+//! ```no_run
+//! # use marina::Marina;
+//! # #[tokio::main] async fn main() -> anyhow::Result<()> {
+//! # let marina = Marina::load()?;
+//! marina.resolve_target("outdoor-run:v2", Some("team-ssh")).await?;
+//! # Ok(()) }
+//! ```
+//!
+//! ## Pull a dataset
+//!
+//! [`Marina::pull_exact`] downloads a dataset if it is not already cached and returns the local path:
+//!
+//! ```no_run
+//! use marina::{Marina, BagRef};
+//!
+//! #[tokio::main]
+//! async fn main() -> anyhow::Result<()> {
+//!     let mut marina = Marina::load()?;
+//!     let bag: BagRef = "outdoor-run:v2".parse()?;
+//!     let path = marina.pull_exact(&bag, None).await?;
+//!     println!("cached at {}", path.display());
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ## Pull with progress reporting
+//!
+//! Implement [`ProgressSink`] to receive phase events during download and decompression:
+//!
+//! ```no_run
+//! use marina::{Marina, BagRef, ProgressEvent, ProgressReporter, ProgressSink};
+//!
+//! struct MyProgress;
+//!
+//! impl ProgressSink for MyProgress {
+//!     fn emit(&mut self, event: ProgressEvent) {
+//!         println!("[{}] {}", event.phase, event.message);
+//!     }
+//! }
+//!
+//! #[tokio::main]
+//! async fn main() -> anyhow::Result<()> {
+//!     let mut marina = Marina::load()?;
+//!     let bag: BagRef = "outdoor-run:v2".parse()?;
+//!
+//!     let mut sink = MyProgress;
+//!     let mut reporter = ProgressReporter::new(&mut sink);
+//!     let path = marina.pull_exact_with_progress(&bag, None, &mut reporter).await?;
+//!     println!("done: {}", path.display());
+//!     Ok(())
+//! }
+//! ```
+//!
+//! [`WriterProgress`] is a built-in sink that writes human-readable output to any [`std::io::Write`]:
+//!
+//! ```no_run
+//! use marina::{Marina, BagRef, ProgressReporter, WriterProgress};
+//!
+//! #[tokio::main]
+//! async fn main() -> anyhow::Result<()> {
+//!     let mut marina = Marina::load()?;
+//!     let bag: BagRef = "outdoor-run:v2".parse()?;
+//!
+//!     let mut stdout = std::io::stdout();
+//!     let mut sink = WriterProgress::new(&mut stdout);
+//!     let mut reporter = ProgressReporter::new(&mut sink);
+//!     marina.pull_exact_with_progress(&bag, None, &mut reporter).await?;
+//!     Ok(())
+//! }
+//! ```
 
 pub mod cleanup;
 pub mod cli;

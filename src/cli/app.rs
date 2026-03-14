@@ -1392,58 +1392,48 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                 vec![]
             };
 
-            // Build the union list: (bag, is_local, remote_registry).
-            // Same bag on multiple registries produces separate entries.
+            // Build one entry per bag, grouping all remote registries together.
             let local_keys: std::collections::HashSet<String> =
                 local.iter().map(|b| b.to_string()).collect();
 
             struct RmEntry {
                 bag: BagRef,
                 is_local: bool,
-                remote_registry: Option<String>,
+                remote_registries: Vec<String>,
             }
 
             let mut all: Vec<RmEntry> = Vec::new();
-            // Add local-only entries first.
+            // Local bags (with any matching remote registries collected).
             for bag in &local {
                 let key = bag.to_string();
-                let remote_regs: Vec<&str> = remote
+                let remote_regs: Vec<String> = remote
                     .iter()
                     .filter(|(b, _)| b.to_string() == key)
-                    .map(|(_, r)| r.as_str())
+                    .map(|(_, r)| r.clone())
                     .collect();
-                if remote_regs.is_empty() {
-                    all.push(RmEntry {
-                        bag: bag.clone(),
-                        is_local: true,
-                        remote_registry: None,
-                    });
-                } else {
-                    for reg in remote_regs {
-                        all.push(RmEntry {
-                            bag: bag.clone(),
-                            is_local: true,
-                            remote_registry: Some(reg.to_string()),
-                        });
-                    }
-                }
+                all.push(RmEntry {
+                    bag: bag.clone(),
+                    is_local: true,
+                    remote_registries: remote_regs,
+                });
             }
-            // Add remote-only entries (not in local).
+            // Remote-only bags (not cached locally).
             for (bag, reg) in &remote {
-                if !local_keys.contains(&bag.to_string()) {
+                let key = bag.to_string();
+                if local_keys.contains(&key) {
+                    continue;
+                }
+                if let Some(entry) = all.iter_mut().find(|e| e.bag.to_string() == key) {
+                    entry.remote_registries.push(reg.clone());
+                } else {
                     all.push(RmEntry {
                         bag: bag.clone(),
                         is_local: false,
-                        remote_registry: Some(reg.clone()),
+                        remote_registries: vec![reg.clone()],
                     });
                 }
             }
-            all.sort_by(|a, b| {
-                a.bag
-                    .to_string()
-                    .cmp(&b.bag.to_string())
-                    .then_with(|| a.remote_registry.cmp(&b.remote_registry))
-            });
+            all.sort_by(|a, b| a.bag.to_string().cmp(&b.bag.to_string()));
 
             if all.is_empty() {
                 println!("no datasets matching '{}'", args.pattern);
@@ -1455,18 +1445,15 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                     );
                 }
                 for entry in all {
-                    let location = match (entry.is_local, &entry.remote_registry) {
-                        (true, Some(reg)) => format!("local + {}", reg),
-                        (true, None) => "local".to_string(),
-                        (false, Some(reg)) => reg.clone(),
-                        (false, None) => continue,
-                    };
-                    if confirm_yes_default(&format!("Remove {} ({})?", entry.bag, location), yes)? {
-                        if entry.is_local {
-                            marina.remove_local(&entry.bag)?;
-                            println!("removed local {}", entry.bag);
-                        }
-                        if let Some(ref reg) = entry.remote_registry {
+                    if entry.is_local
+                        && confirm_yes_default(&format!("Remove {} (local)?", entry.bag), yes)?
+                    {
+                        marina.remove_local(&entry.bag)?;
+                        println!("removed local {}", entry.bag);
+                    }
+                    for reg in &entry.remote_registries {
+                        if confirm_yes_default(&format!("Remove {} from {}?", entry.bag, reg), yes)?
+                        {
                             marina
                                 .remove_remote(&entry.bag, Some(reg), args.write_http_index)
                                 .await?;
@@ -1637,13 +1624,7 @@ fn print_inspect_result(result: &crate::core::InspectResult) {
         } else {
             println!("  files:");
             for f in &result.local_files {
-                let tag = if f.is_recording { " [recording]" } else { "" };
-                println!(
-                    "    {}  {}{}",
-                    human_bytes(f.size_bytes),
-                    f.relative_path,
-                    tag
-                );
+                println!("    {}  {}", human_bytes(f.size_bytes), f.relative_path);
             }
         }
     } else {

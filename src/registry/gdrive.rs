@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::IsTerminal;
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
@@ -14,6 +14,9 @@ use reqwest::StatusCode;
 use reqwest::header::{CONTENT_RANGE, LOCATION, RANGE};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
+use tokio::sync::Mutex;
+
+use futures::future::join_all;
 
 use crate::model::bag_ref::BagRef;
 use crate::registry::driver::{BagInfo, PushMeta, RegistryDriver, RemoteDescriptor};
@@ -26,12 +29,19 @@ const RESUMABLE_CHUNK_START_BYTES: usize = 32 * 1024 * 1024;
 const RESUMABLE_CHUNK_MAX_BYTES: usize = 48 * 1024 * 1024;
 const RESUMABLE_UPLOAD_RETRIES: usize = 4;
 
+#[derive(Debug)]
+struct CachedToken {
+    header: String,  // "Bearer <access_token>"
+    expires_at: u64, // unix seconds; cache evicted 60 s before this
+}
+
 #[derive(Debug, Clone)]
 pub struct GDriveRegistry {
     pub name: String,
     folder_id: String,
     token_env: Option<String>,
     client: Client,
+    token_cache: Arc<Mutex<Option<CachedToken>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,6 +181,7 @@ impl GDriveRegistry {
                 .connect_timeout(Duration::from_secs(30))
                 .timeout(Duration::from_secs(60 * 60))
                 .build()?,
+            token_cache: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -191,23 +202,46 @@ impl GDriveRegistry {
     }
 
     async fn auth_header_optional(&self) -> Result<Option<String>> {
-        // 1. Stored OAuth token from `marina registry auth`
-        if let Some(token) = gdrive_auth::get_access_token(&self.name).await? {
-            return Ok(Some(format!("Bearer {}", token)));
-        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("system clock before unix epoch")?
+            .as_secs();
 
-        // 2. Service-account JSON via auth_env (for CI/server environments)
-        if let Some(var) = &self.token_env {
-            if let Ok(secret) = std::env::var(var) {
-                return Ok(Some(format!(
-                    "Bearer {}",
-                    self.service_account_access_token_from_secret(secret.trim())
-                        .await?
-                )));
+        // Check in-memory cache first (with 60-second safety buffer)
+        {
+            let guard = self.token_cache.lock().await;
+            if let Some(ref ct) = *guard {
+                if ct.expires_at > now + 60 {
+                    return Ok(Some(ct.header.clone()));
+                }
             }
         }
 
-        Ok(None)
+        // Cache miss — resolve via existing paths
+        let result = if let Some((token, exp)) = gdrive_auth::get_access_token(&self.name).await? {
+            Some((format!("Bearer {}", token), exp))
+        } else if let Some(var) = &self.token_env {
+            if let Ok(secret) = std::env::var(var) {
+                let (token, exp) = self
+                    .service_account_access_token_from_secret(secret.trim())
+                    .await?;
+                Some((format!("Bearer {}", token), exp))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some((header, expires_at)) = result {
+            *self.token_cache.lock().await = Some(CachedToken {
+                header: header.clone(),
+                expires_at,
+            });
+            Ok(Some(header))
+        } else {
+            Ok(None)
+        }
     }
 
     async fn auth_header_required(&self) -> Result<String> {
@@ -223,7 +257,10 @@ impl GDriveRegistry {
         std::env::var("GOOGLE_DRIVE_API_KEY").ok()
     }
 
-    async fn service_account_access_token_from_secret(&self, secret: &str) -> Result<String> {
+    async fn service_account_access_token_from_secret(
+        &self,
+        secret: &str,
+    ) -> Result<(String, u64)> {
         if secret.is_empty() {
             return Err(anyhow!("empty gdrive auth_env value"));
         }
@@ -261,16 +298,17 @@ impl GDriveRegistry {
         Ok(Some(key))
     }
 
-    async fn service_account_access_token(&self, key: &ServiceAccountKey) -> Result<String> {
+    async fn service_account_access_token(&self, key: &ServiceAccountKey) -> Result<(String, u64)> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .context("system clock before unix epoch")?
             .as_secs();
+        let expires_at = now + 3600;
         let claims = ServiceAccountClaims {
             iss: &key.client_email,
             scope: "https://www.googleapis.com/auth/drive",
             aud: &key.token_uri,
-            exp: now + 3600,
+            exp: expires_at,
             iat: now,
         };
         let assertion = sign_rs256_jwt(&claims, key.private_key.as_bytes())
@@ -291,7 +329,7 @@ impl GDriveRegistry {
             .json::<OAuthTokenResponse>()
             .await
             .context("failed decoding Google OAuth token response")?;
-        Ok(token.access_token)
+        Ok((token.access_token, expires_at))
     }
 
     async fn query_files(&self, query: &str) -> Result<Vec<DriveFile>> {
@@ -1048,8 +1086,14 @@ impl RegistryDriver for GDriveRegistry {
         let manifest_files = self.query_files(&manifest_query).await?;
 
         let mut out = Vec::new();
-        for file in manifest_files {
-            let bytes = self.download_file_bytes(&file.id).await?;
+        let manifest_downloads = join_all(
+            manifest_files
+                .iter()
+                .map(|f| self.download_file_bytes(&f.id)),
+        )
+        .await;
+        for bytes_result in manifest_downloads {
+            let bytes = bytes_result?;
             let manifest: PublicManifest = match serde_json::from_slice(&bytes) {
                 Ok(v) => v,
                 Err(_) => continue,
@@ -1072,8 +1116,9 @@ impl RegistryDriver for GDriveRegistry {
         );
         let files = self.query_files(&q).await?;
 
-        for file in files {
-            let bytes = self.download_file_bytes(&file.id).await?;
+        let meta_downloads = join_all(files.iter().map(|f| self.download_file_bytes(&f.id))).await;
+        for (file, bytes_result) in files.iter().zip(meta_downloads) {
+            let bytes = bytes_result?;
             let meta: MetaFile = serde_json::from_slice(&bytes)
                 .with_context(|| format!("failed parsing metadata file {}", file.name))?;
             let bag = meta.bag.without_attachment();
@@ -1098,8 +1143,9 @@ impl RegistryDriver for GDriveRegistry {
         let files = self.query_files(&q).await?;
 
         let mut result: Vec<(BagRef, Option<BagInfo>)> = Vec::new();
-        for file in files {
-            let bytes = match self.download_file_bytes(&file.id).await {
+        let downloads = join_all(files.iter().map(|f| self.download_file_bytes(&f.id))).await;
+        for bytes_result in downloads {
+            let bytes = match bytes_result {
                 Ok(b) => b,
                 Err(_) => continue,
             };
@@ -1134,8 +1180,14 @@ impl RegistryDriver for GDriveRegistry {
             self.folder_id
         );
         let manifest_files = self.query_files(&manifest_query).await?;
-        for file in manifest_files {
-            let bytes = match self.download_file_bytes(&file.id).await {
+        let manifest_downloads = join_all(
+            manifest_files
+                .iter()
+                .map(|f| self.download_file_bytes(&f.id)),
+        )
+        .await;
+        for bytes_result in manifest_downloads {
+            let bytes = match bytes_result {
                 Ok(b) => b,
                 Err(_) => continue,
             };

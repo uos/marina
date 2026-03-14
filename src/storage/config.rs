@@ -373,7 +373,7 @@ fn parse_registries(user_vars: &VariableHistory) -> Result<Vec<RegistryConfig>> 
         });
 
         result.push(RegistryConfig {
-            name: ident.replace('_', "-"),
+            name: ident,
             uri,
             kind,
             auth_env,
@@ -402,8 +402,7 @@ pub fn save_registries(file: &RegistryFile) -> Result<()> {
 fn generate_registries_block(registries: &[RegistryConfig]) -> String {
     let mut s = String::from("registries {");
     for reg in registries {
-        let ident = reg.name.replace('-', "_");
-        s.push_str(&format!("\n  {ident} {{\n"));
+        s.push_str(&format!("\n  {} {{\n", reg.name));
         s.push_str(&format!("    uri = \"{}\"\n", reg.uri));
         s.push_str(&format!("    kind = \"{}\"\n", reg.kind));
         if let Some(auth) = &reg.auth_env {

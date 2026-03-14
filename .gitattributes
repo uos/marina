@@ -1,5 +1,5 @@
-bindings/* linguist-vendored
-nix/* linguist-vendored
-resource/* linguist-vendored
-docs/* linguist-vendored
-packaging/* linguist-vendored
+bindings/** linguist-vendored
+nix/** linguist-vendored
+resource/** linguist-vendored
+docs/** linguist-vendored
+packaging/** linguist-vendored

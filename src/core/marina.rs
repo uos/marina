@@ -99,8 +99,6 @@ pub struct InspectFile {
     /// Path relative to the bag root.
     pub relative_path: String,
     pub size_bytes: u64,
-    /// `true` for the primary recording file (.mcap or .db3).
-    pub is_recording: bool,
 }
 
 /// Remote registry hit returned by [`Marina::inspect_bag`].
@@ -202,6 +200,7 @@ impl Marina {
 
     /// Adds a new registry and persists it to `registries.toml`.
     pub fn add_registry(&mut self, registry: RegistryConfig) -> Result<()> {
+        validate_registry_name(&registry.name)?;
         let mut existing = config::load_registries()?;
         if existing.registry.iter().any(|r| r.name == registry.name) {
             return Err(anyhow!("registry '{}' already exists", registry.name));
@@ -577,6 +576,7 @@ impl Marina {
             }
 
             // No stored hash (old entry) — fetch remote metadata to verify and migrate.
+            progress.emit("pull", "checking remote...");
             let remote_info = driver
                 .bag_info(&bag.without_attachment())
                 .await
@@ -1243,7 +1243,6 @@ impl Marina {
                         files.push(InspectFile {
                             relative_path: rel,
                             size_bytes: size,
-                            is_recording: true,
                         });
                     }
 
@@ -1255,14 +1254,9 @@ impl Marina {
                             .ok()
                             .map(|p| p.to_string_lossy().into_owned())
                             .unwrap_or_else(|| att.to_string_lossy().into_owned());
-                        let is_recording = att
-                            .extension()
-                            .and_then(|e| e.to_str())
-                            .is_some_and(|e| e == "db3");
                         files.push(InspectFile {
                             relative_path: rel,
                             size_bytes: size,
-                            is_recording,
                         });
                     }
 
@@ -1327,6 +1321,24 @@ impl Marina {
             remote_hits,
         })
     }
+}
+
+fn validate_registry_name(name: &str) -> Result<()> {
+    let valid = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !valid {
+        let suggestion = name.replace('-', "_");
+        return Err(anyhow!(
+            "registry name '{}' is invalid: the config file format only supports letters, digits, \
+            and underscores in identifiers{}",
+            name,
+            if suggestion != name {
+                format!(" — try '{}'", suggestion)
+            } else {
+                String::new()
+            }
+        ));
+    }
+    Ok(())
 }
 
 fn make_registry_driver(registry: &RegistryConfig) -> Result<Arc<dyn RegistryDriver>> {

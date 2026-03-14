@@ -13,15 +13,36 @@ use russh::keys::PublicKey;
 use russh_sftp::client::SftpSession;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Mutex;
 
 use crate::model::bag_ref::BagRef;
 use crate::registry::driver::{BagInfo, PushMeta, RegistryDriver, RemoteDescriptor};
 
-#[derive(Debug, Clone)]
 pub struct SshRegistry {
     pub name: String,
     endpoint: SshEndpoint,
     auth_env: Option<String>,
+    pool: Arc<Mutex<Option<Arc<Handle<ClientHandler>>>>>,
+}
+
+impl std::fmt::Debug for SshRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SshRegistry")
+            .field("name", &self.name)
+            .field("endpoint", &self.endpoint)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Clone for SshRegistry {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            endpoint: self.endpoint.clone(),
+            auth_env: self.auth_env.clone(),
+            pool: Arc::clone(&self.pool),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +99,7 @@ impl SshRegistry {
             name: name.to_string(),
             endpoint,
             auth_env,
+            pool: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -93,7 +115,7 @@ impl SshRegistry {
         format!("{}/metadata.json", self.object_dir(bag))
     }
 
-    async fn connect(&self) -> Result<Handle<ClientHandler>> {
+    async fn connect_inner(&self) -> Result<Handle<ClientHandler>> {
         let (user, host) = split_user_host(&self.endpoint.user_host)?;
         let config = Arc::new(Config::default());
 
@@ -214,12 +236,40 @@ impl SshRegistry {
         Ok(handle)
     }
 
-    async fn run_ssh(&self, remote_cmd: &str) -> Result<()> {
-        let handle = self.connect().await?;
-        let mut channel = handle
+    async fn get_handle(&self) -> Result<Arc<Handle<ClientHandler>>> {
+        let mut guard = self.pool.lock().await;
+        if let Some(h) = guard.as_ref() {
+            return Ok(Arc::clone(h));
+        }
+        let handle = self.connect_inner().await?;
+        let arc = Arc::new(handle);
+        *guard = Some(Arc::clone(&arc));
+        Ok(arc)
+    }
+
+    async fn get_handle_fresh(&self) -> Result<Arc<Handle<ClientHandler>>> {
+        let mut guard = self.pool.lock().await;
+        let handle = self.connect_inner().await?;
+        let arc = Arc::new(handle);
+        *guard = Some(Arc::clone(&arc));
+        Ok(arc)
+    }
+
+    async fn channel_open_session(&self) -> Result<russh::Channel<client::Msg>> {
+        let handle = self.get_handle().await?;
+        if let Ok(ch) = handle.channel_open_session().await {
+            return Ok(ch);
+        }
+        // Stale connection — reconnect once
+        let handle = self.get_handle_fresh().await?;
+        handle
             .channel_open_session()
             .await
-            .context("failed opening ssh channel")?;
+            .context("failed opening ssh channel")
+    }
+
+    async fn run_ssh(&self, remote_cmd: &str) -> Result<()> {
+        let mut channel = self.channel_open_session().await?;
         channel
             .exec(true, remote_cmd)
             .await
@@ -254,11 +304,7 @@ impl SshRegistry {
     }
 
     async fn run_ssh_capture(&self, remote_cmd: &str) -> Result<String> {
-        let handle = self.connect().await?;
-        let mut channel = handle
-            .channel_open_session()
-            .await
-            .context("failed opening ssh channel")?;
+        let mut channel = self.channel_open_session().await?;
         channel
             .exec(true, remote_cmd)
             .await
@@ -296,33 +342,34 @@ impl SshRegistry {
         String::from_utf8(stdout).context("remote stdout was not valid UTF-8")
     }
 
-    async fn upload_file_with_progress(&self, local: &Path, remote_path: &str) -> Result<()> {
-        let handle = self.connect().await?;
-        let channel = handle
-            .channel_open_session()
-            .await
-            .context("failed opening sftp channel")?;
+    async fn open_sftp(&self) -> Result<SftpSession> {
+        let channel = self.channel_open_session().await?;
         channel
             .request_subsystem(true, "sftp")
             .await
             .context("failed requesting sftp subsystem")?;
-        let sftp = SftpSession::new(channel.into_stream())
+        SftpSession::new(channel.into_stream())
             .await
-            .context("failed creating sftp session")?;
+            .context("failed creating sftp session")
+    }
 
+    async fn sftp_upload(
+        sftp: &SftpSession,
+        local: &Path,
+        remote_path: &str,
+        label: Option<&str>,
+    ) -> Result<()> {
         let size = fs::metadata(local)
             .with_context(|| format!("failed to stat {}", local.display()))?
             .len();
         let mut local_file = tokio::fs::File::open(local)
             .await
             .with_context(|| format!("failed opening local file {}", local.display()))?;
-
         let mut remote_file = sftp
             .create(remote_path)
             .await
             .with_context(|| format!("failed opening remote sftp file {}", remote_path))?;
-
-        let pb = transfer_bar(size, &format!("ssh upload {}", local.display()));
+        let pb = label.map(|l| transfer_bar(size, l));
         let mut buf = [0u8; 64 * 1024];
         loop {
             let n = local_file.read(&mut buf).await?;
@@ -330,50 +377,39 @@ impl SshRegistry {
                 break;
             }
             remote_file.write_all(&buf[..n]).await?;
-            pb.inc(n as u64);
+            if let Some(ref pb) = pb {
+                pb.inc(n as u64);
+            }
         }
-        pb.finish_and_clear();
+        if let Some(pb) = pb {
+            pb.finish_and_clear();
+        }
         Ok(())
     }
 
-    async fn download_file_with_progress(
-        &self,
+    async fn sftp_download(
+        sftp: &SftpSession,
         remote_path: &str,
         local: &Path,
-        bag: &BagRef,
+        label: Option<&str>,
     ) -> Result<()> {
-        let handle = self.connect().await?;
-        let channel = handle
-            .channel_open_session()
-            .await
-            .context("failed opening sftp channel")?;
-        channel
-            .request_subsystem(true, "sftp")
-            .await
-            .context("failed requesting sftp subsystem")?;
-        let sftp = SftpSession::new(channel.into_stream())
-            .await
-            .context("failed creating sftp session")?;
-
-        let metadata = sftp
+        let size = sftp
             .metadata(remote_path)
             .await
-            .with_context(|| format!("failed to stat remote file {}", remote_path))?;
-        let size = metadata.size.unwrap_or(0);
-
+            .with_context(|| format!("failed to stat remote file {}", remote_path))?
+            .size
+            .unwrap_or(0);
         if let Some(parent) = local.parent() {
             fs::create_dir_all(parent)?;
         }
         let mut local_file = tokio::fs::File::create(local)
             .await
             .with_context(|| format!("failed creating local file {}", local.display()))?;
-
         let mut remote_file = sftp
             .open(remote_path)
             .await
             .with_context(|| format!("failed opening remote sftp file {}", remote_path))?;
-
-        let pb = transfer_bar(size, &format!("{}", bag.without_attachment()));
+        let pb = label.map(|l| transfer_bar(size, l));
         let mut buf = [0u8; 64 * 1024];
         loop {
             let n = remote_file.read(&mut buf).await?;
@@ -381,10 +417,25 @@ impl SshRegistry {
                 break;
             }
             local_file.write_all(&buf[..n]).await?;
-            pb.inc(n as u64);
+            if let Some(ref pb) = pb {
+                pb.inc(n as u64);
+            }
         }
-        pb.finish_and_clear();
+        if let Some(pb) = pb {
+            pb.finish_and_clear();
+        }
         Ok(())
+    }
+
+    async fn upload_file_with_progress(&self, local: &Path, remote_path: &str) -> Result<()> {
+        let sftp = self.open_sftp().await?;
+        Self::sftp_upload(
+            &sftp,
+            local,
+            remote_path,
+            Some(&format!("ssh upload {}", local.display())),
+        )
+        .await
     }
 
     /// Fetch all MetaFile records from the registry in a single SSH command.
@@ -393,7 +444,7 @@ impl SshRegistry {
     /// it cannot appear in valid JSON text.
     async fn fetch_all_meta(&self) -> Result<Vec<MetaFile>> {
         let cmd = format!(
-            "find {} -type f -name metadata.json -exec sh -c 'printf \"\\036\"; cat \"$1\"' _ {{}} \\;",
+            "find {} -type f -name metadata.json -exec sh -c 'for f; do printf \"\\036\"; cat \"$f\"; done' _ {{}} +",
             shell_quote(&self.endpoint.root)
         );
         let output = self.run_ssh_capture(&cmd).await?;
@@ -430,9 +481,6 @@ impl RegistryDriver for SshRegistry {
         ))
         .await?;
 
-        self.upload_file_with_progress(packed_file, &self.data_path(bag))
-            .await?;
-
         let tmp = std::env::temp_dir().join(format!("marina_meta_{}.json", bag.cache_key()));
         let meta_file = MetaFile {
             bag: bag.clone().without_attachment(),
@@ -444,8 +492,16 @@ impl RegistryDriver for SshRegistry {
             pushed_at: Some(meta.pushed_at),
         };
         fs::write(&tmp, serde_json::to_vec_pretty(&meta_file)?)?;
-        self.upload_file_with_progress(&tmp, &self.meta_path(bag))
-            .await?;
+
+        let sftp = self.open_sftp().await?;
+        Self::sftp_upload(
+            &sftp,
+            packed_file,
+            &self.data_path(bag),
+            Some(&format!("ssh upload {}", packed_file.display())),
+        )
+        .await?;
+        Self::sftp_upload(&sftp, &tmp, &self.meta_path(bag), None).await?;
         let _ = fs::remove_file(tmp);
         Ok(())
     }
@@ -471,12 +527,17 @@ impl RegistryDriver for SshRegistry {
             .ok_or_else(|| anyhow!("invalid output path"))?;
         fs::create_dir_all(parent)?;
 
-        self.download_file_with_progress(&self.data_path(bag), out_packed_file, bag)
-            .await?;
+        let sftp = self.open_sftp().await?;
+        Self::sftp_download(
+            &sftp,
+            &self.data_path(bag),
+            out_packed_file,
+            Some(&bag.without_attachment().to_string()),
+        )
+        .await?;
 
         let meta_local = parent.join("remote_metadata.json");
-        self.download_file_with_progress(&self.meta_path(bag), &meta_local, bag)
-            .await?;
+        Self::sftp_download(&sftp, &self.meta_path(bag), &meta_local, None).await?;
         let meta_text = fs::read_to_string(&meta_local)?;
         let _ = fs::remove_file(meta_local);
         let meta: MetaFile = serde_json::from_str(&meta_text)?;

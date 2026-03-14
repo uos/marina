@@ -33,9 +33,9 @@ nav = [
   ]},
   {"Configuration" = "config.md"},
   {"Libraries" = [
-    "libraries/rust.md",
     "libraries/python.md",
     "libraries/c.md",
+    {"Rust" = "https://docs.rs/marina"},
   ]},
 ]
 
