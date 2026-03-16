@@ -1,45 +1,64 @@
 # Introduction
 
-**Marina** is a dataset manager for robotics built to organize, share, and discover datasets and bags across teams and storage backends.
+**Marina** is a dataset manager for robotics built to organize, share, and discover bags and datasets across teams and storage backends.
 
-~~~bash
-# Pull a dataset from any configured registry
-marina pull dlg_feldtage_24:cut
+=== "ROS 2 CLI"
 
-# Pass it straight to your tools
-ros2 bag play $(marina resolve dlg_feldtage_24:cut)
+    ~~~bash
+    # Pull a dataset from any configured registry...
+    ros2 bag pull dlg_feldtage_24:cut
 
-# Directly record to local cache with ROS integration
-ros2 bag record --all -o $(ros2 bag import my_recording:session1)
-~~~
+    # and pass it straight to playback
+    ros2 bag play $(ros2 bag resolve dlg_feldtage_24:cut)
+
+    # See available bags from configured remotes
+    ros2 bag datasets --remote
+    # or use the alias
+    ros2 bag ds --remote
+    ~~~
+
+=== "Standalone"
+
+    ~~~bash
+    # Pull a dataset from any configured registry
+    marina pull dlg_feldtage_24:cut
+
+    # Get and use the data from the local cache
+    cat $(marina resolve dlg_feldtage_24:cut)/metadata.yaml
+
+    # See available bags from configured remotes
+    marina list --remote
+    # or use the alias
+    marina ls --remote
+    ~~~
 
 Datasets are pulled from remote registries. You can easily create your own using SSH, Google Drive, HTTP or any filesystem folder.
 
-~~~bash
-marina registry add team ssh://user@your-server.org:/data/bags
-marina push my-run:v1 /path/to/bag/
-~~~
+=== "ROS 2 CLI"
+
+    ~~~bash
+    # Record to local cache...
+    ros2 bag record --all -o $(ros2 bag import my_recording:session1)
+
+    # and push to your registry.
+    ros2 bag push my-run:v1 /path/to/bag/ --registry team_ssh
+    ~~~
+
+=== "Standalone"
+
+    ~~~bash
+    # Push any folder or bags to your registry.
+    marina bag push my-run:v1 /path/to/dataset/ --registry team_ssh
+    ~~~
 
 ---
 
-**Automatic compression**
+**Compression**
 
-Marina automatically compresses bags when pushing and restores them on pull. PointCloud2 messages are compressed with millimetre accuracy using the embedded [cloudini](https://github.com/facontidavide/cloudini) library. This massively reduces network IO — a typical bottleneck for mobile robots.
+Marina automatically compresses bags when pushing and restores them on pull.
+PointCloud2 messages are compressed with millimeter accuracy by default using the embedded [cloudini](https://github.com/facontidavide/cloudini) library.
 
----
+Accuracy and compression are transparently marked but can also be changed or disabled at any time through [configuration](./config.md).
 
-**ROS 2 native**
 
-Marina extends the `ros2 bag` CLI directly when installing for ROS, so the commands you already know just get better:
-
-~~~bash
-ros2 bag push my-run:v1 /path/to/bag/
-ros2 bag pull my-run:v1
-ros2 bag datasets --remote
-~~~
-
-Plain folders are supported as well, for non-ROS datasets and metadata.
-
----
-
-Get started by installing the CLI on your machine: [Installation](installation/packages.md)
+Get started by [installing](installation/ros.md) the CLI on your machine!

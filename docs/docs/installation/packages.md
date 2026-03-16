@@ -40,6 +40,8 @@ Use your preferred AUR helper:
 
 ~~~bash
 paru -S marina
+# or maybe
+yay -S marina-bin
 ~~~
 
 ## Homebrew (macOS)

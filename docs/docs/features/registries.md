@@ -21,7 +21,7 @@ marina registry add <name> <uri>
 ### SSH
 
 ~~~bash
-marina registry add team-ssh ssh://user@your-server.org:/path/to/registry
+marina registry add team_ssh ssh://user@your-server.org:/path/to/registry
 ~~~
 
 Marina uses SSH key authentication. Set up passwordless login first:
@@ -42,7 +42,7 @@ ssh-copy-id -i ~/.ssh/id_ed25519.pub user@your-server.org
 Alternatively, pass the key path explicitly:
 
 ~~~bash
-marina registry add team-ssh ssh://user@your-server.org:/path/to/reg \
+marina registry add team_ssh ssh://user@your-server.org:/path/to/reg \
   --auth-env MARINA_SSH_KEY
 ~~~
 
@@ -56,11 +56,11 @@ For example, in `https://drive.google.com/drive/folders/10hjoMIyWTOVNOo3zDOfHoSb
 
 ~~~bash
 # Public folder. Read-only without auth
-marina registry add public-drive gdrive://<folder-id>
+marina registry add public_drive gdrive://<folder-id>
 
 # Private or writable. Authenticate after adding
-marina registry add my-drive gdrive://<folder-id>
-marina registry auth my-drive
+marina registry add my_drive gdrive://<folder-id>
+marina registry auth my_drive
 ~~~
 
 `marina registry auth` opens a browser window for the Google OAuth flow. Credentials are persisted locally in `~/.config/marina/tokens`, so avoid adding them to git.
@@ -74,7 +74,7 @@ marina registry auth my-drive
 HTTP registries are read-only, so you can pull and search but `push` and `rm` are not supported. They are typically maintained by pushing through a corresponding SSH registry with `--write-http-index`.
 
 ~~~bash
-marina registry add web-main https://datasets.example.org/marina
+marina registry add web_main https://datasets.example.org/marina
 ~~~
 
 ### Local Folder

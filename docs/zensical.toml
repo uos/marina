@@ -7,21 +7,21 @@
 [project]
 
 site_name = "Marina"
-site_description = "Dataset manager with first-class ROS 2 bag support."
+site_description = "The missing ROS 2 bag and dataset registry."
 site_author = "Christopher Sieh"
 
-repo_url = "https://codeberg.org/stelzo/marina"
-repo_name = "stelzo/marina"
+repo_url = "https://github.com/uos/marina"
+repo_name = "uos/marina"
 
 copyright = """
-Copyright &copy; 2026 The authors
+Copyright &copy; 2026 Christopher Sieh
 """
 
 nav = [
   {"Home" = "index.md"},
   {"Installation" = [
-    "installation/packages.md",
     "installation/ros.md",
+    "installation/packages.md",
     "installation/archives.md",
     "features/shell/completions.md",
   ]},
@@ -92,11 +92,11 @@ primary = "indigo"
 accent = "blue"
 
 [project.theme.icon]
-repo = "fontawesome/brands/git-alt"
+repo = "fontawesome/brands/github"
 
 [[project.extra.social]]
-icon = "fontawesome/brands/github"
-link = "https://github.com/uos/marina"
+icon = "fontawesome/brands/git-alt"
+link = "https://codeberg.org/stelzo/marina"
 
 # Extensions
 [project.markdown_extensions.attr_list]
