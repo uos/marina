@@ -356,11 +356,14 @@ fn complete_remote_datasets(current: &std::ffi::OsStr) -> Vec<CompletionCandidat
 }
 
 pub async fn run() -> Result<()> {
-    clap_complete::CompleteEnv::with_factory(Cli::command).complete();
-    let prog_name = std::env::var("MARINA_PROG_NAME").unwrap_or_else(|_| "marina".to_string());
+    let prog_name: &'static str = match std::env::var("MARINA_PROG_NAME") {
+        Ok(s) => Box::leak(s.into_boxed_str()),
+        Err(_) => "marina",
+    };
+    clap_complete::CompleteEnv::with_factory(|| Cli::command().name(prog_name)).complete();
     let mut args = std::env::args().collect::<Vec<_>>();
     if let Some(first) = args.first_mut() {
-        *first = prog_name;
+        *first = prog_name.to_string();
     }
     run_with_args(args).await
 }
@@ -1552,7 +1555,11 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
         Commands::Completions(args) => {
             // Safety: single-threaded at this point, no other env readers active
             unsafe { std::env::set_var("COMPLETE", args.shell.to_string()) };
-            clap_complete::CompleteEnv::with_factory(Cli::command).complete();
+            let prog_name: &'static str = match std::env::var("MARINA_PROG_NAME") {
+                Ok(s) => Box::leak(s.into_boxed_str()),
+                Err(_) => "marina",
+            };
+            clap_complete::CompleteEnv::with_factory(|| Cli::command().name(prog_name)).complete();
         }
         Commands::Version => {
             println!("{}", env!("CARGO_PKG_VERSION"));

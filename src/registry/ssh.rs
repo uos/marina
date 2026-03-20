@@ -715,9 +715,12 @@ fn transfer_bar(total: u64, message: &str) -> ProgressBar {
         pb.set_draw_target(ProgressDrawTarget::hidden());
     }
     pb.set_style(
-        ProgressStyle::with_template("{msg} [{bar:40.cyan/blue}] {bytes}/{total_bytes}")
-            .unwrap_or_else(|_| ProgressStyle::default_bar()),
+        ProgressStyle::with_template(
+            "{msg} [{bar:40.cyan/blue}] {bytes}/{total_bytes} {bytes_per_sec} eta {eta}",
+        )
+        .unwrap_or_else(|_| ProgressStyle::default_bar()),
     );
+    pb.enable_steady_tick(std::time::Duration::from_millis(100));
     pb.set_message(message.to_string());
     pb
 }

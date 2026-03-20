@@ -119,7 +119,13 @@ impl HttpRegistry {
         Ok(None)
     }
 
-    async fn download_file_with_progress(&self, url: &str, out: &Path, title: &str) -> Result<u64> {
+    async fn download_file_with_progress(
+        &self,
+        url: &str,
+        out: &Path,
+        title: &str,
+        size_hint: Option<u64>,
+    ) -> Result<u64> {
         let resp = self
             .client
             .get(url)
@@ -129,7 +135,7 @@ impl HttpRegistry {
             .error_for_status()
             .with_context(|| format!("download failed for {}", title))?;
 
-        let total = resp.content_length().unwrap_or(0);
+        let total = resp.content_length().or(size_hint).unwrap_or(0);
         let hidden = !std::io::stdout().is_terminal();
         let pb = if total > 0 {
             let pb = ProgressBar::new(total);
@@ -138,7 +144,7 @@ impl HttpRegistry {
             }
             pb.set_style(
                 ProgressStyle::with_template(
-                    "{msg} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})",
+                    "{msg} [{bar:40.cyan/blue}] {bytes}/{total_bytes} {bytes_per_sec} ({eta})",
                 )
                 .unwrap_or_else(|_| ProgressStyle::default_bar()),
             );
@@ -150,7 +156,7 @@ impl HttpRegistry {
                 pb.set_draw_target(ProgressDrawTarget::hidden());
             }
             pb.set_style(
-                ProgressStyle::with_template("{spinner} {msg}")
+                ProgressStyle::with_template("{spinner} {msg} {bytes} {bytes_per_sec}")
                     .unwrap_or_else(|_| ProgressStyle::default_spinner())
                     .tick_chars("|/-\\ "),
             );
@@ -226,8 +232,14 @@ impl RegistryDriver for HttpRegistry {
             .and_then(|e| e.metadata_url.clone())
             .unwrap_or_else(|| self.default_metadata_url(&target));
 
+        let size_hint = entry.as_ref().and_then(|e| e.packed_bytes);
         let downloaded = self
-            .download_file_with_progress(&bundle_url, out_packed_file, &format!("{}", target))
+            .download_file_with_progress(
+                &bundle_url,
+                out_packed_file,
+                &format!("{}", target),
+                size_hint,
+            )
             .await?;
 
         let descriptor = match self.fetch_metadata(&metadata_url).await {
