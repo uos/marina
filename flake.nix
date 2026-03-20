@@ -22,7 +22,7 @@
 
         marina = pkgs.rustPlatform.buildRustPackage {
           pname = "marina";
-          version = "0.2.1";
+          version = "0.2.2";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
           nativeBuildInputs = [pkgs.pkg-config pkgs.installShellFiles];

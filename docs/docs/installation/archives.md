@@ -13,7 +13,7 @@ Download a `.deb` and install it directly:
 === "Bash"
 
     ```bash
-    export MARINA_VERSION="0.2.1"
+    export MARINA_VERSION="0.2.2"
     export MARINA_ARCH=$(dpkg --print-architecture)
     
     curl -Lo marina.deb "[https://codeberg.org/uos-robotics/ppa/raw/branch/pages/ubuntu/pool/main/noble/marina_$MARINA_VERSION-1_$MARINA_ARCH.deb](https://codeberg.org/uos-robotics/ppa/raw/branch/pages/ubuntu/pool/main/noble/marina_$MARINA_VERSION-1_$MARINA_ARCH.deb)"
@@ -23,7 +23,7 @@ Download a `.deb` and install it directly:
 === "Zsh"
 
     ```zsh
-    export MARINA_VERSION="0.2.1"
+    export MARINA_VERSION="0.2.2"
     export MARINA_ARCH=$(dpkg --print-architecture)
     
     curl -Lo marina.deb "[https://codeberg.org/uos-robotics/ppa/raw/branch/pages/ubuntu/pool/main/noble/marina_$MARINA_VERSION-1_$MARINA_ARCH.deb](https://codeberg.org/uos-robotics/ppa/raw/branch/pages/ubuntu/pool/main/noble/marina_$MARINA_VERSION-1_$MARINA_ARCH.deb)"
@@ -33,7 +33,7 @@ Download a `.deb` and install it directly:
 === "Fish"
 
     ```fish
-    set -gx MARINA_VERSION 0.2.1
+    set -gx MARINA_VERSION 0.2.2
     set -gx MARINA_ARCH (dpkg --print-architecture)
     
     curl -Lo marina.deb "[https://codeberg.org/uos-robotics/ppa/raw/branch/pages/ubuntu/pool/main/noble/marina_$MARINA_VERSION-1_$MARINA_ARCH.deb](https://codeberg.org/uos-robotics/ppa/raw/branch/pages/ubuntu/pool/main/noble/marina_$MARINA_VERSION-1_$MARINA_ARCH.deb)"
@@ -49,7 +49,7 @@ Download the binary for your platform, make it executable, and place it on your 
 === "Bash"
 
     ```bash
-    export MARINA_VERSION="0.2.1"
+    export MARINA_VERSION="0.2.2"
     export MARINA_ARCH=$(uname -m)
 
     curl -L "https://codeberg.org/stelzo/marina/releases/download/v$MARINA_VERSION/marina-$MARINA_VERSION-$MARINA_ARCH-unknown-linux-musl.tar.gz" | tar xfzv -
@@ -66,7 +66,7 @@ Download the binary for your platform, make it executable, and place it on your 
 === "Zsh"
 
     ```zsh
-    export MARINA_VERSION="0.2.1"
+    export MARINA_VERSION="0.2.2"
     export MARINA_ARCH=$(uname -m)
 
     curl -L "https://codeberg.org/stelzo/marina/releases/download/v$MARINA_VERSION/marina-$MARINA_VERSION-$MARINA_ARCH-unknown-linux-musl.tar.gz" | tar xfzv -
@@ -83,7 +83,7 @@ Download the binary for your platform, make it executable, and place it on your 
 === "Fish"
 
     ```fish
-    set -gx MARINA_VERSION 0.2.1
+    set -gx MARINA_VERSION 0.2.2
     set -gx MARINA_ARCH (uname -m)
 
     curl -L "https://codeberg.org/stelzo/marina/releases/download/v$MARINA_VERSION/marina-$MARINA_VERSION-$MARINA_ARCH-unknown-linux-musl.tar.gz" | tar xfzv -
