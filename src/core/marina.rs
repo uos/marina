@@ -1000,7 +1000,7 @@ impl Marina {
                 original_bytes: disk_size(&entry.local_dir),
             })
             .collect::<Vec<_>>();
-        out.sort_by(|a, b| a.bag.to_string().cmp(&b.bag.to_string()));
+        out.sort_by_key(|a| a.bag.to_string());
         out
     }
 

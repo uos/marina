@@ -47,6 +47,9 @@ marina list --remote
 # or use the alias.
 marina ls --remote
 
+# Export the most verbose remote catalog JSON for the static explorer.
+marina list --remote --format json > web/catalog.json
+
 # Push any folder or bags to your registry.
 marina bag push my-run:v1 /path/to/dataset/ --registry team_ssh
 ```

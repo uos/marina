@@ -49,6 +49,8 @@ struct MetaFile {
     bag: BagRef,
     original_bytes: u64,
     packed_bytes: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     bundle_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -64,6 +66,8 @@ struct PublicManifest {
     bag: BagRef,
     original_bytes: u64,
     packed_bytes: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
     bundle_file_id: String,
     metadata_file_id: String,
     bundle_url: String,
@@ -975,6 +979,7 @@ impl RegistryDriver for GDriveRegistry {
             bag: bag.clone().without_attachment(),
             original_bytes: meta.original_bytes,
             packed_bytes: meta.packed_bytes,
+            tags: bag.tags.clone(),
             bundle_hash: Some(meta.bundle_hash.clone()),
             pointcloud: Some(meta.pointcloud.clone()),
             mcap_compression: Some(meta.mcap_compression.clone()),
@@ -989,6 +994,7 @@ impl RegistryDriver for GDriveRegistry {
             bag: bag.clone().without_attachment(),
             original_bytes: meta.original_bytes,
             packed_bytes: meta.packed_bytes,
+            tags: bag.tags.clone(),
             bundle_file_id: bundle_id.clone(),
             metadata_file_id: metadata_id.clone(),
             bundle_url: public_download_url(&bundle_id),

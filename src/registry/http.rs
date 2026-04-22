@@ -35,6 +35,8 @@ struct HttpIndexEntry {
     original_bytes: Option<u64>,
     #[serde(default)]
     packed_bytes: Option<u64>,
+    #[serde(default, rename = "tags")]
+    _tags: Vec<String>,
     #[serde(default)]
     bundle_url: Option<String>,
     #[serde(default)]

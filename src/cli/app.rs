@@ -19,6 +19,12 @@ use crate::storage::config::{
     TimeDisplay,
 };
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum RemoteOutputFormat {
+    Table,
+    Json,
+}
+
 #[derive(Parser)]
 #[command(name = "marina")]
 #[command(
@@ -60,6 +66,9 @@ struct LocalListArgs {
     /// Filter to a specific registry (only with --remote)
     #[arg(long)]
     registry: Option<String>,
+    /// Output format for remote listings
+    #[arg(long, value_enum, default_value_t = RemoteOutputFormat::Table)]
+    format: RemoteOutputFormat,
 }
 
 #[derive(Args)]
@@ -244,6 +253,29 @@ struct CompletionsArgs {
 struct CompletionIndex {
     timestamp: u64,
     registries: std::collections::HashMap<String, Vec<String>>,
+}
+
+#[derive(serde::Serialize)]
+struct RemoteCatalogExport {
+    generated_at: u64,
+    dataset_count: usize,
+    tags: Vec<String>,
+    datasets: Vec<RemoteDatasetExport>,
+}
+
+#[derive(serde::Serialize)]
+struct RemoteDatasetExport {
+    id: String,
+    registry: String,
+    namespace: Option<String>,
+    name: String,
+    tags: Vec<String>,
+    original_bytes: Option<u64>,
+    packed_bytes: Option<u64>,
+    bundle_hash: Option<String>,
+    pointcloud: Option<String>,
+    mcap_compression: Option<String>,
+    pushed_at: Option<u64>,
 }
 
 fn completion_cache_path() -> Option<std::path::PathBuf> {
@@ -647,6 +679,54 @@ fn print_remote_detail_table(
     }
 }
 
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn print_remote_catalog_json(mut all: Vec<(String, BagRef, Option<BagInfo>)>) -> Result<()> {
+    all.sort_by(|(reg_a, bag_a, _), (reg_b, bag_b, _)| {
+        reg_a
+            .cmp(reg_b)
+            .then_with(|| bag_a.to_string().cmp(&bag_b.to_string()))
+    });
+
+    let mut tags = std::collections::BTreeSet::new();
+    let datasets = all
+        .into_iter()
+        .map(|(registry, bag, info)| {
+            for tag in &bag.tags {
+                tags.insert(tag.clone());
+            }
+            RemoteDatasetExport {
+                id: bag.to_string(),
+                registry,
+                namespace: bag.namespace.clone(),
+                name: bag.name.clone(),
+                tags: bag.tags.clone(),
+                original_bytes: info.as_ref().map(|i| i.original_bytes),
+                packed_bytes: info.as_ref().map(|i| i.packed_bytes),
+                bundle_hash: info.as_ref().and_then(|i| i.bundle_hash.clone()),
+                pointcloud: info.as_ref().and_then(|i| i.pointcloud.clone()),
+                mcap_compression: info.as_ref().and_then(|i| i.mcap_compression.clone()),
+                pushed_at: info.and_then(|i| i.pushed_at),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let export = RemoteCatalogExport {
+        generated_at: now_unix_secs(),
+        dataset_count: datasets.len(),
+        tags: tags.into_iter().collect(),
+        datasets,
+    };
+
+    println!("{}", serde_json::to_string_pretty(&export)?);
+    Ok(())
+}
+
 async fn pull_and_print(
     marina: &mut Marina,
     bag: &BagRef,
@@ -859,7 +939,14 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                     }
                 }
 
-                print_remote_detail_table(all, settings.time_display);
+                match args.format {
+                    RemoteOutputFormat::Table => {
+                        print_remote_detail_table(all, settings.time_display);
+                    }
+                    RemoteOutputFormat::Json => {
+                        print_remote_catalog_json(all)?;
+                    }
+                }
             } else {
                 let mut items = marina.list_cached_bags();
                 if items.is_empty() {
@@ -1436,7 +1523,7 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                     });
                 }
             }
-            all.sort_by(|a, b| a.bag.to_string().cmp(&b.bag.to_string()));
+            all.sort_by_key(|a| a.bag.to_string());
 
             if all.is_empty() {
                 println!("no datasets matching '{}'", args.pattern);

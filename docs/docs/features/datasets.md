@@ -33,6 +33,12 @@ List all datasets available in configured remote registries:
 marina ls --remote
 ~~~
 
+Export the remote catalog as JSON for external tooling or the bundled static web explorer:
+
+~~~bash
+marina ls --remote --format json > web/catalog.json
+~~~
+
 Filter to a specific registry:
 
 ~~~bash

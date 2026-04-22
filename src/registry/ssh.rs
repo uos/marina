@@ -57,6 +57,8 @@ struct MetaFile {
     bag: BagRef,
     original_bytes: u64,
     packed_bytes: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     bundle_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -72,6 +74,8 @@ struct HttpIndexEntry {
     bag: BagRef,
     original_bytes: u64,
     packed_bytes: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -486,6 +490,7 @@ impl RegistryDriver for SshRegistry {
             bag: bag.clone().without_attachment(),
             original_bytes: meta.original_bytes,
             packed_bytes: meta.packed_bytes,
+            tags: bag.tags.clone(),
             bundle_hash: Some(meta.bundle_hash.clone()),
             pointcloud: Some(meta.pointcloud.clone()),
             mcap_compression: Some(meta.mcap_compression.clone()),
@@ -612,6 +617,11 @@ impl RegistryDriver for SshRegistry {
                 bag: meta.bag.without_attachment(),
                 original_bytes: meta.original_bytes,
                 packed_bytes: meta.packed_bytes,
+                tags: if meta.tags.is_empty() {
+                    meta.bag.tags.clone()
+                } else {
+                    meta.tags
+                },
             });
         }
         bags.sort_by_key(|e| e.bag.to_string());
