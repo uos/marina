@@ -18,7 +18,7 @@ env:
 
 jobs:
   sanity-check:
-    runs-on: ubuntu-dev-noble-arm
+    runs-on: ubuntu-dev-resolute-arm
     steps:
       - uses: actions/checkout@v4
       - name: Deps
@@ -55,6 +55,14 @@ jobs:
     strategy:
       matrix:
         include:
+          - image: docker.io/stelzo/ubuntu-dev:resolute
+            arch: amd64
+            repo: resolute
+            runner: ubuntu-latest
+          - image: docker.io/stelzo/ubuntu-dev:resolute
+            arch: arm64
+            repo: resolute
+            runner: ubuntu-latest-arm
           - image: docker.io/stelzo/ubuntu-dev:noble
             arch: amd64
             repo: noble
@@ -207,10 +215,10 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
-            runner: ubuntu-dev-noble-arm
+            runner: ubuntu-dev-resolute-arm
             arch: amd64
           - target: aarch64-unknown-linux-musl
-            runner: ubuntu-dev-noble-arm
+            runner: ubuntu-dev-resolute-arm
             arch: arm64
     runs-on: ${{ matrix.runner }}
     steps:
@@ -266,15 +274,15 @@ jobs:
           - target: aarch64-apple-darwin # MacOS Apple Silicon
             runner: macos-latest
           - target: aarch64-unknown-linux-gnu # armv8 gnu (Jetson etc)
-            runner: ubuntu-dev-noble-arm
+            runner: ubuntu-dev-resolute-arm
           - target: x86_64-unknown-linux-gnu # x64 gnu
-            runner: ubuntu-dev-noble-arm
+            runner: ubuntu-dev-resolute-arm
           - target: x86_64-unknown-linux-musl # musl manylinux x64
-            runner: ubuntu-dev-noble-arm
+            runner: ubuntu-dev-resolute-arm
           - target: aarch64-unknown-linux-musl # musl manylinux armv8
-            runner: ubuntu-dev-noble-arm
+            runner: ubuntu-dev-resolute-arm
           - target: armv7-unknown-linux-musleabihf # musl manylinux armv7
-            runner: ubuntu-dev-noble-arm
+            runner: ubuntu-dev-resolute-arm
     runs-on: ${{ matrix.runner }}
     env:
       TARGET: ${{ matrix.target }}
@@ -336,7 +344,7 @@ jobs:
   tarball:
     needs:
       - clean-6-5
-    runs-on: ubuntu-dev-noble-arm
+    runs-on: ubuntu-dev-resolute-arm
     steps:
       - uses: actions/checkout@v4
 
@@ -372,7 +380,7 @@ jobs:
           }
 
           echo "=== Linux glibc ==="
-          for repo in noble jammy; do
+          for repo in noble jammy resolute; do
             for arch in amd64 arm64; do
               make_tarball "marina-${VERSION}-linux-${repo}-${arch}" \
                 "dl/artifacts-raw-${repo}/${arch}/marina"
@@ -393,9 +401,9 @@ jobs:
 
           echo "=== cargo-binstall (target-triple named) ==="
           make_tarball "marina-${VERSION}-x86_64-unknown-linux-gnu" \
-            "dl/artifacts-raw-noble/amd64/marina"
+            "dl/artifacts-raw-resolute/amd64/marina"
           make_tarball "marina-${VERSION}-aarch64-unknown-linux-gnu" \
-            "dl/artifacts-raw-noble/arm64/marina"
+            "dl/artifacts-raw-resolute/arm64/marina"
           make_tarball "marina-${VERSION}-x86_64-unknown-linux-musl" \
             "dl/artifacts-cli-musl/amd64/marina"
           make_tarball "marina-${VERSION}-aarch64-unknown-linux-musl" \
@@ -418,7 +426,7 @@ jobs:
   release:
     needs:
       - tarball
-    runs-on: ubuntu-dev-noble-arm
+    runs-on: ubuntu-dev-resolute-arm
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@v4
@@ -463,7 +471,7 @@ jobs:
           See the documentation for installation instructions.
 
           ### Artifacts
-          - **tar.gz** archives for Linux (noble, jammy, musl) and macOS (amd64, arm64); target-triple archives for \`cargo-binstall\`
+          - **tar.gz** archives for Linux (noble, jammy, resolute, musl) and macOS (amd64, arm64); target-triple archives for \`cargo-binstall\`
           - **.deb** packages published to [PPA](https://codeberg.org/uos-robotics/ppa)
           - **Python wheels** on PyPI and custom index" \
             ${ASSET_FLAGS}; then
@@ -486,7 +494,7 @@ jobs:
   publish-ppa:
     needs:
       - release
-    runs-on: ubuntu-dev-noble-arm
+    runs-on: ubuntu-dev-resolute-arm
     steps:
       - uses: actions/checkout@v4
 
@@ -503,19 +511,20 @@ jobs:
           apt-get update -y && apt-get install -y ssh
 
           # ── Collect .deb files by series ──────────────────────
-          mkdir -p staging/noble staging/jammy
+          mkdir -p staging/noble staging/jammy staging/resolute
 
           # raw
-          for repo in noble jammy; do
+          for repo in resolute noble jammy; do
             find "dl/artifacts-raw-${repo}" -name '*.deb' -exec cp {} "staging/${repo}/" \; 2>/dev/null || true
           done
 
           # ros-debs
-          for repo in noble jammy; do
+          for repo in resolute noble jammy; do
             find "dl/artifacts-ros-debs-${repo}" -name '*.deb' -exec cp {} "staging/${repo}/" \; 2>/dev/null || true
           done
 
           echo "=== Collected .deb files ==="
+          echo "resolute: $(ls staging/resolute/*.deb 2>/dev/null | wc -l) packages"
           echo "noble: $(ls staging/noble/*.deb 2>/dev/null | wc -l) packages"
           echo "jammy:  $(ls staging/jammy/*.deb 2>/dev/null | wc -l) packages"
 
@@ -585,13 +594,14 @@ jobs:
           cd ppa
           git sparse-checkout init --cone
           git sparse-checkout set \
+            ubuntu/pool/main/resolute \
             ubuntu/pool/main/noble \
             ubuntu/pool/main/jammy \
             whl/cpu \
             bin
 
           # Copy debs
-          for series in noble jammy; do
+          for series in resolute noble jammy; do
             mkdir -p "ubuntu/pool/main/${series}"
             cp ../staging/${series}/*.deb "ubuntu/pool/main/${series}/" 2>/dev/null || true
           done
@@ -623,7 +633,7 @@ jobs:
           echo "=== PPA published ==="
 
   aur-bin:
-    runs-on: ubuntu-dev-noble
+    runs-on: ubuntu-dev-resolute
     needs:
       - release
       - publish-ppa
@@ -673,7 +683,7 @@ jobs:
           shred -u /home/build/.ssh/aur_key
 
   aur-src:
-    runs-on: ubuntu-dev-noble
+    runs-on: ubuntu-dev-resolute
     needs:
       - release
       - publish-ppa
@@ -722,7 +732,7 @@ jobs:
           shred -u /home/build/.ssh/aur_key
 
   homebrew:
-    runs-on: ubuntu-dev-noble-arm
+    runs-on: ubuntu-dev-resolute-arm
     needs:
       - publish-ppa
     if: startsWith(github.ref, 'refs/tags/')
@@ -773,7 +783,7 @@ jobs:
   publish-crates:
     needs:
       - release
-    runs-on: ubuntu-dev-noble-arm
+    runs-on: ubuntu-dev-resolute-arm
     steps:
       - uses: actions/checkout@v4
       - name: Deps
@@ -795,7 +805,7 @@ jobs:
   publish-pypi:
     needs:
       - release
-    runs-on: ubuntu-dev-noble-arm
+    runs-on: ubuntu-dev-resolute-arm
     steps:
       - name: Download CPU wheels
         uses: actions/download-artifact@v3
