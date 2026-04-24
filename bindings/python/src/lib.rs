@@ -78,7 +78,7 @@ struct PyWriterProgressSink {
 
 impl ProgressSink for PyWriterProgressSink {
     fn emit(&mut self, event: ProgressEvent) {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let writer = self.writer.bind(py);
             let line = format!("[{}] {}\n", event.phase, event.message);
             let _ = writer.call_method1("write", (line,));
