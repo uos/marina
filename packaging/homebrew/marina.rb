@@ -4,7 +4,7 @@
 class Marina < Formula
   desc "A dataset manager for robotics to organize, share, and discover datasets and metadata across storage backends."
   homepage "https://codeberg.org/stelzo/marina"
-  version "0.2.2"
+  version "0.2.3"
   license any_of: ["MIT", "Apache-2.0"]
 
   on_macos do
