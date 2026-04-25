@@ -305,23 +305,14 @@ jobs:
           fi
 
           export PATH="/usr/bin:/bin:${PATH}"
-          if command -v python3.12 >/dev/null 2>&1; then
-            PYTHON_KIND=python3.12
-          else
-            PYTHON_KIND=python3
-          fi
-
-          echo "Using interpreter kind: $PYTHON_KIND"
-          command -v "$PYTHON_KIND"
-          "$PYTHON_KIND" -V
 
           # binary
           MATURIN_ARGS="build --zig --manifest-path Cargo.toml --release --target-dir wheels"
-          maturin $MATURIN_ARGS --target "$TARGET" -i "$PYTHON_KIND"
+          maturin $MATURIN_ARGS --target "$TARGET"
 
           # bindings
           MATURIN_ARGS="build --zig --manifest-path bindings/python/Cargo.toml --release --target-dir wheels"
-          maturin $MATURIN_ARGS --target "$TARGET" -i "$PYTHON_KIND"
+          maturin $MATURIN_ARGS --target "$TARGET"
 
       - name: Upload wheels
         uses: actions/upload-artifact@v3

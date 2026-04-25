@@ -9,5 +9,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 marina = { path = "../.." }
-pyo3 = { version = "0.28", features = ["extension-module"] }
+pyo3 = { version = "0.28", features = ["extension-module", "abi3-py39"] }
 tokio = { version = "1", features = ["rt"] }
