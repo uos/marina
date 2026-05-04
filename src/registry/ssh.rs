@@ -176,9 +176,14 @@ impl SshRegistry {
                         russh::keys::agent::client::AgentClient::connect_uds(&sock).await
                     {
                         if let Ok(identities) = agent.request_identities().await {
-                            for key in identities {
+                            for identity in identities {
                                 if handle
-                                    .authenticate_publickey_with(&user, key, None, &mut agent)
+                                    .authenticate_publickey_with(
+                                        &user,
+                                        identity.public_key().into_owned(),
+                                        None,
+                                        &mut agent,
+                                    )
                                     .await
                                     .map(|r| r.success())
                                     .unwrap_or(false)
