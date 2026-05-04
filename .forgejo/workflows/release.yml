@@ -77,7 +77,10 @@ jobs:
         run: |
           set -euo pipefail
           ulimit -n 65536
-          apt-get update && apt-get install -y pkg-config cmake libclang-dev clang openssl libssl-dev libsqlite3-dev
+
+          ./update_mirror.bash
+
+          apt-get install -y pkg-config cmake libclang-dev clang openssl libssl-dev libsqlite3-dev
           rustup toolchain uninstall stable
           rustup toolchain install stable
           mkdir -p "dist/${ARCH}"
@@ -114,13 +117,10 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             arch: arm64
-          - target: x86_64-apple-darwin
-            arch: amd64
     runs-on: macos-latest
     env:
       TARGET: ${{ matrix.target }}
       ARCH: ${{ matrix.arch }}
-      SDKROOT: /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
     steps:
       - uses: actions/checkout@v4
       - name: Build
@@ -131,8 +131,7 @@ jobs:
           ulimit -n 65536
           mkdir -p "dist/${ARCH}"
 
-          export RUSTFLAGS="-C link-arg=-F${SDKROOT}/System/Library/Frameworks -C link-arg=-L${SDKROOT}/usr/lib -C link-arg=-isysroot -C link-arg=${SDKROOT}"
-          cargo zigbuild --target $TARGET "$@" --release --bin marina
+          cargo build --target $TARGET --release --bin marina
           mv target/$TARGET/release/marina dist/${ARCH}/
 
       - name: Upload
@@ -167,6 +166,9 @@ jobs:
       - name: Build
         run: |
           ulimit -n 65536
+
+          ./update_mirror.bash
+
           apt-get update && apt-get install -y pkg-config cmake libclang-dev clang openssl libssl-dev libsqlite3-dev
           rustup toolchain uninstall stable
           rustup toolchain install stable
@@ -215,6 +217,9 @@ jobs:
           ARCH: ${{ matrix.arch }}
         run: |
           ulimit -n 65536
+
+          ./update_mirror.bash
+
           apt-get update && apt-get install -y pkg-config cmake libclang-dev clang openssl libssl-dev libsqlite3-dev
           rustup toolchain uninstall stable
           rustup toolchain install stable
@@ -255,8 +260,6 @@ jobs:
       matrix:
         # omitting ppc64le and s390x since they probably have other problems than running this software
         include:
-          - target: x86_64-apple-darwin # MacOS x64
-            runner: macos-latest
           - target: aarch64-apple-darwin # MacOS Apple Silicon
             runner: macos-latest
           - target: aarch64-unknown-linux-gnu # armv8 gnu (Jetson etc)
@@ -272,33 +275,34 @@ jobs:
     runs-on: ${{ matrix.runner }}
     env:
       TARGET: ${{ matrix.target }}
+      RUNNER: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - name: Build wheels
         run: |
           ulimit -n 65536
-          apt-get update && apt-get install -y pkg-config cmake libclang-dev clang openssl libssl-dev libsqlite3-dev python3 python3-dev
-          rustup toolchain uninstall stable
+          if [[ "$RUNNER" == ubuntu* ]]; then
+            ./update_mirror.bash
+            apt-get update && apt-get install -y pkg-config cmake libclang-dev clang openssl libssl-dev libsqlite3-dev python3 python3-dev
+          fi
           rustup toolchain install stable
+          rustup default stable
+          rustup update
           rustup target add "$TARGET"
 
           # for ring
           export CFLAGS_aarch64_unknown_linux_gnu="-D__ARM_ARCH=8"
 
-          if [[ "$TARGET" == *apple-darwin* ]]; then
-            export SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
-            export RUSTFLAGS="-C link-arg=-F${SDKROOT}/System/Library/Frameworks -C link-arg=-L${SDKROOT}/usr/lib -C link-arg=-isysroot -C link-arg=${SDKROOT}"
-          fi
-
           export PATH="/usr/bin:/bin:${PATH}"
 
-          # binary
-          MATURIN_ARGS="build --zig --manifest-path Cargo.toml --release --target-dir wheels"
-          maturin $MATURIN_ARGS --target "$TARGET"
-
-          # bindings
-          MATURIN_ARGS="build --zig --manifest-path bindings/python/Cargo.toml --release --target-dir wheels"
-          maturin $MATURIN_ARGS --target "$TARGET"
+          if [[ "$TARGET" == *apple-darwin* ]]; then
+            # Native macOS runner: use Apple's linker, not cargo-zigbuild.
+            maturin build --manifest-path Cargo.toml --release --target-dir wheels
+            maturin build --manifest-path bindings/python/Cargo.toml --release --target-dir wheels
+          else
+            maturin build --zig --manifest-path Cargo.toml --release --target-dir wheels --target "$TARGET"
+            maturin build --zig --manifest-path bindings/python/Cargo.toml --release --target-dir wheels --target "$TARGET"
+          fi
 
       - name: Upload wheels
         uses: actions/upload-artifact@v3
@@ -385,8 +389,6 @@ jobs:
             "dl/artifacts-cli-musl/amd64/marina"
           make_tarball "marina-${VERSION}-aarch64-unknown-linux-musl" \
             "dl/artifacts-cli-musl/arm64/marina"
-          make_tarball "marina-${VERSION}-x86_64-apple-darwin" \
-            "dl/artifacts-macos/amd64/marina"
           make_tarball "marina-${VERSION}-aarch64-apple-darwin" \
             "dl/artifacts-macos/arm64/marina"
 
@@ -485,6 +487,9 @@ jobs:
           PPA_DEPLOY_KEY: ${{ secrets.PPA_DEPLOY_KEY }}
         run: |
           set -euo pipefail
+
+          ./update_mirror.bash
+
           apt-get update -y && apt-get install -y ssh
 
           # ── Collect .deb files by series ──────────────────────
@@ -728,15 +733,16 @@ jobs:
         run: |
           set -euo pipefail
           VERSION=$(toml get --raw Cargo.toml package.version)
+
+          ./update_mirror.bash
+
           apt-get update -y && apt-get install -y keychain
 
           ARM_SHA256=$(sha256sum "release/marina-${VERSION}-macos-arm64.tar.gz" | awk '{print $1}')
-          X86_SHA256=$(sha256sum "release/marina-${VERSION}-macos-amd64.tar.gz" | awk '{print $1}')
 
           sed \
             -e "s/VERSION_PLACEHOLDER/${VERSION}/g" \
             -e "s/ARM_SHA256_PLACEHOLDER/${ARM_SHA256}/g" \
-            -e "s/X86_SHA256_PLACEHOLDER/${X86_SHA256}/g" \
             packaging/homebrew/marina.rb > /tmp/marina.rb
 
           mkdir -p ~/.ssh
@@ -765,6 +771,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Deps
         run: |
+          ./update_mirror.bash
+
           apt-get update && apt-get install -y pkg-config cmake libclang-dev clang openssl libssl-dev libsqlite3-dev
           rustup toolchain uninstall stable
           rustup toolchain install stable

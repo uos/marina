@@ -3,7 +3,7 @@
 # creates the deb in the current dir
 
 # needed for creating the deb
-sudo apt-get install --no-install-recommends -y debhelper sed grep
+sudo apt update -y && sudo apt-get install --no-install-recommends -y debhelper sed grep
 
 # deps from the package.xml
 sudo apt-get install --no-install-recommends -y cargo libclang-dev python3-catkin-pkg-modules libssl-dev

@@ -1,6 +1,6 @@
 # Maintainer: Christopher Sieh (stelzo) <stelzo@steado.de>
-# Template file — CI replaces VERSION_PLACEHOLDER, ARM_SHA256_PLACEHOLDER,
-# and X86_SHA256_PLACEHOLDER before publishing to the tap.
+# Template file — CI replaces VERSION_PLACEHOLDER and ARM_SHA256_PLACEHOLDER
+# before publishing to the tap.
 class Marina < Formula
   desc "A dataset manager for robotics to organize, share, and discover datasets and metadata across storage backends."
   homepage "https://codeberg.org/stelzo/marina"
@@ -11,11 +11,6 @@ class Marina < Formula
     on_arm do
       url "https://uos-robotics.codeberg.page/ppa/bin/marina-#{version}-macos-arm64.tar.gz"
       sha256 "ARM_SHA256_PLACEHOLDER"
-    end
-
-    on_intel do
-      url "https://uos-robotics.codeberg.page/ppa/bin/marina-#{version}-macos-amd64.tar.gz"
-      sha256 "X86_SHA256_PLACEHOLDER"
     end
   end
 

@@ -91,6 +91,7 @@ manual_is_multiple_of = "allow" # rust 1.85 compatible
 strip = "symbols" # Significantly reduce binary size
 opt-level = "s"   # Optimize for size but keep some performance
 debug = 0
+panic = "abort"
 
 [profile.full-release]
 inherits = "release"
@@ -131,3 +132,6 @@ assets = [
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target }.tar.gz"
 pkg-fmt = "tgz"
 bin-dir = "{ name }-{ version }/{ bin }{ binary-ext }"
+
+[package.metadata.multivers.x86_64]
+cpus = ["x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4", "raptorlake"]
