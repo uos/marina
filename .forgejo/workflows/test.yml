@@ -12,7 +12,7 @@ env:
 
 jobs:
   sanity-check:
-    runs-on: ubuntu-dev-resolute-arm
+    runs-on: ubuntu-dev-resolute
     steps:
       - uses: actions/checkout@v4
       - name: Deps

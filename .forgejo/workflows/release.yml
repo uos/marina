@@ -14,11 +14,10 @@ permissions:
 
 env:
   RUST_FONTCONFIG_DLOPEN: 1
-  CARGO_BUILD_JOBS: 2
 
 jobs:
-  sanity-check:
-    runs-on: ubuntu-dev-resolute-arm
+  sanity:
+    runs-on: ubuntu-dev-resolute
     steps:
       - uses: actions/checkout@v4
       - name: Deps
@@ -35,19 +34,6 @@ jobs:
           cargo check --all-features
           cargo publish --dry-run
           cargo clippy --all-targets -- -D warnings
-
-  sanity:
-    needs:
-      - sanity-check
-    strategy:
-      matrix:
-        include:
-          - runner: macos-latest
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - name: Docker clean
-        run: |
-          docker system prune -af
 
   raw:
     needs:
@@ -215,7 +201,7 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
-            runner: ubuntu-dev-resolute-arm
+            runner: ubuntu-dev-resolute
             arch: amd64
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-dev-resolute-arm
@@ -274,15 +260,15 @@ jobs:
           - target: aarch64-apple-darwin # MacOS Apple Silicon
             runner: macos-latest
           - target: aarch64-unknown-linux-gnu # armv8 gnu (Jetson etc)
-            runner: ubuntu-dev-resolute-arm
+            runner: ubuntu-dev-resolute
           - target: x86_64-unknown-linux-gnu # x64 gnu
-            runner: ubuntu-dev-resolute-arm
+            runner: ubuntu-dev-resolute
           - target: x86_64-unknown-linux-musl # musl manylinux x64
-            runner: ubuntu-dev-resolute-arm
+            runner: ubuntu-dev-resolute
           - target: aarch64-unknown-linux-musl # musl manylinux armv8
-            runner: ubuntu-dev-resolute-arm
+            runner: ubuntu-dev-resolute
           - target: armv7-unknown-linux-musleabihf # musl manylinux armv7
-            runner: ubuntu-dev-resolute-arm
+            runner: ubuntu-dev-resolute
     runs-on: ${{ matrix.runner }}
     env:
       TARGET: ${{ matrix.target }}
@@ -335,7 +321,7 @@ jobs:
   tarball:
     needs:
       - clean-6-5
-    runs-on: ubuntu-dev-resolute-arm
+    runs-on: ubuntu-dev-resolute
     steps:
       - uses: actions/checkout@v4
 
@@ -417,7 +403,7 @@ jobs:
   release:
     needs:
       - tarball
-    runs-on: ubuntu-dev-resolute-arm
+    runs-on: ubuntu-dev-resolute
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@v4
@@ -485,7 +471,7 @@ jobs:
   publish-ppa:
     needs:
       - release
-    runs-on: ubuntu-dev-resolute-arm
+    runs-on: ubuntu-dev-resolute
     steps:
       - uses: actions/checkout@v4
 
@@ -723,7 +709,7 @@ jobs:
           shred -u /home/build/.ssh/aur_key
 
   homebrew:
-    runs-on: ubuntu-dev-resolute-arm
+    runs-on: ubuntu-dev-resolute
     needs:
       - publish-ppa
     if: startsWith(github.ref, 'refs/tags/')
@@ -774,7 +760,7 @@ jobs:
   publish-crates:
     needs:
       - release
-    runs-on: ubuntu-dev-resolute-arm
+    runs-on: ubuntu-dev-resolute
     steps:
       - uses: actions/checkout@v4
       - name: Deps
@@ -796,7 +782,7 @@ jobs:
   publish-pypi:
     needs:
       - release
-    runs-on: ubuntu-dev-resolute-arm
+    runs-on: ubuntu-dev-resolute
     steps:
       - name: Download CPU wheels
         uses: actions/download-artifact@v3

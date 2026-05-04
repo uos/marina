@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   deploy:
-    runs-on: ubuntu-dev-resolute-arm
+    runs-on: ubuntu-dev-resolute
     steps:
       - name: checkout code
         uses: actions/checkout@v6
