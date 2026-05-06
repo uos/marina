@@ -566,35 +566,25 @@ impl Marina {
         let key = bag.without_attachment().to_string();
 
         if !options.force {
-            // Fast path: stored hash + local dir present → skip without any network call.
-            if let Some(entry) = self.catalog.entries.get(&key) {
-                if entry.local_dir.exists() && entry.bundle_hash.is_some() {
-                    let cached_path = entry.local_dir.clone();
-                    progress.emit("pull", "already up to date");
-                    return Ok(cached_path);
-                }
-            }
-
-            // No stored hash (old entry) — fetch remote metadata to verify and migrate.
-            progress.emit("pull", "checking remote...");
+            progress.emit("pull", "checking remote hash...");
             let remote_info = driver
                 .bag_info(&bag.without_attachment())
                 .await
                 .ok()
                 .flatten();
 
-            if let Some(ref info) = remote_info {
+            if let Some(info) = remote_info.as_ref() {
                 if let Some(entry) = self.catalog.entries.get(&key) {
-                    if entry.local_dir.exists() && entry.packed_bytes == info.packed_bytes {
-                        let cached_path = entry.local_dir.clone();
-                        if let Some(rh) = &info.bundle_hash {
-                            if let Some(e) = self.catalog.entries.get_mut(&key) {
-                                e.bundle_hash = Some(rh.clone());
+                    if entry.local_dir.exists() {
+                        if let (Some(local_hash), Some(remote_hash)) =
+                            (entry.bundle_hash.as_ref(), info.bundle_hash.as_ref())
+                        {
+                            if local_hash == remote_hash {
+                                let cached_path = entry.local_dir.clone();
+                                progress.emit("pull", "already up to date");
+                                return Ok(cached_path);
                             }
-                            cache::save_catalog(&self.catalog)?;
                         }
-                        progress.emit("pull", "already up to date");
-                        return Ok(cached_path);
                     }
                 }
             }
