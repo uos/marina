@@ -1,6 +1,6 @@
 [package]
 name = "marina-python"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2024"
 
 [lib]

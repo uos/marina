@@ -21,6 +21,7 @@ use futures::future::join_all;
 use crate::model::bag_ref::BagRef;
 use crate::registry::driver::{BagInfo, PushMeta, RegistryDriver, RemoteDescriptor};
 use crate::registry::gdrive_auth;
+use crate::storage::config::RegistryDownloadMode;
 
 const DRIVE_FILES_API: &str = "https://www.googleapis.com/drive/v3/files";
 const DRIVE_UPLOAD_API: &str = "https://www.googleapis.com/upload/drive/v3/files";
@@ -40,6 +41,7 @@ pub struct GDriveRegistry {
     pub name: String,
     folder_id: String,
     token_env: Option<String>,
+    disable_ranged_download: bool,
     client: Client,
     token_cache: Arc<Mutex<Option<CachedToken>>>,
 }
@@ -166,7 +168,12 @@ fn pem_to_der(pem: &[u8]) -> Result<Vec<u8>> {
 }
 
 impl GDriveRegistry {
-    pub fn from_uri(name: &str, uri: &str, auth_env: Option<String>) -> Result<Self> {
+    pub fn from_uri(
+        name: &str,
+        uri: &str,
+        auth_env: Option<String>,
+        download_mode: RegistryDownloadMode,
+    ) -> Result<Self> {
         let folder_id = uri
             .strip_prefix("gdrive://")
             .ok_or_else(|| anyhow!("gdrive registry URI must start with gdrive://"))?
@@ -181,6 +188,7 @@ impl GDriveRegistry {
             name: name.to_string(),
             folder_id,
             token_env: auth_env,
+            disable_ranged_download: download_mode == RegistryDownloadMode::Streaming,
             client: Client::builder()
                 .connect_timeout(Duration::from_secs(30))
                 .timeout(Duration::from_secs(60 * 60))
@@ -795,6 +803,17 @@ impl GDriveRegistry {
                             continue;
                         }
 
+                        if status == StatusCode::OK {
+                            pb.finish_and_clear();
+                            return self
+                                .stream_response_to_path(
+                                    self.build_download_request(url, auth, api_key),
+                                    out,
+                                    title,
+                                )
+                                .await;
+                        }
+
                         return Err(anyhow!(
                             "ranged download failed for {} with status {}",
                             title,
@@ -850,6 +869,29 @@ impl GDriveRegistry {
     async fn download_file_to_path(&self, id: &str, out: &Path, title: &str) -> Result<()> {
         let auth = self.auth_header_optional().await?;
         let api_key = self.api_key_optional();
+
+        if self.disable_ranged_download {
+            if auth.is_none() && api_key.is_none() {
+                return self
+                    .stream_response_to_path(
+                        self.build_download_request(&public_download_url(id), None, None),
+                        out,
+                        title,
+                    )
+                    .await;
+            }
+            let url = format!(
+                "{}/{}?alt=media&supportsAllDrives=true",
+                DRIVE_FILES_API, id
+            );
+            return self
+                .stream_response_to_path(
+                    self.build_download_request(&url, auth.as_deref(), api_key.as_deref()),
+                    out,
+                    title,
+                )
+                .await;
+        }
 
         if auth.is_none() && api_key.is_none() {
             return self

@@ -16,6 +16,14 @@ pub struct RegistryConfig {
     pub kind: String,
     pub uri: String,
     pub auth_env: Option<String>,
+    pub download_mode: RegistryDownloadMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RegistryDownloadMode {
+    #[default]
+    Adaptive,
+    Streaming,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -371,12 +379,24 @@ fn parse_registries(user_vars: &VariableHistory) -> Result<Vec<RegistryConfig>> 
             Rhs::Val(Val::StringVal(s)) => Some(s),
             _ => None,
         });
+        let download_mode = reg_ns
+            .resolve("download_mode")?
+            .and_then(|r| match r {
+                Rhs::Val(Val::StringVal(s)) => match s.as_str() {
+                    "adaptive" => Some(RegistryDownloadMode::Adaptive),
+                    "streaming" => Some(RegistryDownloadMode::Streaming),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .unwrap_or(RegistryDownloadMode::Adaptive);
 
         result.push(RegistryConfig {
             name: ident,
             uri,
             kind,
             auth_env,
+            download_mode,
         });
     }
 
@@ -407,6 +427,9 @@ fn generate_registries_block(registries: &[RegistryConfig]) -> String {
         s.push_str(&format!("    kind = \"{}\"\n", reg.kind));
         if let Some(auth) = &reg.auth_env {
             s.push_str(&format!("    auth_env = \"{auth}\"\n"));
+        }
+        if reg.download_mode == RegistryDownloadMode::Streaming {
+            s.push_str("    download_mode = \"streaming\"\n");
         }
         s.push_str("  }");
     }

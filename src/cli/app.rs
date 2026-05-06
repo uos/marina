@@ -16,7 +16,7 @@ use crate::registry::driver::BagInfo;
 use crate::registry::gdrive_auth;
 use crate::storage::config::{
     self, ConfigArchiveCompression, ConfigMcapCompression, ConfigPointcloudMode, RegistryConfig,
-    TimeDisplay,
+    RegistryDownloadMode, TimeDisplay,
 };
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -779,6 +779,7 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                     kind: kind.clone(),
                     uri,
                     auth_env: args.auth_env,
+                    download_mode: RegistryDownloadMode::Adaptive,
                 })?;
                 println!("registry added: {} ({})", args.name, kind);
                 spawn_complete_refresh();
