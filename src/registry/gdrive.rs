@@ -751,6 +751,16 @@ impl GDriveRegistry {
             .bytes()
             .await
             .with_context(|| format!("failed reading initial ranged response for {}", title))?;
+        if html_error_hint(first_bytes.as_ref()).is_some() {
+            pb.finish_and_clear();
+            return self
+                .stream_response_to_path(
+                    self.build_download_request(url, auth, api_key),
+                    out,
+                    title,
+                )
+                .await;
+        }
         use std::io::Write;
         file.write_all(&first_bytes)?;
         let mut downloaded = first_bytes.len() as u64;
@@ -777,6 +787,20 @@ impl GDriveRegistry {
                             let bytes = resp.bytes().await.with_context(|| {
                                 format!("failed reading ranged chunk {} for {}", range, title)
                             })?;
+                            if let Some(kind) = html_error_hint(bytes.as_ref()) {
+                                pb.finish_and_clear();
+                                if kind == DownloadContentHint::GoogleDriveQuotaExceeded {
+                                    return Err(anyhow!(
+                                        "Google Drive quota exceeded while downloading {}. \
+                                         A later ranged chunk returned an HTML quota page instead of archive bytes.",
+                                        title
+                                    ));
+                                }
+                                return Err(anyhow!(
+                                    "downloaded ranged content for {} looks like HTML, not archive bytes",
+                                    title
+                                ));
+                            }
                             let received = bytes.len() as u64;
                             file.write_all(&bytes)?;
                             downloaded += received;
@@ -946,6 +970,22 @@ impl GDriveRegistry {
         let mut resp = resp;
         use std::io::Write;
         while let Some(chunk) = resp.chunk().await? {
+            if let Some(kind) = html_error_hint(chunk.as_ref()) {
+                if let Some(pb) = pb {
+                    pb.finish_and_clear();
+                }
+                if kind == DownloadContentHint::GoogleDriveQuotaExceeded {
+                    return Err(anyhow!(
+                        "Google Drive quota exceeded while downloading {}. \
+                         The response returned an HTML quota page instead of archive bytes.",
+                        title
+                    ));
+                }
+                return Err(anyhow!(
+                    "downloaded content for {} looks like HTML, not archive bytes",
+                    title
+                ));
+            }
             file.write_all(&chunk)?;
             if let Some(pb) = &pb {
                 pb.inc(chunk.len() as u64);
@@ -1429,4 +1469,25 @@ fn parse_query_name_contains(query: &str) -> Option<String> {
 
 fn public_download_url(id: &str) -> String {
     format!("https://drive.usercontent.google.com/download?id={id}&export=download&confirm=t")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DownloadContentHint {
+    GoogleDriveQuotaExceeded,
+    HtmlResponse,
+}
+
+fn html_error_hint(bytes: &[u8]) -> Option<DownloadContentHint> {
+    let head = String::from_utf8_lossy(bytes).to_ascii_lowercase();
+    let looks_like_html = head.contains("<!doctype html")
+        || head.contains("<html")
+        || head.contains("<head>")
+        || head.contains("<body");
+    if !looks_like_html {
+        return None;
+    }
+    if head.contains("google drive") && head.contains("quota exceeded") {
+        return Some(DownloadContentHint::GoogleDriveQuotaExceeded);
+    }
+    Some(DownloadContentHint::HtmlResponse)
 }

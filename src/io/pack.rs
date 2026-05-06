@@ -112,6 +112,41 @@ fn is_gzip_archive(path: &Path) -> Result<bool> {
     Ok(magic == [0x1f, 0x8b])
 }
 
+fn inspect_downloaded_archive(path: &Path) -> Result<()> {
+    let mut file =
+        File::open(path).with_context(|| format!("cannot open archive {}", path.display()))?;
+    let mut buf = vec![0u8; 4096];
+    let read = file
+        .read(&mut buf)
+        .with_context(|| format!("cannot read archive header {}", path.display()))?;
+    buf.truncate(read);
+    if buf.is_empty() {
+        return Err(anyhow!("downloaded archive is empty: {}", path.display()));
+    }
+
+    let head = String::from_utf8_lossy(&buf).to_ascii_lowercase();
+    let looks_like_html = head.contains("<!doctype html")
+        || head.contains("<html")
+        || head.contains("<head>")
+        || head.contains("<body");
+    if !looks_like_html {
+        return Ok(());
+    }
+
+    if head.contains("google drive") && head.contains("quota exceeded") {
+        return Err(anyhow!(
+            "downloaded file is a Google Drive quota page, not an archive. \
+             The registry file likely exceeded public download limits; try again later \
+             or pull with authenticated Google Drive access (`marina registry auth <registry>`)."
+        ));
+    }
+
+    Err(anyhow!(
+        "downloaded file looks like HTML, not a tar archive: {}",
+        path.display()
+    ))
+}
+
 fn append_staging_bundle<W: Write>(
     builder: &mut Builder<W>,
     staging_dir: &Path,
@@ -459,6 +494,7 @@ pub fn unpack_bag_with_progress_and_options(
         "unpack",
         format!("extracting archive {}", archive_path.display()),
     );
+    inspect_downloaded_archive(archive_path)?;
     fs::create_dir_all(out_dir)?;
     let archive_is_gzip = is_gzip_archive(archive_path)?;
     if archive_is_gzip {
