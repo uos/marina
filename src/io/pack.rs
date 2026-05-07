@@ -509,6 +509,8 @@ pub fn unpack_bag_with_progress_and_options(
         let mut archive = Archive::new(tar_file);
         archive.unpack(out_dir)?;
     }
+    fs::remove_file(archive_path)
+        .with_context(|| format!("failed to remove archive {}", archive_path.display()))?;
 
     let bundle = out_dir.join("bundle");
     if bundle.exists() {

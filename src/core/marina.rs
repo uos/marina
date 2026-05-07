@@ -620,7 +620,6 @@ impl Marina {
             },
             progress,
         )?;
-        fs::remove_file(&packed_file)?;
 
         self.catalog.entries.insert(
             bag.without_attachment().to_string(),
