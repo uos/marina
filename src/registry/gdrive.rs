@@ -1,4 +1,4 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
@@ -744,26 +744,22 @@ impl GDriveRegistry {
         }
 
         let pb = transfer_bar(total, title);
-        let mut file = fs::File::create(out)
-            .with_context(|| format!("failed creating output file {}", out.display()))?;
-
-        let first_bytes = probe
-            .bytes()
-            .await
-            .with_context(|| format!("failed reading initial ranged response for {}", title))?;
-        if html_error_hint(first_bytes.as_ref()).is_some() {
-            pb.finish_and_clear();
-            return self
-                .stream_response_to_path(
-                    self.build_download_request(url, auth, api_key),
-                    out,
-                    title,
-                )
-                .await;
+        let mut existing = fs::metadata(out).map(|m| m.len()).unwrap_or(0);
+        if existing > total {
+            existing = 0;
         }
+        let mut file = if existing > 0 {
+            OpenOptions::new()
+                .append(true)
+                .open(out)
+                .with_context(|| format!("failed opening output file {}", out.display()))?
+        } else {
+            fs::File::create(out)
+                .with_context(|| format!("failed creating output file {}", out.display()))?
+        };
+
         use std::io::Write;
-        file.write_all(&first_bytes)?;
-        let mut downloaded = first_bytes.len() as u64;
+        let mut downloaded = existing;
         pb.set_position(downloaded.min(total));
 
         let mut chunk_size = RESUMABLE_CHUNK_START_BYTES as u64;
@@ -827,7 +823,7 @@ impl GDriveRegistry {
                             continue;
                         }
 
-                        if status == StatusCode::OK {
+                        if status == StatusCode::OK && downloaded == 0 {
                             pb.finish_and_clear();
                             return self
                                 .stream_response_to_path(
@@ -1042,6 +1038,10 @@ impl GDriveRegistry {
 
 #[async_trait]
 impl RegistryDriver for GDriveRegistry {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     async fn push(
         &self,
         _registry_name: &str,

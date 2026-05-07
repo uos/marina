@@ -151,6 +151,7 @@ fn compress_and_decompress_db3_pointcloud_lossless() -> Result<()> {
         &Db3TransformOptions {
             pointcloud_mode: PointCloudCompressionMode::Lossless,
             pointcloud_precision_m: 0.001,
+            vacuum_after_transform: true,
         },
         &mut progress,
     )?;
@@ -191,6 +192,7 @@ fn compress_and_decompress_db3_pointcloud_lossy() -> Result<()> {
         &Db3TransformOptions {
             pointcloud_mode: PointCloudCompressionMode::Lossy,
             pointcloud_precision_m: 0.001,
+            vacuum_after_transform: true,
         },
         &mut progress,
     )?;
@@ -221,6 +223,7 @@ fn compress_db3_noop_on_no_pointcloud_topics() -> Result<()> {
         &Db3TransformOptions {
             pointcloud_mode: PointCloudCompressionMode::Lossless,
             pointcloud_precision_m: 0.001,
+            vacuum_after_transform: true,
         },
         &mut progress,
     )?;
@@ -250,6 +253,7 @@ fn compress_and_decompress_db3_message_count_matches() -> Result<()> {
         &Db3TransformOptions {
             pointcloud_mode: PointCloudCompressionMode::Lossless,
             pointcloud_precision_m: 0.001,
+            vacuum_after_transform: true,
         },
         &mut progress,
     )?;
@@ -282,6 +286,7 @@ fn compress_and_decompress_real_fixture_lossless() -> Result<()> {
         &Db3TransformOptions {
             pointcloud_mode: PointCloudCompressionMode::Lossless,
             pointcloud_precision_m: 0.001,
+            vacuum_after_transform: true,
         },
         &mut progress,
     )?;
@@ -321,6 +326,7 @@ fn compress_and_decompress_real_fixture_lossy() -> Result<()> {
         &Db3TransformOptions {
             pointcloud_mode: PointCloudCompressionMode::Lossy,
             pointcloud_precision_m: 0.001,
+            vacuum_after_transform: true,
         },
         &mut progress,
     )?;

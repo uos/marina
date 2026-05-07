@@ -176,7 +176,9 @@ struct PushArgs {
     #[arg(long)]
     dry_run: bool,
     #[arg(long)]
-    move_to_cache: bool,
+    copy_to_cache: bool,
+    #[arg(long, help = "Skip SQLite VACUUM after DB3 pointcloud compression")]
+    skip_db3_vacuum: bool,
     #[arg(long)]
     no_progress: bool,
 }
@@ -1076,8 +1078,9 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                         config_archive_compression_to_core(compression.packed_archive_compression)
                     }),
                 write_http_index: args.write_http_index,
+                db3_vacuum: !args.skip_db3_vacuum,
                 dry_run: args.dry_run,
-                move_source_to_cache: args.move_to_cache,
+                move_source_to_cache: !args.copy_to_cache,
             };
             if !args.no_progress {
                 let mut stdout = std::io::stdout();

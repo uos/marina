@@ -475,6 +475,10 @@ use async_trait::async_trait;
 
 #[async_trait]
 impl RegistryDriver for SshRegistry {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     async fn push(
         &self,
         _registry_name: &str,

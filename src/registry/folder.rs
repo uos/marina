@@ -86,32 +86,13 @@ impl FolderRegistry {
         self.object_dir(bag).join("bundle.marina.tar.gz")
     }
 
-    fn read_meta(&self, bag: &BagRef) -> Result<MetaFile> {
-        let p = self.meta_path(bag);
-        let text = fs::read_to_string(&p)
-            .with_context(|| format!("failed to read metadata {}", p.display()))?;
-        let meta: MetaFile = serde_json::from_str(&text)
-            .with_context(|| format!("failed to parse metadata {}", p.display()))?;
-        Ok(meta)
+    pub fn source_bundle_path(&self, bag: &BagRef) -> PathBuf {
+        self.data_path(bag)
     }
-}
 
-#[async_trait]
-impl RegistryDriver for FolderRegistry {
-    async fn push(
-        &self,
-        _registry_name: &str,
-        bag: &BagRef,
-        packed_file: &Path,
-        meta: &PushMeta,
-    ) -> Result<()> {
+    pub fn finalize_existing_bundle(&self, bag: &BagRef, meta: &PushMeta) -> Result<()> {
         let target_dir = self.object_dir(bag);
-        if target_dir.exists() {
-            fs::remove_dir_all(&target_dir)?;
-        }
         fs::create_dir_all(&target_dir)?;
-
-        fs::copy(packed_file, self.data_path(bag))?;
 
         let meta_file = MetaFile {
             bag: bag.clone().without_attachment(),
@@ -128,6 +109,40 @@ impl RegistryDriver for FolderRegistry {
             serde_json::to_string_pretty(&meta_file)?,
         )?;
         Ok(())
+    }
+
+    fn read_meta(&self, bag: &BagRef) -> Result<MetaFile> {
+        let p = self.meta_path(bag);
+        let text = fs::read_to_string(&p)
+            .with_context(|| format!("failed to read metadata {}", p.display()))?;
+        let meta: MetaFile = serde_json::from_str(&text)
+            .with_context(|| format!("failed to parse metadata {}", p.display()))?;
+        Ok(meta)
+    }
+}
+
+#[async_trait]
+impl RegistryDriver for FolderRegistry {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    async fn push(
+        &self,
+        _registry_name: &str,
+        bag: &BagRef,
+        packed_file: &Path,
+        meta: &PushMeta,
+    ) -> Result<()> {
+        let target_dir = self.object_dir(bag);
+        if target_dir.exists() {
+            fs::remove_dir_all(&target_dir)?;
+        }
+        fs::create_dir_all(&target_dir)?;
+
+        fs::copy(packed_file, self.data_path(bag))?;
+
+        self.finalize_existing_bundle(bag, meta)
     }
 
     async fn bag_info(&self, bag: &BagRef) -> Result<Option<BagInfo>> {

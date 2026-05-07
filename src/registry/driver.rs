@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
@@ -42,6 +43,8 @@ pub struct BagInfo {
 
 #[async_trait]
 pub trait RegistryDriver: Send + Sync {
+    fn as_any(&self) -> &dyn Any;
+
     async fn push(
         &self,
         registry_name: &str,

@@ -22,6 +22,7 @@ pub struct Db3TransformStats {
 pub struct Db3TransformOptions {
     pub pointcloud_mode: PointCloudCompressionMode,
     pub pointcloud_precision_m: f64,
+    pub vacuum_after_transform: bool,
 }
 
 pub fn has_marina_pointcloud_metadata(db3_path: &Path) -> Result<bool> {
@@ -179,13 +180,17 @@ pub fn compress_db3_for_push(
                 .context("failed committing db3 transaction")?;
             pb.finish_and_clear();
 
-            if !bar_visible {
-                progress.emit("pack", "vacuuming db3 to reclaim freed pages");
-            }
-            if let Err(err) = conn.execute_batch("VACUUM") {
+            if options.vacuum_after_transform {
                 if !bar_visible {
-                    progress.emit("pack", format!("db3 vacuum skipped: {err}"));
+                    progress.emit("pack", "vacuuming db3 to reclaim freed pages");
                 }
+                if let Err(err) = conn.execute_batch("VACUUM") {
+                    if !bar_visible {
+                        progress.emit("pack", format!("db3 vacuum skipped: {err}"));
+                    }
+                }
+            } else if !bar_visible {
+                progress.emit("pack", "skipping db3 vacuum");
             }
 
             if !bar_visible {

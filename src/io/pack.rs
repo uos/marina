@@ -1,6 +1,7 @@
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::{collections::HashMap, ffi::OsString};
 
 #[cfg(unix)]
 fn available_space(path: &Path) -> Result<u64> {
@@ -54,10 +55,21 @@ use crate::io::mcap_transform::{McapChunkCompression, PullTransformOptions, Push
 use crate::io::transform_progress::make_byte_progress_bar;
 use crate::progress::ProgressReporter;
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct PackOptions {
     pub transform: PushTransformOptions,
     pub archive_compression: ArchiveCompression,
+    pub db3_vacuum: bool,
+}
+
+impl Default for PackOptions {
+    fn default() -> Self {
+        Self {
+            transform: PushTransformOptions::default(),
+            archive_compression: ArchiveCompression::default(),
+            db3_vacuum: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -147,9 +159,10 @@ fn inspect_downloaded_archive(path: &Path) -> Result<()> {
     ))
 }
 
-fn append_staging_bundle<W: Write>(
+fn append_source_bundle<W: Write>(
     builder: &mut Builder<W>,
-    staging_dir: &Path,
+    source_root: &Path,
+    overrides: &HashMap<PathBuf, PathBuf>,
     pb: &ProgressBar,
     total_bytes: u64,
     total_files: u64,
@@ -160,27 +173,7 @@ fn append_staging_bundle<W: Write>(
     let mut rel_dirs: Vec<PathBuf> = Vec::new();
     let mut rel_files: Vec<PathBuf> = Vec::new();
 
-    for entry in walkdir::WalkDir::new(staging_dir) {
-        let entry = entry?;
-        let path = entry.path();
-        let rel = path.strip_prefix(staging_dir).with_context(|| {
-            format!(
-                "failed to strip staging prefix {} from {}",
-                staging_dir.display(),
-                path.display()
-            )
-        })?;
-
-        if rel.as_os_str().is_empty() {
-            continue;
-        }
-
-        if path.is_dir() {
-            rel_dirs.push(rel.to_path_buf());
-        } else {
-            rel_files.push(rel.to_path_buf());
-        }
-    }
+    collect_source_entries(source_root, &mut rel_dirs, &mut rel_files)?;
 
     rel_dirs.sort();
     rel_files.sort();
@@ -192,7 +185,10 @@ fn append_staging_bundle<W: Write>(
 
     let mut packed_files = 0u64;
     for rel in &rel_files {
-        let path = staging_dir.join(rel);
+        let path = overrides
+            .get(rel)
+            .cloned()
+            .unwrap_or(source_path_for_rel(source_root, rel)?);
         let archive_path = Path::new("bundle").join(rel);
 
         let metadata = fs::metadata(&path)?;
@@ -232,6 +228,79 @@ fn append_staging_bundle<W: Write>(
     }
 
     Ok(packed_files)
+}
+
+fn collect_source_entries(
+    source_root: &Path,
+    rel_dirs: &mut Vec<PathBuf>,
+    rel_files: &mut Vec<PathBuf>,
+) -> Result<()> {
+    if source_root.is_file() {
+        let name = source_root
+            .file_name()
+            .ok_or_else(|| anyhow!("source file has no file name: {}", source_root.display()))?;
+        rel_files.push(PathBuf::from(name));
+        return Ok(());
+    }
+
+    for entry in walkdir::WalkDir::new(source_root) {
+        let entry = entry?;
+        let path = entry.path();
+        let rel = path.strip_prefix(source_root).with_context(|| {
+            format!(
+                "failed to strip source prefix {} from {}",
+                source_root.display(),
+                path.display()
+            )
+        })?;
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+        if path.is_dir() {
+            rel_dirs.push(rel.to_path_buf());
+        } else {
+            rel_files.push(rel.to_path_buf());
+        }
+    }
+    Ok(())
+}
+
+fn source_path_for_rel(source_root: &Path, rel: &Path) -> Result<PathBuf> {
+    if source_root.is_file() {
+        let name = source_root
+            .file_name()
+            .ok_or_else(|| anyhow!("source file has no file name: {}", source_root.display()))?;
+        if rel == Path::new(name) {
+            Ok(source_root.to_path_buf())
+        } else {
+            Err(anyhow!(
+                "relative path {} does not match source file {}",
+                rel.display(),
+                source_root.display()
+            ))
+        }
+    } else {
+        Ok(source_root.join(rel))
+    }
+}
+
+fn source_rel_path(source_root: &Path, source_file: &Path) -> Result<PathBuf> {
+    if source_root.is_file() {
+        Ok(PathBuf::from(source_file.file_name().ok_or_else(|| {
+            anyhow!("source file has no file name: {}", source_file.display())
+        })?))
+    } else {
+        Ok(source_file
+            .strip_prefix(source_root)
+            .with_context(|| {
+                format!(
+                    "failed to strip source prefix {} from {}",
+                    source_root.display(),
+                    source_file.display()
+                )
+            })?
+            .to_path_buf())
+    }
 }
 
 fn append_dir_header<W: Write>(builder: &mut Builder<W>, archive_path: &Path) -> Result<()> {
@@ -288,25 +357,21 @@ pub fn pack_bag_with_progress_and_options(
         == mcap_transform::PointCloudCompressionMode::Disabled
         && options.transform.output_mcap_compression == McapChunkCompression::None;
 
-    // Staging (copying source to a temp dir) is only needed when transforms must be applied
-    // in-place, or when the source is a single file (so the archive root contains the file,
-    // not the parent directory).
+    let mut transform_input_bytes = 0u64;
+    if let Some(source_mcap) = source.mcap.as_ref() {
+        if !skip_push_transform {
+            transform_input_bytes += fs::metadata(source_mcap)?.len();
+        }
+    }
     #[cfg(feature = "db3")]
-    let needs_staging = (source.mcap.is_some() && !skip_push_transform)
-        || source.root.is_file()
-        || (source.has_db3
-            && options.transform.pointcloud_mode
-                != mcap_transform::PointCloudCompressionMode::Disabled);
-    #[cfg(not(feature = "db3"))]
-    let needs_staging = (source.mcap.is_some() && !skip_push_transform) || source.root.is_file();
+    if source.has_db3 && options.transform.pointcloud_mode != PointCloudCompressionMode::Disabled {
+        for db3_path in find_all_db3(&source.root)? {
+            transform_input_bytes += fs::metadata(&db3_path)?.len();
+        }
+    }
 
-    // Check available space: bundle ≈ bag size (assuming no compression benefit).
-    // If staging is needed, the staging copy and the bundle coexist on the same filesystem.
-    let required_space = if needs_staging {
-        source.original_bytes * 2
-    } else {
-        source.original_bytes
-    };
+    // Bundle output plus temporary transformed files.
+    let required_space = source.original_bytes.saturating_add(transform_input_bytes);
     let avail = available_space(parent)?;
     if avail < required_space {
         let missing = required_space - avail;
@@ -319,102 +384,80 @@ pub fn pack_bag_with_progress_and_options(
         ));
     }
 
-    let (pack_dir, staging_is_temp) = if needs_staging {
-        progress.emit(
-            "pack",
-            format!(
-                "staging dataset directory from {}",
-                source.root.as_path().display()
-            ),
-        );
-        let staging_dir = parent.join("staging_push_bundle");
-        if staging_dir.exists() {
-            fs::remove_dir_all(&staging_dir)?;
+    let mut transform_tmp: Option<tempfile::TempDir> = None;
+    let mut overrides: HashMap<PathBuf, PathBuf> = HashMap::new();
+
+    if let Some(source_mcap) = source.mcap.as_ref() {
+        if skip_push_transform {
+            progress.emit(
+                "pack",
+                "skipping MCAP rewrite (pointcloud + chunk compression disabled)",
+            );
+        } else {
+            let tmp = tempfile::Builder::new()
+                .prefix("marina_pack_transform_")
+                .tempdir_in(parent)?;
+            let tmp_mcap = tmp.path().join("transformed.mcap");
+            mcap_transform::compress_mcap_for_push_with_progress(
+                source_mcap,
+                &tmp_mcap,
+                options.transform,
+                progress,
+            )?;
+            let rel = source_rel_path(&source.root, source_mcap)?;
+            overrides.insert(rel, tmp_mcap);
+            transform_tmp = Some(tmp);
         }
-        fs::create_dir_all(&staging_dir)?;
-        if source.root.is_file() {
-            let file_name = source
-                .root
-                .file_name()
-                .ok_or_else(|| anyhow!("source mcap file has no file name"))?;
-            fs::copy(&source.root, staging_dir.join(file_name)).with_context(|| {
+    }
+
+    #[cfg(feature = "db3")]
+    if source.has_db3 && options.transform.pointcloud_mode != PointCloudCompressionMode::Disabled {
+        let tmp = if let Some(existing) = transform_tmp.take() {
+            existing
+        } else {
+            tempfile::Builder::new()
+                .prefix("marina_pack_transform_")
+                .tempdir_in(parent)?
+        };
+
+        for db3_path in find_all_db3(&source.root)? {
+            let rel = source_rel_path(&source.root, &db3_path)?;
+            let key = rel.as_os_str().to_string_lossy().replace(['/', '\\'], "__");
+            let tmp_db3 = tmp.path().join(OsString::from(format!("db3_{key}.db3")));
+            fs::copy(&db3_path, &tmp_db3).with_context(|| {
                 format!(
-                    "failed to stage source mcap file {}",
-                    source.root.as_path().display()
+                    "failed to create temporary transformed db3 copy from {}",
+                    db3_path.display()
                 )
             })?;
-        } else {
-            copy_dir(&source.root, &staging_dir)?;
+            db3_transform::compress_db3_for_push(
+                &tmp_db3,
+                &Db3TransformOptions {
+                    pointcloud_mode: options.transform.pointcloud_mode,
+                    pointcloud_precision_m: options.transform.pointcloud_precision_m,
+                    vacuum_after_transform: options.db3_vacuum,
+                },
+                progress,
+            )?;
+            overrides.insert(rel, tmp_db3);
         }
+        transform_tmp = Some(tmp);
+    }
 
-        if let Some(source_mcap) = source.mcap.as_ref() {
-            let mcap_rel = if source.root.is_file() {
-                PathBuf::from(
-                    source_mcap
-                        .file_name()
-                        .ok_or_else(|| anyhow!("mcap file has no file name"))?,
-                )
-            } else {
-                source_mcap
-                    .strip_prefix(&source.root)
-                    .with_context(|| {
-                        format!(
-                            "{} is outside {}",
-                            source_mcap.display(),
-                            source.root.display()
-                        )
-                    })?
-                    .to_path_buf()
-            };
-            let staged_mcap = staging_dir.join(mcap_rel);
-            let transformed_mcap = staging_dir.join(".marina_transform.mcap");
-            if skip_push_transform {
-                progress.emit(
-                    "pack",
-                    "skipping MCAP rewrite (pointcloud + chunk compression disabled)",
-                );
-            } else {
-                mcap_transform::compress_mcap_for_push_with_progress(
-                    &staged_mcap,
-                    &transformed_mcap,
-                    options.transform,
-                    progress,
-                )?;
-                fs::rename(&transformed_mcap, &staged_mcap)?;
-            }
-        }
-        #[cfg(feature = "db3")]
-        if source.has_db3
-            && options.transform.pointcloud_mode != PointCloudCompressionMode::Disabled
-        {
-            for db3_path in find_all_db3(&staging_dir)? {
-                db3_transform::compress_db3_for_push(
-                    &db3_path,
-                    &Db3TransformOptions {
-                        pointcloud_mode: options.transform.pointcloud_mode,
-                        pointcloud_precision_m: options.transform.pointcloud_precision_m,
-                    },
-                    progress,
-                )?;
-            }
-        }
-
-        (staging_dir, true)
-    } else {
-        (source.root.clone(), false)
-    };
-
-    progress.emit("pack", "compressing staged folder to marina archive");
+    progress.emit("pack", "packing dataset to marina archive");
 
     let mut total_bytes = 0u64;
     let mut total_files = 0u64;
-    for entry in walkdir::WalkDir::new(&pack_dir) {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_file() {
-            total_files += 1;
-            total_bytes += fs::metadata(path)?.len();
-        }
+    let mut rel_dirs: Vec<PathBuf> = Vec::new();
+    let mut rel_files: Vec<PathBuf> = Vec::new();
+    collect_source_entries(&source.root, &mut rel_dirs, &mut rel_files)?;
+    for rel in &rel_files {
+        let path = overrides
+            .get(rel)
+            .cloned()
+            .unwrap_or(source_path_for_rel(&source.root, rel)?);
+        total_files += 1;
+        total_bytes += fs::metadata(path)?.len();
     }
 
     let pb = make_byte_progress_bar(total_bytes, format!("packing {} file(s)", total_files));
@@ -424,9 +467,10 @@ pub fn pack_bag_with_progress_and_options(
             let tar_gz = File::create(out_file)?;
             let encoder = GzBuilder::new().mtime(0).write(tar_gz, Compression::best());
             let mut builder = Builder::new(encoder);
-            append_staging_bundle(
+            append_source_bundle(
                 &mut builder,
-                &pack_dir,
+                &source.root,
+                &overrides,
                 &pb,
                 total_bytes,
                 total_files,
@@ -438,9 +482,10 @@ pub fn pack_bag_with_progress_and_options(
         ArchiveCompression::None => {
             let tar_file = File::create(out_file)?;
             let mut builder = Builder::new(tar_file);
-            append_staging_bundle(
+            append_source_bundle(
                 &mut builder,
-                &pack_dir,
+                &source.root,
+                &overrides,
                 &pb,
                 total_bytes,
                 total_files,
@@ -454,10 +499,7 @@ pub fn pack_bag_with_progress_and_options(
         pb.finish_and_clear();
     }
 
-    if staging_is_temp {
-        progress.emit("pack", "cleaning temporary staging files");
-        fs::remove_dir_all(&pack_dir)?;
-    }
+    drop(transform_tmp);
 
     let packed_bytes = fs::metadata(out_file)?.len();
     Ok(PackedMeta {
@@ -502,12 +544,12 @@ pub fn unpack_bag_with_progress_and_options(
             .with_context(|| format!("cannot open archive {}", archive_path.display()))?;
         let decoder = GzDecoder::new(tar_gz);
         let mut archive = Archive::new(decoder);
-        archive.unpack(out_dir)?;
+        extract_archive_with_restore(&mut archive, out_dir, options, progress)?;
     } else {
         let tar_file = File::open(archive_path)
             .with_context(|| format!("cannot open archive {}", archive_path.display()))?;
         let mut archive = Archive::new(tar_file);
-        archive.unpack(out_dir)?;
+        extract_archive_with_restore(&mut archive, out_dir, options, progress)?;
     }
     fs::remove_file(archive_path)
         .with_context(|| format!("failed to remove archive {}", archive_path.display()))?;
@@ -530,25 +572,7 @@ pub fn unpack_bag_with_progress_and_options(
         fs::remove_dir_all(bundle)?;
     }
 
-    if let Some(mcap_file) = find_first_mcap(out_dir)? {
-        let has_cloudini_channels = mcap_transform::has_cloudini_pointcloud_metadata(&mcap_file)?;
-        let skip_pull_transform = options.transform.output_mcap_compression
-            == McapChunkCompression::None
-            && !has_cloudini_channels;
-
-        if skip_pull_transform {
-            progress.emit("unpack", "skipping MCAP restore");
-        } else {
-            let decoded = out_dir.join(".marina_restored.mcap");
-            mcap_transform::decompress_mcap_after_pull_with_progress(
-                &mcap_file,
-                &decoded,
-                options.transform,
-                progress,
-            )?;
-            fs::rename(decoded, mcap_file)?;
-        }
-    } else if has_any_db3(out_dir)? {
+    if has_any_db3(out_dir)? {
         #[cfg(feature = "db3")]
         {
             let db3_files = find_all_db3(out_dir)?;
@@ -567,6 +591,73 @@ pub fn unpack_bag_with_progress_and_options(
         );
     }
     progress.emit("unpack", "unpack complete");
+
+    Ok(())
+}
+
+fn extract_archive_with_restore<R: Read>(
+    archive: &mut Archive<R>,
+    out_dir: &Path,
+    options: UnpackOptions,
+    progress: &mut ProgressReporter<'_>,
+) -> Result<()> {
+    let mut restored_any_mcap = false;
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let rel = entry.path()?.into_owned();
+        let out_path = out_dir.join(&rel);
+
+        if entry.header().entry_type().is_dir() {
+            fs::create_dir_all(&out_path)?;
+            continue;
+        }
+
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let is_mcap = out_path.extension().and_then(|e| e.to_str()) == Some("mcap");
+        if is_mcap {
+            let file_name = out_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| anyhow!("invalid mcap file name for {}", out_path.display()))?;
+            let extracted_tmp = out_path.with_file_name(format!(".{}.marina_extracted", file_name));
+            if extracted_tmp.exists() {
+                fs::remove_file(&extracted_tmp)?;
+            }
+            entry.unpack(&extracted_tmp)?;
+
+            let has_cloudini_channels =
+                mcap_transform::has_cloudini_pointcloud_metadata(&extracted_tmp)?;
+            let skip_pull_transform = options.transform.output_mcap_compression
+                == McapChunkCompression::None
+                && !has_cloudini_channels;
+            if skip_pull_transform {
+                fs::rename(&extracted_tmp, &out_path)?;
+                progress.emit(
+                    "unpack",
+                    format!("skipping MCAP restore for {}", rel.display()),
+                );
+            } else {
+                mcap_transform::decompress_mcap_after_pull_with_progress(
+                    &extracted_tmp,
+                    &out_path,
+                    options.transform,
+                    progress,
+                )?;
+                fs::remove_file(&extracted_tmp)?;
+                restored_any_mcap = true;
+            }
+            continue;
+        }
+
+        entry.unpack(&out_path)?;
+    }
+
+    if !restored_any_mcap {
+        progress.emit("unpack", "no MCAP restore needed during extraction");
+    }
 
     Ok(())
 }
@@ -593,45 +684,6 @@ fn move_path(src: &PathBuf, dst: &PathBuf) -> Result<()> {
             Ok(())
         }
     }
-}
-
-fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
-    if !src.exists() {
-        return Err(anyhow!("source does not exist: {}", src.display()));
-    }
-    fs::create_dir_all(dst)?;
-    for entry in walkdir::WalkDir::new(src) {
-        let entry = entry?;
-        let path = entry.path();
-        let rel = path.strip_prefix(src).with_context(|| {
-            format!(
-                "failed to strip prefix {} from {}",
-                src.display(),
-                path.display()
-            )
-        })?;
-        let target = dst.join(rel);
-        if path.is_dir() {
-            fs::create_dir_all(&target)?;
-        } else {
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::copy(path, &target)?;
-        }
-    }
-    Ok(())
-}
-
-fn find_first_mcap(root: &Path) -> Result<Option<PathBuf>> {
-    for entry in walkdir::WalkDir::new(root) {
-        let entry = entry?;
-        let p = entry.path();
-        if p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("mcap") {
-            return Ok(Some(p.to_path_buf()));
-        }
-    }
-    Ok(None)
 }
 
 #[cfg(feature = "db3")]

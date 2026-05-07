@@ -1,4 +1,4 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::time::Duration;
@@ -128,16 +128,34 @@ impl HttpRegistry {
         title: &str,
         size_hint: Option<u64>,
     ) -> Result<u64> {
-        let resp = self
-            .client
-            .get(url)
+        let mut existing = fs::metadata(out).map(|m| m.len()).unwrap_or(0);
+        let mut req = self.client.get(url);
+        if existing > 0 {
+            req = req.header(reqwest::header::RANGE, format!("bytes={existing}-"));
+        }
+        let resp = req
             .send()
             .await
-            .with_context(|| format!("failed downloading {}", title))?
+            .with_context(|| format!("failed downloading {}", title))?;
+        let status = resp.status();
+        if status == StatusCode::RANGE_NOT_SATISFIABLE {
+            // Local file is likely complete already.
+            return Ok(existing);
+        }
+        let resp = resp
             .error_for_status()
             .with_context(|| format!("download failed for {}", title))?;
 
-        let total = resp.content_length().or(size_hint).unwrap_or(0);
+        // If server ignored range and returned full content, restart from scratch.
+        if existing > 0 && status != StatusCode::PARTIAL_CONTENT {
+            existing = 0;
+        }
+
+        let total = resp
+            .content_length()
+            .map(|n| n + existing)
+            .or(size_hint)
+            .unwrap_or(0);
         let hidden = !std::io::stdout().is_terminal();
         let pb = if total > 0 {
             let pb = ProgressBar::new(total);
@@ -151,6 +169,9 @@ impl HttpRegistry {
                 .unwrap_or_else(|_| ProgressStyle::default_bar()),
             );
             pb.set_message(title.to_string());
+            if existing > 0 {
+                pb.set_position(existing.min(total));
+            }
             Some(pb)
         } else {
             let pb = ProgressBar::new_spinner();
@@ -170,10 +191,17 @@ impl HttpRegistry {
         if let Some(parent) = out.parent() {
             fs::create_dir_all(parent)?;
         }
-        let mut file = fs::File::create(out)
-            .with_context(|| format!("failed creating output file {}", out.display()))?;
+        let mut file = if existing > 0 {
+            OpenOptions::new()
+                .append(true)
+                .open(out)
+                .with_context(|| format!("failed opening output file {}", out.display()))?
+        } else {
+            fs::File::create(out)
+                .with_context(|| format!("failed creating output file {}", out.display()))?
+        };
 
-        let mut downloaded = 0u64;
+        let mut downloaded = existing;
         let mut resp = resp;
         while let Some(chunk) = resp.chunk().await? {
             file.write_all(&chunk)?;
@@ -208,6 +236,10 @@ impl HttpRegistry {
 
 #[async_trait]
 impl RegistryDriver for HttpRegistry {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     async fn push(
         &self,
         _registry_name: &str,

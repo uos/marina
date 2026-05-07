@@ -129,6 +129,8 @@ pub struct PushOptions {
     pub packed_mcap_compression: McapChunkCompression,
     pub packed_archive_compression: pack::ArchiveCompression,
     pub write_http_index: bool,
+    /// Run SQLite VACUUM after DB3 pointcloud compression.
+    pub db3_vacuum: bool,
     pub dry_run: bool,
     /// Move the source into the cache instead of copying it.
     pub move_source_to_cache: bool,
@@ -142,8 +144,9 @@ impl Default for PushOptions {
             packed_mcap_compression: McapChunkCompression::Zstd,
             packed_archive_compression: pack::ArchiveCompression::Gzip,
             write_http_index: false,
+            db3_vacuum: true,
             dry_run: false,
-            move_source_to_cache: false,
+            move_source_to_cache: true,
         }
     }
 }
@@ -373,6 +376,7 @@ impl Marina {
                     output_mcap_compression: options.packed_mcap_compression,
                 },
                 archive_compression: options.packed_archive_compression,
+                db3_vacuum: options.db3_vacuum,
             },
             progress,
         )?;
@@ -598,7 +602,7 @@ impl Marina {
         let packed_file = cache_dir.join("bundle.remote.tar.gz");
         let ready_dir = cache_dir.join("ready");
 
-        crate::cleanup::register(packed_file.clone());
+        // Keep partially downloaded bundles on interruption so future pulls can resume.
         crate::cleanup::register(ready_dir.clone());
 
         let descriptor = driver.pull(&bag.without_attachment(), &packed_file).await?;
@@ -1153,30 +1157,65 @@ impl Marina {
 
             let tmp_dir = tempfile::tempdir().context("failed to create temp dir for mirror")?;
             let tmp_bundle = tmp_dir.path().join("bundle.marina");
+            let mut bundle_path = tmp_bundle.clone();
 
-            progress.emit("mirror", format!("downloading from '{}'", source_name));
-            source_drv
-                .pull(&bag, &tmp_bundle)
-                .await
-                .with_context(|| format!("failed to pull '{}' from '{}'", bag, source_name))?;
+            // Fast path: folder source registry can hand us a local bundle path directly,
+            // so mirror avoids creating an extra local temporary bundle copy.
+            if let Some(folder_src) = source_drv.as_any().downcast_ref::<FolderRegistry>() {
+                let direct_bundle = folder_src.source_bundle_path(&bag);
+                if direct_bundle.exists() {
+                    progress.emit("mirror", "using source bundle directly (no local staging)");
+                    bundle_path = direct_bundle;
+                }
+            }
 
-            let bundle_hash = compute_bundle_hash(&tmp_bundle)?;
-            let packed_bytes = fs::metadata(&tmp_bundle)?.len();
+            // Fast path: if target is folder registry, pull directly into target bundle path.
+            if let Some(folder_tgt) = target_drv.as_any().downcast_ref::<FolderRegistry>() {
+                let target_bundle = folder_tgt.source_bundle_path(&bag);
+                if let Some(parent) = target_bundle.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                progress.emit(
+                    "mirror",
+                    format!("downloading directly into target '{}'", target_name),
+                );
+                source_drv
+                    .pull(&bag, &target_bundle)
+                    .await
+                    .with_context(|| format!("failed to pull '{}' from '{}'", bag, source_name))?;
+                bundle_path = target_bundle;
+            } else if bundle_path == tmp_bundle {
+                progress.emit("mirror", format!("downloading from '{}'", source_name));
+                source_drv
+                    .pull(&bag, &tmp_bundle)
+                    .await
+                    .with_context(|| format!("failed to pull '{}' from '{}'", bag, source_name))?;
+            }
+
+            let packed_bytes = fs::metadata(&bundle_path)?.len();
 
             let push_meta = PushMeta {
                 original_bytes: source_info.original_bytes,
                 packed_bytes,
-                bundle_hash,
+                bundle_hash: source_hash,
                 pointcloud: source_info.pointcloud.unwrap_or_default(),
                 mcap_compression: source_info.mcap_compression.unwrap_or_default(),
                 pushed_at: now_unix_secs(),
             };
 
             progress.emit("mirror", format!("uploading {} to '{}'", bag, target_name));
-            target_drv
-                .push(target_name, &bag, &tmp_bundle, &push_meta)
-                .await
-                .with_context(|| format!("failed to push '{}' to '{}'", bag, target_name))?;
+            if let Some(folder_tgt) = target_drv.as_any().downcast_ref::<FolderRegistry>() {
+                folder_tgt
+                    .finalize_existing_bundle(&bag, &push_meta)
+                    .with_context(|| {
+                        format!("failed to finalize '{}' in '{}'", bag, target_name)
+                    })?;
+            } else {
+                target_drv
+                    .push(target_name, &bag, &bundle_path, &push_meta)
+                    .await
+                    .with_context(|| format!("failed to push '{}' to '{}'", bag, target_name))?;
+            }
 
             if target_map.contains_key(&bag_key) {
                 stats.updated += 1;

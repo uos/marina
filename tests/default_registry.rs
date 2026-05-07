@@ -11,6 +11,10 @@ struct FailingDriver;
 
 #[async_trait::async_trait]
 impl RegistryDriver for FailingDriver {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     async fn push(
         &self,
         _registry_name: &str,

@@ -35,6 +35,10 @@ impl StubRegistry {
 
 #[async_trait]
 impl RegistryDriver for StubRegistry {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     async fn push(
         &self,
         _registry_name: &str,
