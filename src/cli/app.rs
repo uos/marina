@@ -394,7 +394,9 @@ pub async fn run() -> Result<()> {
         Ok(s) => Box::leak(s.into_boxed_str()),
         Err(_) => "marina",
     };
-    clap_complete::CompleteEnv::with_factory(|| Cli::command().name(prog_name)).complete();
+    clap_complete::CompleteEnv::with_factory(|| Cli::command().name(prog_name))
+        .completer(prog_name)
+        .complete();
     let mut args = std::env::args().collect::<Vec<_>>();
     if let Some(first) = args.first_mut() {
         *first = prog_name.to_string();
@@ -1650,7 +1652,9 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                 Ok(s) => Box::leak(s.into_boxed_str()),
                 Err(_) => "marina",
             };
-            clap_complete::CompleteEnv::with_factory(|| Cli::command().name(prog_name)).complete();
+            clap_complete::CompleteEnv::with_factory(|| Cli::command().name(prog_name))
+                .completer(prog_name)
+                .complete();
         }
         Commands::Version => {
             println!("{}", env!("CARGO_PKG_VERSION"));

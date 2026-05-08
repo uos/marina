@@ -1155,7 +1155,7 @@ impl Marina {
                 progress.emit("mirror", format!("push {} (not in target)", bag));
             }
 
-            let tmp_dir = tempfile::tempdir().context("failed to create temp dir for mirror")?;
+            let tmp_dir = mirror_tempdir().context("failed to create temp dir for mirror")?;
             let tmp_bundle = tmp_dir.path().join("bundle.marina");
             let mut bundle_path = tmp_bundle.clone();
 
@@ -1421,6 +1421,21 @@ fn now_unix_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn mirror_tempdir() -> Result<tempfile::TempDir> {
+    if let Some(cache_root) = dirs::cache_dir() {
+        let mirror_tmp_root = cache_root.join("marina").join("tmp");
+        if fs::create_dir_all(&mirror_tmp_root).is_ok() {
+            if let Ok(dir) = tempfile::Builder::new()
+                .prefix("mirror-")
+                .tempdir_in(&mirror_tmp_root)
+            {
+                return Ok(dir);
+            }
+        }
+    }
+    tempfile::tempdir().context("failed to create temp dir in system temp")
 }
 
 fn compute_bundle_hash(path: &Path) -> Result<String> {

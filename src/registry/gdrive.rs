@@ -11,7 +11,7 @@ use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use regex::Regex;
 use reqwest::Client;
 use reqwest::StatusCode;
-use reqwest::header::{CONTENT_RANGE, LOCATION, RANGE};
+use reqwest::header::{CONTENT_RANGE, CONTENT_TYPE, LOCATION, RANGE};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
@@ -168,6 +168,10 @@ fn pem_to_der(pem: &[u8]) -> Result<Vec<u8>> {
 }
 
 impl GDriveRegistry {
+    async fn invalidate_cached_auth_header(&self) {
+        *self.token_cache.lock().await = None;
+    }
+
     pub fn from_uri(
         name: &str,
         uri: &str,
@@ -709,8 +713,9 @@ impl GDriveRegistry {
         out: &Path,
         title: &str,
     ) -> Result<()> {
+        let mut auth_header = auth.map(|s| s.to_string());
         let probe = self
-            .build_download_request(url, auth, api_key)
+            .build_download_request(url, auth_header.as_deref(), api_key)
             .header(RANGE, "bytes=0-0")
             .send()
             .await
@@ -718,11 +723,7 @@ impl GDriveRegistry {
 
         if probe.status() != StatusCode::PARTIAL_CONTENT {
             return self
-                .stream_response_to_path(
-                    self.build_download_request(url, auth, api_key),
-                    out,
-                    title,
-                )
+                .stream_response_to_path(url, auth_header.as_deref(), api_key, out, title)
                 .await;
         }
 
@@ -735,11 +736,7 @@ impl GDriveRegistry {
 
         if total == 0 {
             return self
-                .stream_response_to_path(
-                    self.build_download_request(url, auth, api_key),
-                    out,
-                    title,
-                )
+                .stream_response_to_path(url, auth_header.as_deref(), api_key, out, title)
                 .await;
         }
 
@@ -768,10 +765,11 @@ impl GDriveRegistry {
             let range = format!("bytes={}-{}", downloaded, end);
 
             let mut attempt = 0usize;
+            let mut unauthorized_retries = 0usize;
             loop {
                 let started = Instant::now();
                 let resp = self
-                    .build_download_request(url, auth, api_key)
+                    .build_download_request(url, auth_header.as_deref(), api_key)
                     .header(RANGE, &range)
                     .send()
                     .await;
@@ -783,20 +781,6 @@ impl GDriveRegistry {
                             let bytes = resp.bytes().await.with_context(|| {
                                 format!("failed reading ranged chunk {} for {}", range, title)
                             })?;
-                            if let Some(kind) = html_error_hint(bytes.as_ref()) {
-                                pb.finish_and_clear();
-                                if kind == DownloadContentHint::GoogleDriveQuotaExceeded {
-                                    return Err(anyhow!(
-                                        "Google Drive quota exceeded while downloading {}. \
-                                         A later ranged chunk returned an HTML quota page instead of archive bytes.",
-                                        title
-                                    ));
-                                }
-                                return Err(anyhow!(
-                                    "downloaded ranged content for {} looks like HTML, not archive bytes",
-                                    title
-                                ));
-                            }
                             let received = bytes.len() as u64;
                             file.write_all(&bytes)?;
                             downloaded += received;
@@ -827,11 +811,27 @@ impl GDriveRegistry {
                             pb.finish_and_clear();
                             return self
                                 .stream_response_to_path(
-                                    self.build_download_request(url, auth, api_key),
+                                    url,
+                                    auth_header.as_deref(),
+                                    api_key,
                                     out,
                                     title,
                                 )
                                 .await;
+                        }
+
+                        if status == StatusCode::UNAUTHORIZED
+                            && api_key.is_none()
+                            && auth_header.is_some()
+                            && unauthorized_retries < 2
+                        {
+                            unauthorized_retries += 1;
+                            self.invalidate_cached_auth_header().await;
+                            let refreshed = self.auth_header_optional().await?;
+                            if refreshed.is_some() {
+                                auth_header = refreshed;
+                                continue;
+                            }
                         }
 
                         return Err(anyhow!(
@@ -893,11 +893,7 @@ impl GDriveRegistry {
         if self.disable_ranged_download {
             if auth.is_none() && api_key.is_none() {
                 return self
-                    .stream_response_to_path(
-                        self.build_download_request(&public_download_url(id), None, None),
-                        out,
-                        title,
-                    )
+                    .stream_response_to_path(&public_download_url(id), None, None, out, title)
                     .await;
             }
             let url = format!(
@@ -905,11 +901,7 @@ impl GDriveRegistry {
                 DRIVE_FILES_API, id
             );
             return self
-                .stream_response_to_path(
-                    self.build_download_request(&url, auth.as_deref(), api_key.as_deref()),
-                    out,
-                    title,
-                )
+                .stream_response_to_path(&url, auth.as_deref(), api_key.as_deref(), out, title)
                 .await;
         }
 
@@ -934,18 +926,63 @@ impl GDriveRegistry {
 
     async fn stream_response_to_path(
         &self,
-        req: reqwest::RequestBuilder,
+        url: &str,
+        auth: Option<&str>,
+        api_key: Option<&str>,
         out: &Path,
         title: &str,
     ) -> Result<()> {
-        let resp = req
-            .send()
-            .await
-            .with_context(|| format!("failed downloading {}", title))?
-            .error_for_status()
-            .with_context(|| format!("download failed: {}", title))?;
+        let mut auth_header = auth.map(|s| s.to_string());
+        let mut unauthorized_retries = 0usize;
+        let mut resp = loop {
+            let resp = self
+                .build_download_request(url, auth_header.as_deref(), api_key)
+                .send()
+                .await
+                .with_context(|| format!("failed downloading {}", title))?;
+            if resp.status() == StatusCode::UNAUTHORIZED
+                && api_key.is_none()
+                && auth_header.is_some()
+                && unauthorized_retries < 2
+            {
+                unauthorized_retries += 1;
+                self.invalidate_cached_auth_header().await;
+                if let Some(refreshed) = self.auth_header_optional().await? {
+                    auth_header = Some(refreshed);
+                    continue;
+                }
+            }
+            break resp;
+        };
 
-        let total = resp.content_length().unwrap_or(0);
+        let status = resp.status();
+        if status != StatusCode::PARTIAL_CONTENT && response_content_type_is_html(&resp) {
+            let first_chunk = resp
+                .chunk()
+                .await
+                .with_context(|| format!("failed reading HTML error response for {}", title))?;
+            if let Some(chunk) = first_chunk.as_deref() {
+                if let Some(kind) = html_error_hint(chunk) {
+                    if kind == DownloadContentHint::GoogleDriveQuotaExceeded {
+                        return Err(anyhow!(
+                            "Google Drive quota exceeded while downloading {}. \
+                             The response returned an HTML quota page instead of archive bytes.",
+                            title
+                        ));
+                    }
+                }
+            }
+            return Err(anyhow!(
+                "downloaded content for {} returned Content-Type text/html, not archive bytes",
+                title
+            ));
+        }
+
+        let total = resp
+            .error_for_status_ref()
+            .with_context(|| format!("download failed: {}", title))?
+            .content_length()
+            .unwrap_or(0);
         let pb = if total > 0 {
             let pb = ProgressBar::new(total);
             if !std::io::stdout().is_terminal() {
@@ -963,25 +1000,8 @@ impl GDriveRegistry {
 
         let mut file = fs::File::create(out)
             .with_context(|| format!("failed creating output file {}", out.display()))?;
-        let mut resp = resp;
         use std::io::Write;
         while let Some(chunk) = resp.chunk().await? {
-            if let Some(kind) = html_error_hint(chunk.as_ref()) {
-                if let Some(pb) = pb {
-                    pb.finish_and_clear();
-                }
-                if kind == DownloadContentHint::GoogleDriveQuotaExceeded {
-                    return Err(anyhow!(
-                        "Google Drive quota exceeded while downloading {}. \
-                         The response returned an HTML quota page instead of archive bytes.",
-                        title
-                    ));
-                }
-                return Err(anyhow!(
-                    "downloaded content for {} looks like HTML, not archive bytes",
-                    title
-                ));
-            }
             file.write_all(&chunk)?;
             if let Some(pb) = &pb {
                 pb.inc(chunk.len() as u64);
@@ -1490,4 +1510,12 @@ fn html_error_hint(bytes: &[u8]) -> Option<DownloadContentHint> {
         return Some(DownloadContentHint::GoogleDriveQuotaExceeded);
     }
     Some(DownloadContentHint::HtmlResponse)
+}
+
+fn response_content_type_is_html(resp: &reqwest::Response) -> bool {
+    resp.headers()
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.to_ascii_lowercase().contains("text/html"))
+        .unwrap_or(false)
 }
