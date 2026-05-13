@@ -944,9 +944,7 @@ async fn connect_endpoint(
     endpoint: &SshEndpoint,
 ) -> Result<Handle<ClientHandler>> {
     let (_user, host) = split_user_host(&endpoint.user_host)?;
-    client::connect(config, (host.as_str(), endpoint.port), ClientHandler)
-        .await
-        .map_err(Into::into)
+    client::connect(config, (host.as_str(), endpoint.port), ClientHandler).await
 }
 
 fn parse_transport(value: Option<&str>) -> Result<SshTransport> {
