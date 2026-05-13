@@ -16,6 +16,8 @@ pub struct RegistryConfig {
     pub kind: String,
     pub uri: String,
     pub auth_env: Option<String>,
+    pub proxy_jump: Option<String>,
+    pub ssh_transport: Option<String>,
     pub download_mode: RegistryDownloadMode,
 }
 
@@ -172,7 +174,7 @@ pub fn infer_kind_from_uri(uri: &str) -> &'static str {
     }
 }
 
-pub const DEFAULT_REGISTRY_NAME: &str = "osnabotics-public";
+pub const DEFAULT_REGISTRY_NAME: &str = "osnabotics_public";
 pub const DEFAULT_GDRIVE_FOLDER_ID: &str = "10hjoMIyWTOVNOo3zDOfHoSb1S55gO3rJ";
 
 fn generate_initial_config() -> String {
@@ -379,6 +381,14 @@ fn parse_registries(user_vars: &VariableHistory) -> Result<Vec<RegistryConfig>> 
             Rhs::Val(Val::StringVal(s)) => Some(s),
             _ => None,
         });
+        let proxy_jump = reg_ns.resolve("proxy_jump")?.and_then(|r| match r {
+            Rhs::Val(Val::StringVal(s)) | Rhs::Path(s) if !s.is_empty() => Some(s),
+            _ => None,
+        });
+        let ssh_transport = reg_ns.resolve("ssh_transport")?.and_then(|r| match r {
+            Rhs::Val(Val::StringVal(s)) | Rhs::Path(s) if !s.is_empty() => Some(s),
+            _ => None,
+        });
         let download_mode = reg_ns
             .resolve("download_mode")?
             .and_then(|r| match r {
@@ -396,6 +406,8 @@ fn parse_registries(user_vars: &VariableHistory) -> Result<Vec<RegistryConfig>> 
             uri,
             kind,
             auth_env,
+            proxy_jump,
+            ssh_transport,
             download_mode,
         });
     }
@@ -427,6 +439,12 @@ fn generate_registries_block(registries: &[RegistryConfig]) -> String {
         s.push_str(&format!("    kind = \"{}\"\n", reg.kind));
         if let Some(auth) = &reg.auth_env {
             s.push_str(&format!("    auth_env = \"{auth}\"\n"));
+        }
+        if let Some(proxy_jump) = &reg.proxy_jump {
+            s.push_str(&format!("    proxy_jump = \"{proxy_jump}\"\n"));
+        }
+        if let Some(ssh_transport) = &reg.ssh_transport {
+            s.push_str(&format!("    ssh_transport = \"{ssh_transport}\"\n"));
         }
         if reg.download_mode == RegistryDownloadMode::Streaming {
             s.push_str("    download_mode = \"streaming\"\n");

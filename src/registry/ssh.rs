@@ -13,6 +13,7 @@ use russh::keys::PublicKey;
 use russh_sftp::client::SftpSession;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::process::Command;
 use tokio::sync::Mutex;
 
 use crate::model::bag_ref::BagRef;
@@ -22,6 +23,8 @@ pub struct SshRegistry {
     pub name: String,
     endpoint: SshEndpoint,
     auth_env: Option<String>,
+    proxy_jump: Option<SshEndpoint>,
+    transport: SshTransport,
     pool: Arc<Mutex<Option<Arc<Handle<ClientHandler>>>>>,
 }
 
@@ -30,6 +33,8 @@ impl std::fmt::Debug for SshRegistry {
         f.debug_struct("SshRegistry")
             .field("name", &self.name)
             .field("endpoint", &self.endpoint)
+            .field("proxy_jump", &self.proxy_jump)
+            .field("transport", &self.transport)
             .finish_non_exhaustive()
     }
 }
@@ -40,9 +45,23 @@ impl Clone for SshRegistry {
             name: self.name.clone(),
             endpoint: self.endpoint.clone(),
             auth_env: self.auth_env.clone(),
+            proxy_jump: self.proxy_jump.clone(),
+            transport: self.transport,
             pool: Arc::clone(&self.pool),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SshTransport {
+    Native,
+    OpenSsh,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CopyDirection {
+    Upload,
+    Download,
 }
 
 #[derive(Debug, Clone)]
@@ -97,12 +116,29 @@ impl client::Handler for ClientHandler {
 }
 
 impl SshRegistry {
-    pub fn from_uri(name: &str, uri: &str, auth_env: Option<String>) -> Result<Self> {
+    pub fn from_uri(
+        name: &str,
+        uri: &str,
+        auth_env: Option<String>,
+        proxy_jump: Option<String>,
+        ssh_transport: Option<String>,
+    ) -> Result<Self> {
         let endpoint = SshEndpoint::parse(uri)?;
+        let proxy_jump = proxy_jump
+            .or_else(|| std::env::var("MARINA_SSH_PROXY_JUMP").ok())
+            .map(|jump| SshEndpoint::parse_jump(&jump))
+            .transpose()?;
+        let transport = parse_transport(
+            ssh_transport
+                .or_else(|| std::env::var("MARINA_SSH_TRANSPORT").ok())
+                .as_deref(),
+        )?;
         Ok(Self {
             name: name.to_string(),
             endpoint,
             auth_env,
+            proxy_jump,
+            transport,
             pool: Arc::new(Mutex::new(None)),
         })
     }
@@ -120,18 +156,72 @@ impl SshRegistry {
     }
 
     async fn connect_inner(&self) -> Result<Handle<ClientHandler>> {
-        let (user, host) = split_user_host(&self.endpoint.user_host)?;
         let config = Arc::new(Config::default());
 
-        let mut handle =
-            client::connect(config, (host.as_str(), self.endpoint.port), ClientHandler)
+        let mut handle = if let Some(proxy_jump) = &self.proxy_jump {
+            let (_target_user, target_host) = split_user_host(&self.endpoint.user_host)?;
+            let mut jump = connect_endpoint(config.clone(), proxy_jump)
                 .await
                 .with_context(|| {
+                    format!(
+                        "failed connecting to ssh proxy jump {}",
+                        proxy_jump.display_host_port()
+                    )
+                })?;
+            self.authenticate_endpoint(&mut jump, proxy_jump).await?;
+
+            let channel = jump
+                .channel_open_direct_tcpip(
+                    target_host.clone(),
+                    self.endpoint.port.into(),
+                    "127.0.0.1",
+                    0,
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed opening ssh tunnel via {} to {}:{}",
+                        proxy_jump.display_host_port(),
+                        target_host,
+                        self.endpoint.port
+                    )
+                })?;
+
+            client::connect_stream(config, channel.into_stream(), ClientHandler)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed connecting to ssh host {}:{} via {}",
+                        target_host,
+                        self.endpoint.port,
+                        proxy_jump.display_host_port()
+                    )
+                })?
+        } else {
+            connect_endpoint(config, &self.endpoint)
+                .await
+                .with_context(|| {
+                    let (_user, host) = split_user_host(&self.endpoint.user_host)
+                        .unwrap_or_else(|_| (String::new(), self.endpoint.user_host.clone()));
                     format!(
                         "failed connecting to ssh host {}:{}",
                         host, self.endpoint.port
                     )
-                })?;
+                })?
+        };
+
+        self.authenticate_endpoint(&mut handle, &self.endpoint)
+            .await?;
+
+        Ok(handle)
+    }
+
+    async fn authenticate_endpoint(
+        &self,
+        handle: &mut Handle<ClientHandler>,
+        endpoint: &SshEndpoint,
+    ) -> Result<()> {
+        let (user, host) = split_user_host(&endpoint.user_host)?;
 
         let authed = match &self.auth_env {
             Some(var) => {
@@ -242,7 +332,7 @@ impl SshRegistry {
             return Err(anyhow!("ssh authentication failed"));
         }
 
-        Ok(handle)
+        Ok(())
     }
 
     async fn get_handle(&self) -> Result<Arc<Handle<ClientHandler>>> {
@@ -278,6 +368,19 @@ impl SshRegistry {
     }
 
     async fn run_ssh(&self, remote_cmd: &str) -> Result<()> {
+        if self.transport == SshTransport::OpenSsh {
+            self.ensure_openssh_auth_supported()?;
+            let output = self.openssh_command("ssh", remote_cmd).output().await?;
+            if !output.status.success() {
+                return Err(anyhow!(
+                    "ssh command failed (exit {}): {}",
+                    output.status.code().unwrap_or(-1),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+            return Ok(());
+        }
+
         let mut channel = self.channel_open_session().await?;
         channel
             .exec(true, remote_cmd)
@@ -313,6 +416,19 @@ impl SshRegistry {
     }
 
     async fn run_ssh_capture(&self, remote_cmd: &str) -> Result<String> {
+        if self.transport == SshTransport::OpenSsh {
+            self.ensure_openssh_auth_supported()?;
+            let output = self.openssh_command("ssh", remote_cmd).output().await?;
+            if !output.status.success() {
+                return Err(anyhow!(
+                    "ssh command failed (exit {}): {}",
+                    output.status.code().unwrap_or(-1),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+            return String::from_utf8(output.stdout).context("remote stdout was not valid UTF-8");
+        }
+
         let mut channel = self.channel_open_session().await?;
         channel
             .exec(true, remote_cmd)
@@ -437,6 +553,11 @@ impl SshRegistry {
     }
 
     async fn upload_file_with_progress(&self, local: &Path, remote_path: &str) -> Result<()> {
+        if self.transport == SshTransport::OpenSsh {
+            return self
+                .openssh_copy(local, remote_path, CopyDirection::Upload)
+                .await;
+        }
         let sftp = self.open_sftp().await?;
         Self::sftp_upload(
             &sftp,
@@ -445,6 +566,100 @@ impl SshRegistry {
             Some(&format!("ssh upload {}", local.display())),
         )
         .await
+    }
+
+    async fn download_file_with_progress(
+        &self,
+        remote_path: &str,
+        local: &Path,
+        label: Option<&str>,
+    ) -> Result<()> {
+        if self.transport == SshTransport::OpenSsh {
+            return self
+                .openssh_copy(local, remote_path, CopyDirection::Download)
+                .await;
+        }
+        let sftp = self.open_sftp().await?;
+        Self::sftp_download(&sftp, remote_path, local, label).await
+    }
+
+    fn openssh_command(&self, program: &str, remote_cmd: &str) -> Command {
+        let mut cmd = Command::new(program);
+        self.add_openssh_args(&mut cmd, true);
+        cmd.arg(&self.endpoint.user_host).arg(remote_cmd);
+        cmd
+    }
+
+    fn add_openssh_args(&self, cmd: &mut Command, for_ssh: bool) {
+        if for_ssh {
+            cmd.arg("-p").arg(self.endpoint.port.to_string());
+        } else {
+            cmd.arg("-P").arg(self.endpoint.port.to_string());
+        }
+        if let Some(var) = &self.auth_env {
+            if let Ok(secret) = std::env::var(var) {
+                let secret_path = Path::new(&secret);
+                if secret_path.exists() {
+                    cmd.arg("-i").arg(secret_path);
+                } else if self.transport == SshTransport::OpenSsh {
+                    // The OpenSSH transport is intentionally non-interactive in Marina.
+                    // Password auth would require sshpass/askpass plumbing, so keep it explicit.
+                    cmd.arg("-o").arg("IdentitiesOnly=yes");
+                }
+            }
+        }
+        if let Some(proxy_jump) = &self.proxy_jump {
+            cmd.arg("-J").arg(proxy_jump.open_ssh_jump_arg());
+        }
+        cmd.arg("-o").arg("BatchMode=yes");
+    }
+
+    async fn openssh_copy(
+        &self,
+        local: &Path,
+        remote_path: &str,
+        direction: CopyDirection,
+    ) -> Result<()> {
+        self.ensure_openssh_auth_supported()?;
+        if let CopyDirection::Download = direction {
+            if let Some(parent) = local.parent() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        let mut cmd = Command::new("scp");
+        self.add_openssh_args(&mut cmd, false);
+        let remote = format!("{}:{}", self.endpoint.user_host, remote_path);
+        match direction {
+            CopyDirection::Upload => {
+                cmd.arg(local).arg(remote);
+            }
+            CopyDirection::Download => {
+                cmd.arg(remote).arg(local);
+            }
+        }
+        let output = cmd.output().await?;
+        if !output.status.success() {
+            return Err(anyhow!(
+                "scp failed (exit {}): {}",
+                output.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(())
+    }
+
+    fn ensure_openssh_auth_supported(&self) -> Result<()> {
+        if let Some(var) = &self.auth_env {
+            let secret = std::env::var(var)
+                .with_context(|| format!("missing ssh auth env var '{}'", var))?;
+            if !Path::new(&secret).exists() {
+                return Err(anyhow!(
+                    "OpenSSH transport requires auth env var '{}' to contain a key file path; password auth is only supported by the native SSH transport",
+                    var
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Fetch all MetaFile records from the registry in a single SSH command.
@@ -507,15 +722,15 @@ impl RegistryDriver for SshRegistry {
         };
         fs::write(&tmp, serde_json::to_vec_pretty(&meta_file)?)?;
 
-        let sftp = self.open_sftp().await?;
-        Self::sftp_upload(
-            &sftp,
-            packed_file,
-            &self.data_path(bag),
-            Some(&format!("ssh upload {}", packed_file.display())),
-        )
-        .await?;
-        Self::sftp_upload(&sftp, &tmp, &self.meta_path(bag), None).await?;
+        self.upload_file_with_progress(packed_file, &self.data_path(bag))
+            .await?;
+        if self.transport == SshTransport::OpenSsh {
+            self.openssh_copy(&tmp, &self.meta_path(bag), CopyDirection::Upload)
+                .await?;
+        } else {
+            let sftp = self.open_sftp().await?;
+            Self::sftp_upload(&sftp, &tmp, &self.meta_path(bag), None).await?;
+        }
         let _ = fs::remove_file(tmp);
         Ok(())
     }
@@ -541,9 +756,7 @@ impl RegistryDriver for SshRegistry {
             .ok_or_else(|| anyhow!("invalid output path"))?;
         fs::create_dir_all(parent)?;
 
-        let sftp = self.open_sftp().await?;
-        Self::sftp_download(
-            &sftp,
+        self.download_file_with_progress(
             &self.data_path(bag),
             out_packed_file,
             Some(&bag.without_attachment().to_string()),
@@ -551,7 +764,8 @@ impl RegistryDriver for SshRegistry {
         .await?;
 
         let meta_local = parent.join("remote_metadata.json");
-        Self::sftp_download(&sftp, &self.meta_path(bag), &meta_local, None).await?;
+        self.download_file_with_progress(&self.meta_path(bag), &meta_local, None)
+            .await?;
         let meta_text = fs::read_to_string(&meta_local)?;
         let _ = fs::remove_file(meta_local);
         let meta: MetaFile = serde_json::from_str(&meta_text)?;
@@ -689,6 +903,60 @@ impl SshEndpoint {
             port,
             root,
         })
+    }
+
+    fn parse_jump(jump: &str) -> Result<Self> {
+        let raw = jump.strip_prefix("ssh://").unwrap_or(jump);
+        if raw.contains('/') {
+            return Err(anyhow!(
+                "ssh proxy_jump must be user@host[:port], without a path"
+            ));
+        }
+        if raw.is_empty() {
+            return Err(anyhow!("ssh proxy_jump must not be empty"));
+        }
+        let (user_host, port) = parse_authority(raw)?;
+        Ok(Self {
+            user_host,
+            port,
+            root: String::new(),
+        })
+    }
+
+    fn display_host_port(&self) -> String {
+        match split_user_host(&self.user_host) {
+            Ok((_user, host)) => format!("{}:{}", host, self.port),
+            Err(_) => format!("{}:{}", self.user_host, self.port),
+        }
+    }
+
+    fn open_ssh_jump_arg(&self) -> String {
+        if self.port == 22 {
+            self.user_host.clone()
+        } else {
+            format!("{}:{}", self.user_host, self.port)
+        }
+    }
+}
+
+async fn connect_endpoint(
+    config: Arc<Config>,
+    endpoint: &SshEndpoint,
+) -> Result<Handle<ClientHandler>> {
+    let (_user, host) = split_user_host(&endpoint.user_host)?;
+    client::connect(config, (host.as_str(), endpoint.port), ClientHandler)
+        .await
+        .map_err(Into::into)
+}
+
+fn parse_transport(value: Option<&str>) -> Result<SshTransport> {
+    match value.unwrap_or("native").to_ascii_lowercase().as_str() {
+        "native" | "russh" => Ok(SshTransport::Native),
+        "openssh" | "ssh" => Ok(SshTransport::OpenSsh),
+        other => Err(anyhow!(
+            "unsupported ssh_transport '{}'; expected 'native' or 'openssh'",
+            other
+        )),
     }
 }
 

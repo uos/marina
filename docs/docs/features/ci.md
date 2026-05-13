@@ -127,7 +127,57 @@ marina registry add prod ssh://user@host:22/path/to/registry --auth-env MARINA_S
 
 For encrypted keys, Marina automatically reads `{VAR}_PASSPHRASE` — so if `--auth-env MARINA_SSH_KEY` is set, it looks for `MARINA_SSH_KEY_PASSPHRASE`.
 
+**Jump hosts**
+
+CI runner service accounts often do not load `~/.ssh/config`, so OpenSSH `ProxyJump` settings are not visible to Marina's native SSH client. Add the jump host to the registry config:
+
+~~~awk
+registries {
+  prod {
+    uri = "ssh://marina@internal.example.org:/srv/marina"
+    kind = "ssh"
+    auth_env = "MARINA_SSH_KEY"
+    proxy_jump = "ci@bastion.example.org:22"
+  }
+}
+~~~
+
+Or set it per CI job without changing the config:
+
+~~~yaml
+env:
+  MARINA_SSH_PROXY_JUMP: ci@bastion.example.org:22
+~~~
+
+`proxy_jump` is intentionally simple and uses `user@host[:port]`; it does not parse OpenSSH config aliases.
+
+**OpenSSH transport**
+
+By default Marina uses its native Rust SSH client. If a CI runner can connect with `/usr/bin/ssh` but the native client has platform-specific socket trouble, opt into the system OpenSSH tools:
+
+~~~awk
+registries {
+  prod {
+    uri = "ssh://marina@internal.example.org:/srv/marina"
+    kind = "ssh"
+    auth_env = "MARINA_SSH_KEY"
+    ssh_transport = "openssh"
+  }
+}
+~~~
+
+Or set it per CI job:
+
+~~~yaml
+env:
+  MARINA_SSH_TRANSPORT: openssh
+~~~
+
+The OpenSSH transport runs `ssh` for remote commands and `scp` for file transfers. If `auth_env` points to a key file, Marina passes it with `-i`.
+
 
 ## SSH host key verification
 
-Marina currently accepts any host key automatically. This is intentional for ease of use in CI, but means you should ensure the hostname/IP is correct in your registry URI and that your network is trusted.
+Marina's native SSH transport currently accepts any host key automatically. This is intentional for ease of use in CI, but means you should ensure the hostname/IP is correct in your registry URI and that your network is trusted.
+
+The OpenSSH transport uses your system `ssh`/`scp` behavior, including `known_hosts` checks.

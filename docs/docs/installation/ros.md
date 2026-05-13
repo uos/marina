@@ -63,6 +63,5 @@ ros2 bag record -o $(ros2 bag import my-dataset:v1) --all
 
     ~~~bash
     ros2 bag datasets --remote
-    ros2 bag ds --remote --registry osnabotics-public
+    ros2 bag ds --remote --registry osnabotics_public
     ~~~
-

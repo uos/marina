@@ -112,6 +112,12 @@ struct AddRegistryArgs {
     kind: Option<String>,
     #[arg(long)]
     auth_env: Option<String>,
+    /// SSH jump host in user@host[:port] form. SSH registries also accept MARINA_SSH_PROXY_JUMP.
+    #[arg(long)]
+    proxy_jump: Option<String>,
+    /// SSH transport: native or openssh. SSH registries also accept MARINA_SSH_TRANSPORT.
+    #[arg(long)]
+    ssh_transport: Option<String>,
 }
 
 #[derive(Args)]
@@ -783,6 +789,8 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                     kind: kind.clone(),
                     uri,
                     auth_env: args.auth_env,
+                    proxy_jump: args.proxy_jump,
+                    ssh_transport: args.ssh_transport,
                     download_mode: RegistryDownloadMode::Adaptive,
                 })?;
                 println!("registry added: {} ({})", args.name, kind);

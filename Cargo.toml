@@ -1,6 +1,6 @@
 [package]
 name = "marina"
-version = "0.2.7"
+version = "0.2.8"
 edition = "2024"
 include = ["**/*.rs", "**/*.md", "**/Cargo.toml", "**/LICENSE*", "default.rl"]
 keywords = ["robotics"]
@@ -69,6 +69,7 @@ tokio = { version = "1", features = [
   "io-util",
   "macros",
   "fs",
+  "process",
   "sync",
   "time",
 ] }

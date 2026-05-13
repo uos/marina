@@ -1378,6 +1378,8 @@ fn make_registry_driver(registry: &RegistryConfig) -> Result<Arc<dyn RegistryDri
             &registry.name,
             &registry.uri,
             registry.auth_env.clone(),
+            registry.proxy_jump.clone(),
+            registry.ssh_transport.clone(),
         )?),
         "http" => Arc::new(HttpRegistry::from_uri(&registry.name, &registry.uri)?),
         "gdrive" => {
