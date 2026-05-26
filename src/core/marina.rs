@@ -1232,12 +1232,14 @@ impl Marina {
         &self,
         registry: &str,
         pattern: &str,
-    ) -> Vec<(BagRef, Option<BagInfo>)> {
-        if let Some((_, drv)) = self.registries.get(registry) {
-            drv.list_with_info(pattern).await.ok().unwrap_or_default()
-        } else {
-            Vec::new()
-        }
+    ) -> Result<Vec<(BagRef, Option<BagInfo>)>> {
+        let (_, drv) = self
+            .registries
+            .get(registry)
+            .ok_or_else(|| anyhow!("registry '{}' not found", registry))?;
+        drv.list_with_info(pattern)
+            .await
+            .with_context(|| format!("failed listing registry '{}'", registry))
     }
 
     /// Inspect a dataset: collect local file listing and remote metadata.

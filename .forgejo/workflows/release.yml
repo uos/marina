@@ -146,12 +146,18 @@ jobs:
     strategy:
       matrix:
         include:
+          - image: docker.io/stelzo/ubuntu-dev:lyrical
+            repo: resolute
+            runner: ubuntu-latest
           - image: docker.io/stelzo/ubuntu-dev:jazzy
             repo: noble
             runner: ubuntu-latest
           - image: docker.io/stelzo/ubuntu-dev:humble
             repo: jammy
             runner: ubuntu-latest
+          - image: docker.io/stelzo/ubuntu-dev:lyrical
+            repo: resolute
+            runner: ubuntu-latest-arm
           - image: docker.io/stelzo/ubuntu-dev:jazzy
             repo: noble
             runner: ubuntu-latest-arm
@@ -173,7 +179,7 @@ jobs:
           rustup toolchain uninstall stable
           rustup toolchain install stable
 
-          for distro in jazzy humble; do
+          for distro in lyrical jazzy humble; do
           if [ -f "/opt/ros/$distro/setup.bash" ]; then
             echo "Sourcing ROS distro: $distro"
             . "/opt/ros/$distro/setup.bash"

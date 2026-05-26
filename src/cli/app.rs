@@ -4,7 +4,7 @@ use std::{io::IsTerminal, io::Write};
 use anyhow::{Context as _, Result};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::engine::{ArgValueCompleter, CompletionCandidate};
-use log::{error, warn};
+use log::warn;
 
 use crate::core::{Marina, PullOptions, PushOptions, ResolveResult};
 use crate::io::mcap_transform::{McapChunkCompression, PointCloudCompressionMode};
@@ -545,6 +545,7 @@ fn print_remote_detail_table(
     }
 
     let is_tty = std::io::stdout().is_terminal();
+    const NAMESPACE_ROW_INDENT: &str = "  ";
 
     // Sort: no-namespace first, then by namespace, then by name, then full string.
     all.sort_by(|(_, a, _), (_, b, _)| {
@@ -590,7 +591,13 @@ fn print_remote_detail_table(
     ];
     let mut widths = headers.map(|h| h.len());
     for row in &rows {
-        widths[0] = widths[0].max(row.display_name.len());
+        let dataset_width = row.display_name.len()
+            + if row.namespace.is_some() {
+                NAMESPACE_ROW_INDENT.len()
+            } else {
+                0
+            };
+        widths[0] = widths[0].max(dataset_width);
         for (i, cell) in row.rest_cols.iter().enumerate() {
             widths[i + 1] = widths[i + 1].max(cell.len());
         }
@@ -650,9 +657,25 @@ fn print_remote_detail_table(
 
         if base_changed && is_grouped {
             if is_tty {
-                println!("\x1b[1;4m{}\x1b[0m", row.base_name);
+                println!(
+                    "{}\x1b[1;4m{}\x1b[0m",
+                    if row.namespace.is_some() {
+                        NAMESPACE_ROW_INDENT
+                    } else {
+                        ""
+                    },
+                    row.base_name
+                );
             } else {
-                println!("{}", row.base_name);
+                println!(
+                    "{}{}",
+                    if row.namespace.is_some() {
+                        NAMESPACE_ROW_INDENT
+                    } else {
+                        ""
+                    },
+                    row.base_name
+                );
             }
         }
 
@@ -661,20 +684,32 @@ fn print_remote_detail_table(
         prev_base = Some(row.base_name.clone());
 
         // DATASET column: dim the base-name prefix when name-grouped.
+        let row_indent = if row.namespace.is_some() {
+            NAMESPACE_ROW_INDENT
+        } else {
+            ""
+        };
+        let dataset_len = row_indent.len() + row.display_name.len();
         let dataset_col = if is_tty && is_grouped {
             let after_base = row
                 .display_name
                 .strip_prefix(row.base_name.as_str())
                 .unwrap_or(&row.display_name);
-            let padding = widths[0].saturating_sub(row.display_name.len());
+            let padding = widths[0].saturating_sub(dataset_len);
             format!(
-                "\x1b[2m{}\x1b[0m{}{}",
+                "{}\x1b[2m{}\x1b[0m{}{}",
+                row_indent,
                 row.base_name,
                 after_base,
                 " ".repeat(padding)
             )
         } else {
-            format!("{:<width$}", row.display_name, width = widths[0])
+            format!(
+                "{}{:<width$}",
+                row_indent,
+                row.display_name,
+                width = widths[0].saturating_sub(row_indent.len())
+            )
         };
 
         let mut line = dataset_col;
@@ -921,6 +956,7 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                 let futs = registry_names.iter().map(|name| {
                     let fut = marina.search_remote_with_info(name, "*");
                     let name = name.clone();
+                    let prog = prog.clone();
                     async move {
                         match tokio::time::timeout(
                             std::time::Duration::from_secs(timeout_secs),
@@ -928,8 +964,13 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                         )
                         .await
                         {
-                            Ok(results) => Ok((name, results)),
-                            Err(_) => Err(name),
+                            Ok(results) => results.map(|results| (name, results)),
+                            Err(_) => Err(anyhow::anyhow!(
+                                "registry '{}' did not respond within {}s — check your network or remove it with `{prog} registry rm {}`",
+                                name,
+                                timeout_secs,
+                                name
+                            )),
                         }
                     }
                 });
@@ -943,12 +984,7 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                                 all.push((name.clone(), bag, info));
                             }
                         }
-                        Err(name) => {
-                            error!(
-                                "registry '{}' did not respond within {}s — check your network or remove it with `{prog} registry rm {}`",
-                                name, timeout_secs, name
-                            );
-                        }
+                        Err(err) => return Err(err),
                     }
                 }
 
@@ -1016,6 +1052,7 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                 marina
                     .search_remote_with_info(registry, &args.pattern)
                     .await
+                    .with_context(|| format!("failed searching registry '{}'", registry))?
                     .into_iter()
                     .map(|(bag, info)| (registry.to_string(), bag, info))
                     .collect::<Vec<_>>()

@@ -664,26 +664,38 @@ impl SshRegistry {
 
     /// Fetch all MetaFile records from the registry in a single SSH command.
     ///
-    /// Uses ASCII record separator (0x1e) as delimiter between files —
-    /// it cannot appear in valid JSON text.
+    /// Uses ASCII record separator (0x1e) between files and unit separator
+    /// (0x1f) between path and content. Neither can appear unescaped in valid
+    /// JSON text.
     async fn fetch_all_meta(&self) -> Result<Vec<MetaFile>> {
         let cmd = format!(
-            "find {} -type f -name metadata.json -exec sh -c 'for f; do printf \"\\036\"; cat \"$f\"; done' _ {{}} +",
+            "find {} -type f -name metadata.json -exec sh -c 'for f; do printf \"\\036%s\\037\" \"$f\"; cat \"$f\"; done' _ {{}} +",
             shell_quote(&self.endpoint.root)
         );
         let output = self.run_ssh_capture(&cmd).await?;
-        let mut metas = Vec::new();
-        for chunk in output.split('\x1e') {
-            let chunk = chunk.trim();
-            if chunk.is_empty() {
-                continue;
-            }
-            if let Ok(meta) = serde_json::from_str::<MetaFile>(chunk) {
-                metas.push(meta);
-            }
-        }
-        Ok(metas)
+        parse_meta_listing(&output)
     }
+}
+
+fn parse_meta_listing(output: &str) -> Result<Vec<MetaFile>> {
+    let mut metas = Vec::new();
+    for record in output.split('\x1e') {
+        let record = record.trim();
+        if record.is_empty() {
+            continue;
+        }
+        let (path, chunk) = record
+            .split_once('\x1f')
+            .ok_or_else(|| anyhow!("malformed ssh metadata listing record"))?;
+        let chunk = chunk.trim();
+        if chunk.is_empty() {
+            continue;
+        }
+        let meta = serde_json::from_str::<MetaFile>(chunk)
+            .with_context(|| format!("failed parsing remote metadata {}", path))?;
+        metas.push(meta);
+    }
+    Ok(metas)
 }
 
 use async_trait::async_trait;
