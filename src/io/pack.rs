@@ -159,6 +159,56 @@ fn inspect_downloaded_archive(path: &Path) -> Result<()> {
     ))
 }
 
+fn archive_required_unpacked_space<R: Read>(archive: &mut Archive<R>) -> Result<u64> {
+    let mut required = 0u64;
+    for entry in archive.entries()? {
+        let entry = entry?;
+        if entry.header().entry_type().is_file() {
+            required = required.saturating_add(entry.header().size()?);
+        }
+    }
+    Ok(required)
+}
+
+fn ensure_unpack_space(archive_path: &Path, out_dir: &Path, archive_is_gzip: bool) -> Result<()> {
+    let required_space = if archive_is_gzip {
+        let tar_gz = File::open(archive_path)
+            .with_context(|| format!("cannot open archive {}", archive_path.display()))?;
+        let decoder = GzDecoder::new(tar_gz);
+        let mut archive = Archive::new(decoder);
+        archive_required_unpacked_space(&mut archive).with_context(|| {
+            format!(
+                "failed to inspect archive {}; it may be truncated or corrupt",
+                archive_path.display()
+            )
+        })?
+    } else {
+        let tar_file = File::open(archive_path)
+            .with_context(|| format!("cannot open archive {}", archive_path.display()))?;
+        let mut archive = Archive::new(tar_file);
+        archive_required_unpacked_space(&mut archive).with_context(|| {
+            format!(
+                "failed to inspect archive {}; it may be truncated or corrupt",
+                archive_path.display()
+            )
+        })?
+    };
+
+    let avail = available_space(out_dir)?;
+    if avail < required_space {
+        let missing = required_space - avail;
+        return Err(anyhow!(
+            "not enough disk space in {} to unpack archive: need {} more ({} required, {} available)",
+            out_dir.display(),
+            format_bytes(missing),
+            format_bytes(required_space),
+            format_bytes(avail),
+        ));
+    }
+
+    Ok(())
+}
+
 fn append_source_bundle<W: Write>(
     builder: &mut Builder<W>,
     source_root: &Path,
@@ -539,6 +589,7 @@ pub fn unpack_bag_with_progress_and_options(
     inspect_downloaded_archive(archive_path)?;
     fs::create_dir_all(out_dir)?;
     let archive_is_gzip = is_gzip_archive(archive_path)?;
+    ensure_unpack_space(archive_path, out_dir, archive_is_gzip)?;
     if archive_is_gzip {
         let tar_gz = File::open(archive_path)
             .with_context(|| format!("cannot open archive {}", archive_path.display()))?;
@@ -626,7 +677,13 @@ fn extract_archive_with_restore<R: Read>(
             if extracted_tmp.exists() {
                 fs::remove_file(&extracted_tmp)?;
             }
-            entry.unpack(&extracted_tmp)?;
+            entry.unpack(&extracted_tmp).with_context(|| {
+                format!(
+                    "failed to unpack {} into {}",
+                    rel.display(),
+                    extracted_tmp.display()
+                )
+            })?;
 
             let has_cloudini_channels =
                 mcap_transform::has_cloudini_pointcloud_metadata(&extracted_tmp)?;
@@ -652,7 +709,13 @@ fn extract_archive_with_restore<R: Read>(
             continue;
         }
 
-        entry.unpack(&out_path)?;
+        entry.unpack(&out_path).with_context(|| {
+            format!(
+                "failed to unpack {} into {}",
+                rel.display(),
+                out_path.display()
+            )
+        })?;
     }
 
     if !restored_any_mcap {

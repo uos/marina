@@ -4,7 +4,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! marina = "0.2"
+//! marina = "0.3"
 //! tokio = { version = "1", features = ["rt", "macros"] }
 //! ```
 //!

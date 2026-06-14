@@ -606,6 +606,17 @@ impl Marina {
         crate::cleanup::register(ready_dir.clone());
 
         let descriptor = driver.pull(&bag.without_attachment(), &packed_file).await?;
+        let downloaded_bytes = fs::metadata(&packed_file)
+            .with_context(|| format!("failed to stat {}", packed_file.display()))?
+            .len();
+        if downloaded_bytes != descriptor.packed_bytes {
+            return Err(anyhow!(
+                "incomplete download for {}: received {} of {} bytes",
+                bag.without_attachment(),
+                downloaded_bytes,
+                descriptor.packed_bytes
+            ));
+        }
 
         // Compute hash from the downloaded bundle so the catalog is always up to date.
         let remote_hash = compute_bundle_hash(&packed_file).ok();
@@ -816,6 +827,50 @@ impl Marina {
                 candidates: matches,
             }),
         }
+    }
+
+    /// Resolve a target, pulling it first when an exact remote pull is possible.
+    ///
+    /// This keeps [`Marina::resolve_target`] lookup-only while giving CLI and library callers
+    /// the same "yes, fetch it now" behavior.
+    pub async fn resolve_target_or_pull_with_progress_and_options(
+        &mut self,
+        target: &str,
+        registry: Option<&str>,
+        options: PullOptions,
+        progress: &mut ProgressReporter<'_>,
+    ) -> Result<ResolveResult> {
+        let initial = self.resolve_target(target, registry).await;
+        match initial {
+            Ok(ResolveResult::RemoteAvailable {
+                registry: remote_registry,
+                bag,
+                needs_pull: true,
+            }) => {
+                self.pull_exact_with_progress_and_options(
+                    &bag,
+                    Some(remote_registry.as_str()),
+                    options,
+                    progress,
+                )
+                .await?;
+            }
+            Ok(result) => return Ok(result),
+            Err(resolve_err) => {
+                let bag: BagRef = target.parse()?;
+                self.pull_exact_with_progress_and_options(&bag, registry, options, progress)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to pull '{target}' after resolve lookup failed: {resolve_err}"
+                        )
+                    })?;
+            }
+        }
+
+        self.resolve_target(target, registry)
+            .await
+            .with_context(|| format!("failed to resolve '{target}' after pull"))
     }
 
     /// Exports a cached bag (or one attachment) to `out`.

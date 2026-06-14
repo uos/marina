@@ -1284,10 +1284,43 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                 .clone()
                 .or_else(|| marina.default_registry().map(|s| s.to_string()));
 
-            match marina
-                .resolve_target(&args.target, eff_registry.as_deref())
-                .await?
-            {
+            let resolved = if yes {
+                let pull_options = PullOptions {
+                    unpacked_mcap_compression: config_mcap_compression_to_core(
+                        compression.unpacked_mcap_compression,
+                    ),
+                    force: false,
+                };
+                if quiet_non_interactive_yes {
+                    let mut progress = ProgressReporter::silent();
+                    marina
+                        .resolve_target_or_pull_with_progress_and_options(
+                            &args.target,
+                            eff_registry.as_deref(),
+                            pull_options,
+                            &mut progress,
+                        )
+                        .await?
+                } else {
+                    let mut stdout = std::io::stdout();
+                    let mut sink = WriterProgress::new(&mut stdout);
+                    let mut progress = ProgressReporter::new(&mut sink);
+                    marina
+                        .resolve_target_or_pull_with_progress_and_options(
+                            &args.target,
+                            eff_registry.as_deref(),
+                            pull_options,
+                            &mut progress,
+                        )
+                        .await?
+                }
+            } else {
+                marina
+                    .resolve_target(&args.target, eff_registry.as_deref())
+                    .await?
+            };
+
+            match resolved {
                 ResolveResult::LocalPath(p) => println!("{}", p.display()),
                 ResolveResult::Cached(p) => println!("{}", p.display()),
                 ResolveResult::RemoteAvailable {

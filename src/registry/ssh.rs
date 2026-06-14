@@ -496,18 +496,36 @@ impl SshRegistry {
             .with_context(|| format!("failed opening remote sftp file {}", remote_path))?;
         let pb = label.map(|l| transfer_bar(size, l));
         let mut buf = [0u8; 64 * 1024];
+        let mut read = 0u64;
         loop {
             let n = local_file.read(&mut buf).await?;
             if n == 0 {
                 break;
             }
             remote_file.write_all(&buf[..n]).await?;
+            read += n as u64;
             if let Some(ref pb) = pb {
                 pb.inc(n as u64);
             }
         }
+        remote_file
+            .flush()
+            .await
+            .with_context(|| format!("failed flushing remote sftp file {}", remote_path))?;
+        remote_file
+            .shutdown()
+            .await
+            .with_context(|| format!("failed closing remote sftp file {}", remote_path))?;
         if let Some(pb) = pb {
             pb.finish_and_clear();
+        }
+        if read != size {
+            return Err(anyhow!(
+                "incomplete local read for {}: read {} of {} bytes",
+                local.display(),
+                read,
+                size
+            ));
         }
         Ok(())
     }
@@ -536,18 +554,32 @@ impl SshRegistry {
             .with_context(|| format!("failed opening remote sftp file {}", remote_path))?;
         let pb = label.map(|l| transfer_bar(size, l));
         let mut buf = [0u8; 64 * 1024];
+        let mut written = 0u64;
         loop {
             let n = remote_file.read(&mut buf).await?;
             if n == 0 {
                 break;
             }
             local_file.write_all(&buf[..n]).await?;
+            written += n as u64;
             if let Some(ref pb) = pb {
                 pb.inc(n as u64);
             }
         }
+        local_file
+            .sync_all()
+            .await
+            .with_context(|| format!("failed syncing local file {}", local.display()))?;
         if let Some(pb) = pb {
             pb.finish_and_clear();
+        }
+        if size != 0 && written != size {
+            return Err(anyhow!(
+                "incomplete sftp download for {}: received {} of {} bytes",
+                remote_path,
+                written,
+                size
+            ));
         }
         Ok(())
     }
@@ -648,6 +680,79 @@ impl SshRegistry {
         Ok(())
     }
 
+    async fn remote_file_size(&self, remote_path: &str) -> Result<u64> {
+        if self.transport == SshTransport::OpenSsh {
+            let output = self
+                .run_ssh_capture(&format!("wc -c < {}", shell_quote(remote_path)))
+                .await
+                .with_context(|| format!("failed to stat remote file {}", remote_path))?;
+            return output.trim().parse::<u64>().with_context(|| {
+                format!(
+                    "remote file size for {} was not an integer: {}",
+                    remote_path,
+                    output.trim()
+                )
+            });
+        }
+
+        let sftp = self.open_sftp().await?;
+        Ok(sftp
+            .metadata(remote_path)
+            .await
+            .with_context(|| format!("failed to stat remote file {}", remote_path))?
+            .size
+            .unwrap_or(0))
+    }
+
+    async fn remove_remote_file(&self, remote_path: &str) -> Result<()> {
+        if self.transport == SshTransport::OpenSsh {
+            return self
+                .run_ssh(&format!("rm -f {}", shell_quote(remote_path)))
+                .await;
+        }
+
+        let sftp = self.open_sftp().await?;
+        let _ = sftp.remove_file(remote_path).await;
+        Ok(())
+    }
+
+    async fn rename_remote_file(&self, from: &str, to: &str) -> Result<()> {
+        if self.transport == SshTransport::OpenSsh {
+            return self
+                .run_ssh(&format!("mv -f {} {}", shell_quote(from), shell_quote(to)))
+                .await;
+        }
+
+        let sftp = self.open_sftp().await?;
+        let _ = sftp.remove_file(to).await;
+        sftp.rename(from, to)
+            .await
+            .with_context(|| format!("failed to rename remote file {} to {}", from, to))
+    }
+
+    async fn ensure_remote_dir(&self, remote_dir: &str) -> Result<()> {
+        if self.transport == SshTransport::OpenSsh {
+            return self
+                .run_ssh(&format!("mkdir -p {}", shell_quote(remote_dir)))
+                .await;
+        }
+
+        let sftp = self.open_sftp().await?;
+        let mut current = if remote_dir.starts_with('/') {
+            String::from("/")
+        } else {
+            String::new()
+        };
+        for part in remote_dir.split('/').filter(|part| !part.is_empty()) {
+            if current != "/" && !current.is_empty() {
+                current.push('/');
+            }
+            current.push_str(part);
+            let _ = sftp.create_dir(current.clone()).await;
+        }
+        Ok(())
+    }
+
     fn ensure_openssh_auth_supported(&self) -> Result<()> {
         if let Some(var) = &self.auth_env {
             let secret = std::env::var(var)
@@ -714,12 +819,7 @@ impl RegistryDriver for SshRegistry {
         meta: &PushMeta,
     ) -> Result<()> {
         let target_dir = self.object_dir(bag);
-        self.run_ssh(&format!(
-            "rm -rf {} && mkdir -p {}",
-            shell_quote(&target_dir),
-            shell_quote(&target_dir)
-        ))
-        .await?;
+        self.ensure_remote_dir(&target_dir).await?;
 
         let tmp = std::env::temp_dir().join(format!("marina_meta_{}.json", bag.cache_key()));
         let meta_file = MetaFile {
@@ -734,15 +834,31 @@ impl RegistryDriver for SshRegistry {
         };
         fs::write(&tmp, serde_json::to_vec_pretty(&meta_file)?)?;
 
-        self.upload_file_with_progress(packed_file, &self.data_path(bag))
+        let data_path = self.data_path(bag);
+        let meta_path = self.meta_path(bag);
+        let remote_tmp_suffix = format!(".uploading.{}", std::process::id());
+        let data_tmp_path = format!("{data_path}{remote_tmp_suffix}");
+        let meta_tmp_path = format!("{meta_path}{remote_tmp_suffix}");
+
+        self.remove_remote_file(&data_tmp_path).await?;
+        self.remove_remote_file(&meta_tmp_path).await?;
+
+        self.upload_file_with_progress(packed_file, &data_tmp_path)
             .await?;
-        if self.transport == SshTransport::OpenSsh {
-            self.openssh_copy(&tmp, &self.meta_path(bag), CopyDirection::Upload)
-                .await?;
-        } else {
-            let sftp = self.open_sftp().await?;
-            Self::sftp_upload(&sftp, &tmp, &self.meta_path(bag), None).await?;
+        let remote_bytes = self.remote_file_size(&data_tmp_path).await?;
+        if remote_bytes != meta.packed_bytes {
+            let _ = self.remove_remote_file(&data_tmp_path).await;
+            return Err(anyhow!(
+                "incomplete upload for {}: remote has {} of {} bytes",
+                bag.without_attachment(),
+                remote_bytes,
+                meta.packed_bytes
+            ));
         }
+        self.rename_remote_file(&data_tmp_path, &data_path).await?;
+
+        self.upload_file_with_progress(&tmp, &meta_tmp_path).await?;
+        self.rename_remote_file(&meta_tmp_path, &meta_path).await?;
         let _ = fs::remove_file(tmp);
         Ok(())
     }
@@ -768,6 +884,13 @@ impl RegistryDriver for SshRegistry {
             .ok_or_else(|| anyhow!("invalid output path"))?;
         fs::create_dir_all(parent)?;
 
+        let meta_local = parent.join("remote_metadata.json");
+        self.download_file_with_progress(&self.meta_path(bag), &meta_local, None)
+            .await?;
+        let meta_text = fs::read_to_string(&meta_local)?;
+        let _ = fs::remove_file(meta_local);
+        let meta: MetaFile = serde_json::from_str(&meta_text)?;
+
         self.download_file_with_progress(
             &self.data_path(bag),
             out_packed_file,
@@ -775,12 +898,17 @@ impl RegistryDriver for SshRegistry {
         )
         .await?;
 
-        let meta_local = parent.join("remote_metadata.json");
-        self.download_file_with_progress(&self.meta_path(bag), &meta_local, None)
-            .await?;
-        let meta_text = fs::read_to_string(&meta_local)?;
-        let _ = fs::remove_file(meta_local);
-        let meta: MetaFile = serde_json::from_str(&meta_text)?;
+        let local_bytes = fs::metadata(out_packed_file)
+            .with_context(|| format!("failed to stat {}", out_packed_file.display()))?
+            .len();
+        if local_bytes != meta.packed_bytes {
+            return Err(anyhow!(
+                "incomplete download for {}: received {} of {} bytes",
+                bag.without_attachment(),
+                local_bytes,
+                meta.packed_bytes
+            ));
+        }
 
         Ok(RemoteDescriptor {
             registry_name: self.name.clone(),
