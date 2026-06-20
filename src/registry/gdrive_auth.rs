@@ -12,6 +12,7 @@ const BUNDLED_CLIENT_SECRET: &str = "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";
 use serde::{Deserialize, Serialize};
 
 const TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
+const DEVICE_CODE_ENDPOINT: &str = "https://oauth2.googleapis.com/device/code";
 const DRIVE_SCOPE: &str = "https://www.googleapis.com/auth/drive";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,6 +193,138 @@ pub async fn run_oauth_flow(
     Ok(())
 }
 
+#[derive(Debug, Deserialize)]
+struct DeviceCodeResponse {
+    device_code: String,
+    user_code: String,
+    verification_url: String,
+    #[serde(default)]
+    verification_url_complete: Option<String>,
+    expires_in: u64,
+    #[serde(default = "default_device_poll_interval")]
+    interval: u64,
+}
+
+fn default_device_poll_interval() -> u64 {
+    5
+}
+
+/// Runs Google's OAuth2 device authorization flow and stores the resulting token.
+pub async fn run_device_oauth_flow(
+    registry_name: &str,
+    client_id: &str,
+    client_secret: &str,
+) -> Result<()> {
+    let client = reqwest::Client::new();
+    let device = request_device_code(&client, client_id).await?;
+
+    eprintln!("Open this URL on any machine with a browser:");
+    eprintln!();
+    eprintln!("{}", device.verification_url);
+    eprintln!();
+    eprintln!("Enter this code:");
+    eprintln!();
+    eprintln!("{}", device.user_code);
+    if let Some(url) = &device.verification_url_complete {
+        eprintln!();
+        eprintln!("Direct verification URL:");
+        eprintln!();
+        eprintln!("{}", url);
+    }
+    eprintln!();
+    eprintln!("Waiting for Google authorization...");
+
+    let token = poll_device_token(&client, client_id, client_secret, &device).await?;
+    save_stored_token(registry_name, &token)?;
+
+    eprintln!(
+        "Authentication successful. Token saved for registry '{}'.",
+        registry_name
+    );
+    Ok(())
+}
+
+async fn request_device_code(
+    client: &reqwest::Client,
+    client_id: &str,
+) -> Result<DeviceCodeResponse> {
+    let resp = client
+        .post(DEVICE_CODE_ENDPOINT)
+        .form(&[("client_id", client_id), ("scope", DRIVE_SCOPE)])
+        .send()
+        .await
+        .context("device authorization request failed")?
+        .json::<serde_json::Value>()
+        .await
+        .context("failed to parse device authorization response")?;
+
+    if let Some(err) = resp["error"].as_str() {
+        return Err(anyhow!(
+            "device authorization failed: {} — {}",
+            err,
+            resp["error_description"].as_str().unwrap_or("")
+        ));
+    }
+
+    serde_json::from_value(resp).context("invalid device authorization response")
+}
+
+async fn poll_device_token(
+    client: &reqwest::Client,
+    client_id: &str,
+    client_secret: &str,
+    device: &DeviceCodeResponse,
+) -> Result<StoredToken> {
+    let started = std::time::Instant::now();
+    let mut interval = device.interval.max(1);
+
+    loop {
+        if started.elapsed().as_secs() >= device.expires_in {
+            return Err(anyhow!("device authorization expired before completion"));
+        }
+
+        tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+
+        let resp = client
+            .post(TOKEN_ENDPOINT)
+            .form(&[
+                ("client_id", client_id),
+                ("client_secret", client_secret),
+                ("device_code", device.device_code.as_str()),
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+            ])
+            .send()
+            .await
+            .context("device token request failed")?
+            .json::<serde_json::Value>()
+            .await
+            .context("failed to parse device token response")?;
+
+        if let Some(err) = resp["error"].as_str() {
+            match err {
+                "authorization_pending" => continue,
+                "slow_down" => {
+                    interval = interval.saturating_add(5);
+                    continue;
+                }
+                "access_denied" => return Err(anyhow!("device authorization was denied")),
+                "expired_token" => {
+                    return Err(anyhow!("device authorization expired before completion"));
+                }
+                _ => {
+                    return Err(anyhow!(
+                        "device token exchange failed: {} — {}",
+                        err,
+                        resp["error_description"].as_str().unwrap_or("")
+                    ));
+                }
+            }
+        }
+
+        return token_from_response(client_id, client_secret, &resp);
+    }
+}
+
 async fn wait_for_code(listener: tokio::net::TcpListener) -> Result<String> {
     let (mut stream, _) = listener
         .accept()
@@ -263,26 +396,7 @@ async fn exchange_code(
         ));
     }
 
-    let access_token = resp["access_token"]
-        .as_str()
-        .ok_or_else(|| anyhow!("missing access_token in response"))?
-        .to_string();
-    let refresh_token = resp["refresh_token"]
-        .as_str()
-        .ok_or_else(|| {
-            anyhow!(
-                "missing refresh_token — make sure access_type=offline and prompt=consent are set"
-            )
-        })?
-        .to_string();
-
-    Ok(build_token(
-        client_id,
-        client_secret,
-        access_token,
-        refresh_token,
-        &resp,
-    ))
+    token_from_response(client_id, client_secret, &resp)
 }
 
 async fn do_refresh(
@@ -325,6 +439,29 @@ async fn do_refresh(
         access_token,
         refresh_token.to_string(),
         &resp,
+    ))
+}
+
+fn token_from_response(
+    client_id: &str,
+    client_secret: &str,
+    resp: &serde_json::Value,
+) -> Result<StoredToken> {
+    let access_token = resp["access_token"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing access_token in response"))?
+        .to_string();
+    let refresh_token = resp["refresh_token"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing refresh_token in response"))?
+        .to_string();
+
+    Ok(build_token(
+        client_id,
+        client_secret,
+        access_token,
+        refresh_token,
+        resp,
     ))
 }
 

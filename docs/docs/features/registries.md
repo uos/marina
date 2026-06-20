@@ -65,6 +65,23 @@ marina registry auth my_drive
 
 `marina registry auth` opens a browser window for the Google OAuth flow. Credentials are persisted locally in `~/.config/marina/tokens`, so avoid adding them to git.
 
+For remote shells, SSH sessions, and other machines where Marina cannot open a local browser callback, use the device-code flow instead:
+
+~~~bash
+marina registry auth my_drive --device
+~~~
+
+Marina prints a Google verification URL and a short code. Open the URL on any machine with a browser, enter the code, and leave the remote command running until authentication completes.
+
+For unattended environments such as CI, prefer a service account:
+
+~~~bash
+marina registry add my_drive gdrive://<folder-id> --auth-env MARINA_SA_JSON
+export MARINA_SA_JSON="$(cat /path/to/service-account.json)"
+~~~
+
+Share the Drive folder with the service account email address from the JSON key.
+
 !!! warning "Private Folders"
 
     Marina currently cannot access privately shared folders (shared only with specific users). If your data is sensitive but you want to share it, use a private SSH registry instead.

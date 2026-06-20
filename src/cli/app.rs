@@ -84,7 +84,7 @@ enum RegistrySub {
     #[command(alias = "ls")]
     List,
     Rm(RemoveRegistryArgs),
-    /// Authenticate a gdrive registry via browser OAuth flow
+    /// Authenticate a gdrive registry via OAuth
     Auth(AuthRegistryArgs),
     /// Mirror all datasets from one registry into another
     Mirror(MirrorRegistryArgs),
@@ -134,6 +134,9 @@ struct AuthRegistryArgs {
     /// Show persisted OAuth status for this registry
     #[arg(long)]
     status: bool,
+    /// Use a terminal device-code flow instead of a local browser callback
+    #[arg(long)]
+    device: bool,
     /// OAuth client ID (or set MARINA_GDRIVE_CLIENT_ID env var)
     #[arg(long)]
     client_id: Option<String>,
@@ -901,7 +904,12 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                         args.client_id,
                         args.client_secret,
                     )?;
-                    gdrive_auth::run_oauth_flow(&args.name, &client_id, &client_secret).await?;
+                    if args.device {
+                        gdrive_auth::run_device_oauth_flow(&args.name, &client_id, &client_secret)
+                            .await?;
+                    } else {
+                        gdrive_auth::run_oauth_flow(&args.name, &client_id, &client_secret).await?;
+                    }
                 }
             }
             RegistrySub::Mirror(args) => {
