@@ -178,7 +178,19 @@ pub async fn run_oauth_flow(
     client_id: &str,
     client_secret: &str,
 ) -> Result<()> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+    run_oauth_flow_with_options(registry_name, client_id, client_secret, false, None).await
+}
+
+/// Runs the full OAuth2 authorization code flow and stores the resulting token.
+pub async fn run_oauth_flow_with_options(
+    registry_name: &str,
+    client_id: &str,
+    client_secret: &str,
+    no_browser: bool,
+    callback_port: Option<u16>,
+) -> Result<()> {
+    let bind_addr = format!("127.0.0.1:{}", callback_port.unwrap_or(0));
+    let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
         .context("failed to start local callback server")?;
     let port = listener.local_addr()?.port();
@@ -197,8 +209,12 @@ pub async fn run_oauth_flow(
         scope = percent_encode(DRIVE_SCOPE),
     );
 
-    eprintln!("Opening browser for Google authentication...");
-    if !open_browser(&consent_url) {
+    if no_browser {
+        eprintln!("Open this URL manually:\n\n{}\n", consent_url);
+    } else {
+        eprintln!("Opening browser for Google authentication...");
+    }
+    if !no_browser && !open_browser(&consent_url) {
         eprintln!(
             "Could not open browser automatically. Open this URL manually:\n\n{}\n",
             consent_url
@@ -285,6 +301,18 @@ async fn request_device_code(
         .context("failed to parse device authorization response")?;
 
     if let Some(err) = resp["error"].as_str() {
+        if err == "invalid_scope"
+            && resp["error_description"]
+                .as_str()
+                .is_some_and(|desc| desc.contains("Invalid device flow scope"))
+        {
+            return Err(anyhow!(
+                "device authorization failed: Google does not allow the Drive scope in the device-code flow\n\
+                Use the browser callback flow with SSH port forwarding instead, for example:\n\
+                ssh -L 8765:127.0.0.1:8765 <remote-host>\n\
+                marina registry auth <name> --no-browser --callback-port 8765"
+            ));
+        }
         if err == "invalid_client"
             && resp["error_description"]
                 .as_str()

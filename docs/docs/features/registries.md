@@ -65,14 +65,16 @@ marina registry auth my_drive
 
 `marina registry auth` opens a browser window for the Google OAuth flow. Credentials are persisted locally in `~/.config/marina/tokens`, so avoid adding them to git.
 
-For remote shells, SSH sessions, and other machines where Marina cannot open a local browser callback, use the device-code flow instead:
+For remote shells, SSH sessions, and other machines where Marina cannot open a local browser, forward a fixed callback port and open the printed URL locally:
 
 ~~~bash
-export MARINA_GDRIVE_DEVICE_CLIENT_ID=<tv-and-limited-input-client-id>
-marina registry auth my_drive --device
+ssh -L 8765:127.0.0.1:8765 <remote-host>
+marina registry auth my_drive --no-browser --callback-port 8765
 ~~~
 
-Marina prints a Google verification URL and a short code. Open the URL on any machine with a browser, enter the code, and leave the remote command running until authentication completes. Google requires a device-flow-compatible OAuth client for this mode. Create an OAuth client of type **TVs and Limited Input devices** in Google Cloud Console, then pass it with `--client-id` or set `MARINA_GDRIVE_DEVICE_CLIENT_ID`.
+Marina prints a Google authorization URL. Open it on the machine where you created the SSH tunnel, then leave the remote command running until authentication completes.
+
+Google's device-code OAuth flow does not accept the Drive scope Marina needs, so `--device` is not suitable for Google Drive registries.
 
 For unattended environments such as CI, prefer a service account:
 
