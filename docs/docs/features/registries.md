@@ -68,10 +68,11 @@ marina registry auth my_drive
 For remote shells, SSH sessions, and other machines where Marina cannot open a local browser callback, use the device-code flow instead:
 
 ~~~bash
+export MARINA_GDRIVE_DEVICE_CLIENT_ID=<tv-and-limited-input-client-id>
 marina registry auth my_drive --device
 ~~~
 
-Marina prints a Google verification URL and a short code. Open the URL on any machine with a browser, enter the code, and leave the remote command running until authentication completes.
+Marina prints a Google verification URL and a short code. Open the URL on any machine with a browser, enter the code, and leave the remote command running until authentication completes. Google requires a device-flow-compatible OAuth client for this mode. Create an OAuth client of type **TVs and Limited Input devices** in Google Cloud Console, then pass it with `--client-id` or set `MARINA_GDRIVE_DEVICE_CLIENT_ID`.
 
 For unattended environments such as CI, prefer a service account:
 

@@ -146,6 +146,32 @@ pub fn resolve_client_credentials(
     Ok((id, secret))
 }
 
+/// Resolves OAuth credentials for Google's device-code flow.
+///
+/// Google rejects Desktop OAuth clients at the device authorization endpoint, so
+/// this intentionally does not fall back to Marina's bundled Desktop client.
+pub fn resolve_device_client_credentials(
+    client_id: Option<String>,
+    client_secret: Option<String>,
+) -> Result<(String, String)> {
+    let id = client_id
+        .or_else(|| std::env::var("MARINA_GDRIVE_DEVICE_CLIENT_ID").ok())
+        .or_else(|| std::env::var("MARINA_GDRIVE_CLIENT_ID").ok())
+        .ok_or_else(|| {
+            anyhow!(
+                "no device OAuth client ID found\n\
+            Google device-code auth requires an OAuth client of type 'TVs and Limited Input devices'.\n\
+            Create one at https://console.cloud.google.com/apis/credentials\n\
+            then set MARINA_GDRIVE_DEVICE_CLIENT_ID or pass --client-id"
+            )
+        })?;
+    let secret = client_secret
+        .or_else(|| std::env::var("MARINA_GDRIVE_DEVICE_CLIENT_SECRET").ok())
+        .or_else(|| std::env::var("MARINA_GDRIVE_CLIENT_SECRET").ok())
+        .unwrap_or_default();
+    Ok((id, secret))
+}
+
 /// Runs the full OAuth2 authorization code flow and stores the resulting token.
 pub async fn run_oauth_flow(
     registry_name: &str,
@@ -259,6 +285,17 @@ async fn request_device_code(
         .context("failed to parse device authorization response")?;
 
     if let Some(err) = resp["error"].as_str() {
+        if err == "invalid_client"
+            && resp["error_description"]
+                .as_str()
+                .is_some_and(|desc| desc.contains("Invalid client type"))
+        {
+            return Err(anyhow!(
+                "device authorization failed: invalid OAuth client type\n\
+                Google device-code auth requires an OAuth client of type 'TVs and Limited Input devices'.\n\
+                Set MARINA_GDRIVE_DEVICE_CLIENT_ID or pass --client-id with a compatible client."
+            ));
+        }
         return Err(anyhow!(
             "device authorization failed: {} — {}",
             err,
@@ -285,14 +322,18 @@ async fn poll_device_token(
 
         tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
 
+        let mut form = vec![
+            ("client_id", client_id),
+            ("device_code", device.device_code.as_str()),
+            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+        ];
+        if !client_secret.is_empty() {
+            form.push(("client_secret", client_secret));
+        }
+
         let resp = client
             .post(TOKEN_ENDPOINT)
-            .form(&[
-                ("client_id", client_id),
-                ("client_secret", client_secret),
-                ("device_code", device.device_code.as_str()),
-                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-            ])
+            .form(&form)
             .send()
             .await
             .context("device token request failed")?
@@ -405,14 +446,17 @@ async fn do_refresh(
     refresh_token: &str,
 ) -> Result<StoredToken> {
     let client = reqwest::Client::new();
+    let mut form = vec![
+        ("refresh_token", refresh_token),
+        ("client_id", client_id),
+        ("grant_type", "refresh_token"),
+    ];
+    if !client_secret.is_empty() {
+        form.push(("client_secret", client_secret));
+    }
     let resp: serde_json::Value = client
         .post(TOKEN_ENDPOINT)
-        .form(&[
-            ("refresh_token", refresh_token),
-            ("client_id", client_id),
-            ("client_secret", client_secret),
-            ("grant_type", "refresh_token"),
-        ])
+        .form(&form)
         .send()
         .await
         .context("token refresh request failed")?
