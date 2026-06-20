@@ -74,8 +74,6 @@ marina registry auth my_drive --no-browser --callback-port 8765
 
 Marina prints a Google authorization URL. Open it on the machine where you created the SSH tunnel, then leave the remote command running until authentication completes.
 
-Google's device-code OAuth flow does not accept the Drive scope Marina needs, so `--device` is not suitable for Google Drive registries.
-
 For unattended environments such as CI, prefer a service account:
 
 ~~~bash

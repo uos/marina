@@ -134,19 +134,16 @@ struct AuthRegistryArgs {
     /// Show persisted OAuth status for this registry
     #[arg(long)]
     status: bool,
-    /// Use a terminal device-code flow instead of a local browser callback
-    #[arg(long)]
-    device: bool,
     /// Print the OAuth URL instead of trying to open a browser
     #[arg(long)]
     no_browser: bool,
     /// Bind the local OAuth callback server to a fixed port
     #[arg(long)]
     callback_port: Option<u16>,
-    /// OAuth client ID (or set MARINA_GDRIVE_CLIENT_ID env var; --device can also use MARINA_GDRIVE_DEVICE_CLIENT_ID)
+    /// OAuth client ID (or set MARINA_GDRIVE_CLIENT_ID env var)
     #[arg(long)]
     client_id: Option<String>,
-    /// OAuth client secret (or set MARINA_GDRIVE_CLIENT_SECRET env var; --device can also use MARINA_GDRIVE_DEVICE_CLIENT_SECRET)
+    /// OAuth client secret (or set MARINA_GDRIVE_CLIENT_SECRET env var)
     #[arg(long)]
     client_secret: Option<String>,
 }
@@ -906,33 +903,18 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                         }
                         return Ok(());
                     }
-                    if args.device {
-                        if args.no_browser || args.callback_port.is_some() {
-                            return Err(anyhow::anyhow!(
-                                "--no-browser and --callback-port are only used by the browser callback flow"
-                            ));
-                        }
-                        let (client_id, client_secret) =
-                            gdrive_auth::resolve_device_client_credentials(
-                                args.client_id,
-                                args.client_secret,
-                            )?;
-                        gdrive_auth::run_device_oauth_flow(&args.name, &client_id, &client_secret)
-                            .await?;
-                    } else {
-                        let (client_id, client_secret) = gdrive_auth::resolve_client_credentials(
-                            args.client_id,
-                            args.client_secret,
-                        )?;
-                        gdrive_auth::run_oauth_flow_with_options(
-                            &args.name,
-                            &client_id,
-                            &client_secret,
-                            args.no_browser,
-                            args.callback_port,
-                        )
-                        .await?;
-                    }
+                    let (client_id, client_secret) = gdrive_auth::resolve_client_credentials(
+                        args.client_id,
+                        args.client_secret,
+                    )?;
+                    gdrive_auth::run_oauth_flow_with_options(
+                        &args.name,
+                        &client_id,
+                        &client_secret,
+                        args.no_browser,
+                        args.callback_port,
+                    )
+                    .await?;
                 }
             }
             RegistrySub::Mirror(args) => {

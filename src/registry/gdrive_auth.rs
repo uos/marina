@@ -12,7 +12,6 @@ const BUNDLED_CLIENT_SECRET: &str = "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";
 use serde::{Deserialize, Serialize};
 
 const TOKEN_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
-const DEVICE_CODE_ENDPOINT: &str = "https://oauth2.googleapis.com/device/code";
 const DRIVE_SCOPE: &str = "https://www.googleapis.com/auth/drive";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,32 +145,6 @@ pub fn resolve_client_credentials(
     Ok((id, secret))
 }
 
-/// Resolves OAuth credentials for Google's device-code flow.
-///
-/// Google rejects Desktop OAuth clients at the device authorization endpoint, so
-/// this intentionally does not fall back to Marina's bundled Desktop client.
-pub fn resolve_device_client_credentials(
-    client_id: Option<String>,
-    client_secret: Option<String>,
-) -> Result<(String, String)> {
-    let id = client_id
-        .or_else(|| std::env::var("MARINA_GDRIVE_DEVICE_CLIENT_ID").ok())
-        .or_else(|| std::env::var("MARINA_GDRIVE_CLIENT_ID").ok())
-        .ok_or_else(|| {
-            anyhow!(
-                "no device OAuth client ID found\n\
-            Google device-code auth requires an OAuth client of type 'TVs and Limited Input devices'.\n\
-            Create one at https://console.cloud.google.com/apis/credentials\n\
-            then set MARINA_GDRIVE_DEVICE_CLIENT_ID or pass --client-id"
-            )
-        })?;
-    let secret = client_secret
-        .or_else(|| std::env::var("MARINA_GDRIVE_DEVICE_CLIENT_SECRET").ok())
-        .or_else(|| std::env::var("MARINA_GDRIVE_CLIENT_SECRET").ok())
-        .unwrap_or_default();
-    Ok((id, secret))
-}
-
 /// Runs the full OAuth2 authorization code flow and stores the resulting token.
 pub async fn run_oauth_flow(
     registry_name: &str,
@@ -233,165 +206,6 @@ pub async fn run_oauth_flow_with_options(
         registry_name
     );
     Ok(())
-}
-
-#[derive(Debug, Deserialize)]
-struct DeviceCodeResponse {
-    device_code: String,
-    user_code: String,
-    verification_url: String,
-    #[serde(default)]
-    verification_url_complete: Option<String>,
-    expires_in: u64,
-    #[serde(default = "default_device_poll_interval")]
-    interval: u64,
-}
-
-fn default_device_poll_interval() -> u64 {
-    5
-}
-
-/// Runs Google's OAuth2 device authorization flow and stores the resulting token.
-pub async fn run_device_oauth_flow(
-    registry_name: &str,
-    client_id: &str,
-    client_secret: &str,
-) -> Result<()> {
-    let client = reqwest::Client::new();
-    let device = request_device_code(&client, client_id).await?;
-
-    eprintln!("Open this URL on any machine with a browser:");
-    eprintln!();
-    eprintln!("{}", device.verification_url);
-    eprintln!();
-    eprintln!("Enter this code:");
-    eprintln!();
-    eprintln!("{}", device.user_code);
-    if let Some(url) = &device.verification_url_complete {
-        eprintln!();
-        eprintln!("Direct verification URL:");
-        eprintln!();
-        eprintln!("{}", url);
-    }
-    eprintln!();
-    eprintln!("Waiting for Google authorization...");
-
-    let token = poll_device_token(&client, client_id, client_secret, &device).await?;
-    save_stored_token(registry_name, &token)?;
-
-    eprintln!(
-        "Authentication successful. Token saved for registry '{}'.",
-        registry_name
-    );
-    Ok(())
-}
-
-async fn request_device_code(
-    client: &reqwest::Client,
-    client_id: &str,
-) -> Result<DeviceCodeResponse> {
-    let resp = client
-        .post(DEVICE_CODE_ENDPOINT)
-        .form(&[("client_id", client_id), ("scope", DRIVE_SCOPE)])
-        .send()
-        .await
-        .context("device authorization request failed")?
-        .json::<serde_json::Value>()
-        .await
-        .context("failed to parse device authorization response")?;
-
-    if let Some(err) = resp["error"].as_str() {
-        if err == "invalid_scope"
-            && resp["error_description"]
-                .as_str()
-                .is_some_and(|desc| desc.contains("Invalid device flow scope"))
-        {
-            return Err(anyhow!(
-                "device authorization failed: Google does not allow the Drive scope in the device-code flow\n\
-                Use the browser callback flow with SSH port forwarding instead, for example:\n\
-                ssh -L 8765:127.0.0.1:8765 <remote-host>\n\
-                marina registry auth <name> --no-browser --callback-port 8765"
-            ));
-        }
-        if err == "invalid_client"
-            && resp["error_description"]
-                .as_str()
-                .is_some_and(|desc| desc.contains("Invalid client type"))
-        {
-            return Err(anyhow!(
-                "device authorization failed: invalid OAuth client type\n\
-                Google device-code auth requires an OAuth client of type 'TVs and Limited Input devices'.\n\
-                Set MARINA_GDRIVE_DEVICE_CLIENT_ID or pass --client-id with a compatible client."
-            ));
-        }
-        return Err(anyhow!(
-            "device authorization failed: {} — {}",
-            err,
-            resp["error_description"].as_str().unwrap_or("")
-        ));
-    }
-
-    serde_json::from_value(resp).context("invalid device authorization response")
-}
-
-async fn poll_device_token(
-    client: &reqwest::Client,
-    client_id: &str,
-    client_secret: &str,
-    device: &DeviceCodeResponse,
-) -> Result<StoredToken> {
-    let started = std::time::Instant::now();
-    let mut interval = device.interval.max(1);
-
-    loop {
-        if started.elapsed().as_secs() >= device.expires_in {
-            return Err(anyhow!("device authorization expired before completion"));
-        }
-
-        tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
-
-        let mut form = vec![
-            ("client_id", client_id),
-            ("device_code", device.device_code.as_str()),
-            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-        ];
-        if !client_secret.is_empty() {
-            form.push(("client_secret", client_secret));
-        }
-
-        let resp = client
-            .post(TOKEN_ENDPOINT)
-            .form(&form)
-            .send()
-            .await
-            .context("device token request failed")?
-            .json::<serde_json::Value>()
-            .await
-            .context("failed to parse device token response")?;
-
-        if let Some(err) = resp["error"].as_str() {
-            match err {
-                "authorization_pending" => continue,
-                "slow_down" => {
-                    interval = interval.saturating_add(5);
-                    continue;
-                }
-                "access_denied" => return Err(anyhow!("device authorization was denied")),
-                "expired_token" => {
-                    return Err(anyhow!("device authorization expired before completion"));
-                }
-                _ => {
-                    return Err(anyhow!(
-                        "device token exchange failed: {} — {}",
-                        err,
-                        resp["error_description"].as_str().unwrap_or("")
-                    ));
-                }
-            }
-        }
-
-        return token_from_response(client_id, client_secret, &resp);
-    }
 }
 
 async fn wait_for_code(listener: tokio::net::TcpListener) -> Result<String> {
