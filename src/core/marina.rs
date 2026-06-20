@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1154,6 +1154,18 @@ impl Marina {
         target_name: &str,
         progress: &mut ProgressReporter<'_>,
     ) -> Result<MirrorStats> {
+        self.mirror_registry_filtered(source_name, target_name, &["*"], progress)
+            .await
+    }
+
+    /// Mirror bags matching `patterns` from `source` registry into `target` registry.
+    pub async fn mirror_registry_filtered(
+        &self,
+        source_name: &str,
+        target_name: &str,
+        patterns: &[impl AsRef<str>],
+        progress: &mut ProgressReporter<'_>,
+    ) -> Result<MirrorStats> {
         let source_drv = self
             .registries
             .get(source_name)
@@ -1169,9 +1181,30 @@ impl Marina {
 
         progress.emit(
             "mirror",
-            format!("listing source registry '{}'", source_name),
+            format!(
+                "listing source registry '{}' with {}",
+                source_name,
+                format_mirror_patterns(patterns)
+            ),
         );
-        let source_items = source_drv.list_with_info("*").await?;
+        let mut source_items = Vec::new();
+        let mut seen_source_items = HashSet::new();
+        if patterns.is_empty() {
+            for item in source_drv.list_with_info("*").await? {
+                if seen_source_items.insert(item.0.to_string()) {
+                    source_items.push(item);
+                }
+            }
+        }
+        for pattern in patterns {
+            let pattern = pattern.as_ref();
+            for item in source_drv.list_with_info(pattern).await? {
+                if seen_source_items.insert(item.0.to_string()) {
+                    source_items.push(item);
+                }
+            }
+        }
+        source_items.sort_by(|(a, _), (b, _)| a.to_string().cmp(&b.to_string()));
 
         progress.emit(
             "mirror",
@@ -1495,6 +1528,21 @@ fn mirror_tempdir() -> Result<tempfile::TempDir> {
         }
     }
     tempfile::tempdir().context("failed to create temp dir in system temp")
+}
+
+fn format_mirror_patterns(patterns: &[impl AsRef<str>]) -> String {
+    if patterns.is_empty() {
+        "pattern '*'".to_string()
+    } else if patterns.len() == 1 {
+        format!("pattern '{}'", patterns[0].as_ref())
+    } else {
+        let joined = patterns
+            .iter()
+            .map(|p| format!("'{}'", p.as_ref()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("patterns {}", joined)
+    }
 }
 
 fn compute_bundle_hash(path: &Path) -> Result<String> {

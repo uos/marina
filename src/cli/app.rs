@@ -96,6 +96,8 @@ struct MirrorRegistryArgs {
     source: String,
     /// Target registry name
     target: String,
+    /// Glob patterns of datasets to mirror, e.g. 'helipr/*' or 'helipr/bridge01:*'
+    patterns: Vec<String>,
 }
 
 #[derive(Args)]
@@ -304,6 +306,14 @@ fn spawn_complete_refresh() {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn();
+    }
+}
+
+fn mirror_patterns(patterns: &[String]) -> Vec<String> {
+    if patterns.is_empty() {
+        vec!["*".to_string()]
+    } else {
+        patterns.to_vec()
     }
 }
 
@@ -921,8 +931,14 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                 let mut out = std::io::stdout();
                 let mut sink = WriterProgress::new(&mut out);
                 let mut progress = ProgressReporter::new(&mut sink);
+                let patterns = mirror_patterns(&args.patterns);
                 let stats = marina
-                    .mirror_registry(&args.source, &args.target, &mut progress)
+                    .mirror_registry_filtered(
+                        &args.source,
+                        &args.target,
+                        patterns.as_slice(),
+                        &mut progress,
+                    )
                     .await?;
                 println!(
                     "mirror complete: {} pushed, {} updated, {} skipped",

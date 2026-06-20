@@ -133,6 +133,19 @@ Copy all datasets from one registry to another:
 marina registry mirror <source> <target>
 ~~~
 
+Limit a mirror to datasets matching one or more glob patterns:
+
+~~~bash
+# Mirror all datasets in the helipr namespace
+marina registry mirror <source> <target> 'helipr/*'
+
+# Mirror all tags of one dataset
+marina registry mirror <source> <target> 'helipr/bridge01:*'
+
+# Mirror the union of multiple patterns
+marina registry mirror <source> <target> 'helipr/bridge01:*' 'helipr/bridge02:*'
+~~~
+
 Useful for backing up a remote registry to local storage or migrating between backends.
 
 ## Auth Status
