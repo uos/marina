@@ -1204,7 +1204,7 @@ impl Marina {
                 }
             }
         }
-        source_items.sort_by(|(a, _), (b, _)| a.to_string().cmp(&b.to_string()));
+        source_items.sort_by_key(|(a, _)| a.to_string());
 
         progress.emit(
             "mirror",
