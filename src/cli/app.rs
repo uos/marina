@@ -174,7 +174,8 @@ enum CliArchiveCompression {
 struct PushArgs {
     #[arg(value_name = "DATASET", add = ArgValueCompleter::new(complete_datasets))]
     bag: BagRef,
-    source: PathBuf,
+    #[arg(value_name = "SOURCE")]
+    source: Option<PathBuf>,
     #[arg(long)]
     registry: Option<String>,
     #[arg(long, value_enum)]
@@ -1158,6 +1159,15 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                 dry_run: args.dry_run,
                 move_source_to_cache: !args.copy_to_cache,
             };
+            let source = match args.source.as_deref() {
+                Some(source) => source.to_path_buf(),
+                None => marina.cached_bag_dir(&args.bag).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no source path provided and '{}' is not available locally; import it first or pass SOURCE",
+                        args.bag.without_attachment()
+                    )
+                })?,
+            };
             if !args.no_progress {
                 let mut stdout = std::io::stdout();
                 let mut sink = WriterProgress::new(&mut stdout);
@@ -1165,7 +1175,7 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                 marina
                     .push_with_progress_and_options(
                         &args.bag,
-                        &args.source,
+                        &source,
                         registry.as_deref(),
                         push_options,
                         &mut progress,
@@ -1176,7 +1186,7 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                 marina
                     .push_with_progress_and_options(
                         &args.bag,
-                        &args.source,
+                        &source,
                         registry.as_deref(),
                         push_options,
                         &mut progress,
@@ -2009,5 +2019,36 @@ fn local_registry_data_path(uri: &str) -> PathBuf {
         PathBuf::from(rest)
     } else {
         PathBuf::from(uri)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn push_source_argument_is_optional() {
+        let cli = Cli::try_parse_from(["marina", "push", "demo:v1"])
+            .expect("push without SOURCE should parse");
+
+        let Commands::Push(args) = cli.cmd else {
+            panic!("expected push command");
+        };
+
+        assert_eq!(args.bag.to_string(), "demo:v1");
+        assert_eq!(args.source, None);
+    }
+
+    #[test]
+    fn push_source_argument_still_accepts_explicit_path() {
+        let cli = Cli::try_parse_from(["marina", "push", "demo:v1", "/tmp/demo"])
+            .expect("push with SOURCE should parse");
+
+        let Commands::Push(args) = cli.cmd else {
+            panic!("expected push command");
+        };
+
+        assert_eq!(args.bag.to_string(), "demo:v1");
+        assert_eq!(args.source, Some(PathBuf::from("/tmp/demo")));
     }
 }

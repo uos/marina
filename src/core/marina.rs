@@ -1036,6 +1036,14 @@ impl Marina {
             })
     }
 
+    /// Returns the local cache directory for an exact bag reference if it still exists.
+    pub fn cached_bag_dir(&self, bag: &BagRef) -> Option<PathBuf> {
+        self.catalog
+            .entries
+            .get(&bag.without_attachment().to_string())
+            .and_then(|entry| entry.local_dir.exists().then(|| entry.local_dir.clone()))
+    }
+
     /// Lists all locally cached bags sorted by bag reference.
     pub fn list_cached_bags(&self) -> Vec<CachedBagInfo> {
         let mut out = self
@@ -1653,4 +1661,59 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn cached_bag_dir_returns_existing_imported_path() -> Result<()> {
+        let tmp = tempdir()?;
+        let ready = tmp.path().join("ready");
+        fs::create_dir_all(&ready)?;
+        let bag: BagRef = "demo:v1".parse()?;
+        let mut catalog = Catalog::default();
+        catalog.entries.insert(
+            bag.to_string(),
+            CacheEntry {
+                bag: bag.clone(),
+                local_dir: ready.clone(),
+                packed_bytes: 0,
+                bundle_hash: None,
+            },
+        );
+        let marina = Marina {
+            registries: HashMap::new(),
+            catalog,
+            default_registry: None,
+        };
+
+        assert_eq!(marina.cached_bag_dir(&bag), Some(ready));
+        Ok(())
+    }
+
+    #[test]
+    fn cached_bag_dir_ignores_missing_catalog_path() -> Result<()> {
+        let bag: BagRef = "demo:v1".parse()?;
+        let mut catalog = Catalog::default();
+        catalog.entries.insert(
+            bag.to_string(),
+            CacheEntry {
+                bag: bag.clone(),
+                local_dir: PathBuf::from("/path/that/does/not/exist"),
+                packed_bytes: 0,
+                bundle_hash: None,
+            },
+        );
+        let marina = Marina {
+            registries: HashMap::new(),
+            catalog,
+            default_registry: None,
+        };
+
+        assert_eq!(marina.cached_bag_dir(&bag), None);
+        Ok(())
+    }
 }
