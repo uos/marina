@@ -66,6 +66,9 @@ struct LocalListArgs {
     /// Filter to a specific registry (only with --remote)
     #[arg(long)]
     registry: Option<String>,
+    /// Hide duplicate datasets that have the same bundle hash across registries
+    #[arg(long, alias = "exclude-duplicates")]
+    no_duplicates: bool,
     /// Output format for remote listings
     #[arg(long, value_enum, default_value_t = RemoteOutputFormat::Table)]
     format: RemoteOutputFormat,
@@ -741,6 +744,32 @@ fn print_remote_detail_table(
     }
 }
 
+fn remote_registry_scope(marina: &Marina, args: &LocalListArgs) -> Vec<String> {
+    if let Some(registry) = &args.registry {
+        vec![registry.clone()]
+    } else {
+        marina
+            .list_registry_configs()
+            .into_iter()
+            .map(|c| c.name.clone())
+            .collect()
+    }
+}
+
+fn remove_duplicate_remote_datasets(all: &mut Vec<(String, BagRef, Option<BagInfo>)>) {
+    let mut seen_hashes = std::collections::HashSet::new();
+    all.retain(|(_, _, info)| {
+        let Some(hash) = info
+            .as_ref()
+            .and_then(|info| info.bundle_hash.as_deref())
+            .filter(|hash| !hash.is_empty())
+        else {
+            return true;
+        };
+        seen_hashes.insert(hash.to_string())
+    });
+}
+
 fn now_unix_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -972,16 +1001,7 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                     .unwrap_or_default();
                 let timeout_secs = settings.registry_timeout_secs;
 
-                let eff_registry = args.registry.as_deref().or(marina.default_registry());
-                let registry_names: Vec<String> = if let Some(reg) = eff_registry {
-                    vec![reg.to_string()]
-                } else {
-                    marina
-                        .list_registry_configs()
-                        .into_iter()
-                        .map(|c| c.name.clone())
-                        .collect()
-                };
+                let registry_names = remote_registry_scope(&marina, &args);
 
                 let futs = registry_names.iter().map(|name| {
                     let fut = marina.search_remote_with_info(name, "*");
@@ -1016,6 +1036,9 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                         }
                         Err(err) => return Err(err),
                     }
+                }
+                if args.no_duplicates {
+                    remove_duplicate_remote_datasets(&mut all);
                 }
 
                 match args.format {

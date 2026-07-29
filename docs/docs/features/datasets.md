@@ -45,6 +45,12 @@ Filter to a specific registry:
 marina ls --remote --registry team-ssh
 ~~~
 
+Hide duplicate data that appears in more than one registry with the same bundle hash:
+
+~~~bash
+marina ls --remote --no-duplicates
+~~~
+
 ## Search
 
 Search datasets by pattern (matched against dataset names):
