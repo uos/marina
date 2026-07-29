@@ -6,7 +6,7 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::engine::{ArgValueCompleter, CompletionCandidate};
 use log::warn;
 
-use crate::core::{Marina, PullOptions, PushOptions, ResolveResult};
+use crate::core::{CacheMirrorOptions, Marina, PullOptions, PushOptions, ResolveResult};
 use crate::io::mcap_transform::{McapChunkCompression, PointCloudCompressionMode};
 use crate::io::pack::ArchiveCompression;
 use crate::model::bag_ref::BagRef;
@@ -41,6 +41,8 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Registry(RegistryCmd),
+    /// Mirror unpacked local cache entries directly to another user over SSH
+    Mirror(MirrorCacheArgs),
     #[command(alias = "ls")]
     List(LocalListArgs),
     Search(SearchArgs),
@@ -54,8 +56,44 @@ enum Commands {
     Inspect(InspectArgs),
     #[command(hide = true)]
     CompleteRefresh,
+    #[command(hide = true)]
+    CacheReceive(CacheReceiveCmd),
     Completions(CompletionsArgs),
     Version,
+}
+
+#[derive(Args)]
+struct MirrorCacheArgs {
+    /// SSH destination in user@host[:port] or ssh://user@host[:port] form
+    target: String,
+    /// Glob patterns matched against cached dataset references
+    patterns: Vec<String>,
+    /// Environment variable containing an SSH key path or password
+    #[arg(long)]
+    auth_env: Option<String>,
+    /// SSH jump host in user@host[:port] form
+    #[arg(long)]
+    proxy_jump: Option<String>,
+    /// SSH transport used by the self-contained fallback: native or openssh
+    #[arg(long)]
+    ssh_transport: Option<String>,
+    /// Remote Marina executable name or path
+    #[arg(long)]
+    remote_marina: Option<String>,
+    #[arg(long)]
+    no_progress: bool,
+}
+
+#[derive(Args)]
+struct CacheReceiveCmd {
+    #[command(subcommand)]
+    cmd: CacheReceiveSub,
+}
+
+#[derive(Subcommand)]
+enum CacheReceiveSub {
+    Prepare { bag: BagRef },
+    Commit { bag: BagRef },
 }
 
 #[derive(Args)]
@@ -994,6 +1032,35 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                 spawn_complete_refresh();
             }
         },
+        Commands::Mirror(args) => {
+            let options = CacheMirrorOptions {
+                auth_env: args.auth_env,
+                proxy_jump: args.proxy_jump,
+                ssh_transport: args.ssh_transport,
+                remote_marina: args.remote_marina,
+            };
+            let stats = if args.no_progress {
+                let mut progress = ProgressReporter::silent();
+                marina
+                    .mirror_cache_to_ssh(&args.target, &args.patterns, options, &mut progress)
+                    .await?
+            } else {
+                let mut stdout = std::io::stdout();
+                let mut sink = WriterProgress::new(&mut stdout);
+                let mut progress = ProgressReporter::new(&mut sink);
+                marina
+                    .mirror_cache_to_ssh(&args.target, &args.patterns, options, &mut progress)
+                    .await?
+            };
+            println!(
+                "mirror complete: {} pushed, {} updated, {} skipped ({} rsync, {} native)",
+                stats.pushed,
+                stats.updated,
+                stats.skipped,
+                stats.rsync_datasets,
+                stats.native_datasets
+            );
+        }
         Commands::List(args) => {
             if args.remote {
                 let settings = config::load_registries()
@@ -1728,6 +1795,16 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                 .await?;
             print_inspect_result(&result);
         }
+        Commands::CacheReceive(cmd) => match cmd.cmd {
+            CacheReceiveSub::Prepare { bag } => {
+                let plan = crate::storage::cache::prepare_mirror_receive(&bag)?;
+                println!("{}", serde_json::to_string(&plan)?);
+            }
+            CacheReceiveSub::Commit { bag } => {
+                let path = crate::storage::cache::commit_mirror_receive(&bag)?;
+                println!("{}", path.display());
+            }
+        },
         Commands::CompleteRefresh => {
             let timeout_secs = config::load_registries()
                 .map(|f| f.settings.registry_timeout_secs)
@@ -2073,5 +2150,26 @@ mod tests {
 
         assert_eq!(args.bag.to_string(), "demo:v1");
         assert_eq!(args.source, Some(PathBuf::from("/tmp/demo")));
+    }
+
+    #[test]
+    fn cache_mirror_accepts_multiple_globs_and_ssh_options() {
+        let cli = Cli::try_parse_from([
+            "marina",
+            "mirror",
+            "alice@example.org:2222",
+            "team/*",
+            "demo:*",
+            "--proxy-jump",
+            "jump@example.org",
+        ])
+        .expect("cache mirror should parse");
+
+        let Commands::Mirror(args) = cli.cmd else {
+            panic!("expected mirror command");
+        };
+        assert_eq!(args.target, "alice@example.org:2222");
+        assert_eq!(args.patterns, vec!["team/*", "demo:*"]);
+        assert_eq!(args.proxy_jump.as_deref(), Some("jump@example.org"));
     }
 }

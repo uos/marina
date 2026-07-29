@@ -122,8 +122,8 @@ pub mod registry;
 pub mod storage;
 
 pub use core::{
-    CachedBagInfo, CachedSizeStats, Marina, PullOptions, PushOptions, RemoteBagHit,
-    RemovedRegistry, ResolveResult,
+    CacheMirrorOptions, CacheMirrorStats, CachedBagInfo, CachedSizeStats, Marina, PullOptions,
+    PushOptions, RemoteBagHit, RemovedRegistry, ResolveResult,
 };
 /// Parsed bag reference like `namespace/name:tag1:tag2[attachment.txt]`.
 pub use model::bag_ref::BagRef;

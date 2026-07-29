@@ -184,6 +184,45 @@ marina export outdoor-run:v2 /tmp/exported-run/
 
 The dataset must already be cached locally. Run `marina pull` first if needed.
 
+## Mirror directly to another user's cache
+
+Mirror unpacked datasets from your local Marina cache directly into another
+user's local cache over SSH:
+
+~~~bash
+marina mirror user@host 'team/outdoor-run:*'
+~~~
+
+Multiple glob patterns select their union:
+
+~~~bash
+marina mirror user@host 'helipr/*' 'field-tests/run:*'
+~~~
+
+With no pattern, every locally cached dataset is mirrored. Patterns use the
+same glob syntax as search and removal (`*`, `?`, and character classes).
+
+The remote user must have a compatible `marina` executable installed. Marina
+always supports a self-contained native SSH/SFTP transfer. If `rsync` is
+available locally and remotely and OpenSSH authentication succeeds, Marina
+uses it automatically as a faster incremental transfer; otherwise it falls
+back to native SFTP without requiring any additional software.
+
+The transfer is staged and verified before the remote cache catalog is
+updated. Existing datasets are updated, but unrelated datasets in the remote
+cache are never removed.
+
+Use the same authentication controls as an SSH registry when needed:
+
+~~~bash
+marina mirror user@host 'team/*' \
+  --auth-env MARINA_SSH_KEY \
+  --proxy-jump jump-user@jump-host
+~~~
+
+This command mirrors cache-to-cache and does not create registry archives.
+For registry backups or migrations, use `marina registry mirror`.
+
 ## Remove
 
 The argument is a glob pattern. Use `*` to match multiple datasets at once.

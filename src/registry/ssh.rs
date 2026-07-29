@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io::IsTerminal;
 use std::path::Path;
@@ -18,6 +19,7 @@ use tokio::sync::Mutex;
 
 use crate::model::bag_ref::BagRef;
 use crate::registry::driver::{BagInfo, PushMeta, RegistryDriver, RemoteDescriptor};
+use crate::storage::cache::MirrorFile;
 
 pub struct SshRegistry {
     pub name: String,
@@ -765,6 +767,173 @@ impl SshRegistry {
             }
         }
         Ok(())
+    }
+
+    pub(crate) async fn run_remote_capture(&self, remote_cmd: &str) -> Result<String> {
+        self.run_ssh_capture(remote_cmd).await
+    }
+
+    pub(crate) async fn sync_directory_native(
+        &self,
+        local_root: &Path,
+        remote_root: &str,
+        local_files: &[MirrorFile],
+        remote_files: &[MirrorFile],
+    ) -> Result<()> {
+        let sftp = self.open_sftp().await?;
+        let remote_by_path: HashMap<&str, &MirrorFile> = remote_files
+            .iter()
+            .map(|file| (file.path.as_str(), file))
+            .collect();
+
+        for entry in walkdir::WalkDir::new(local_root)
+            .min_depth(1)
+            .follow_links(false)
+        {
+            let entry = entry?;
+            let relative = entry.path().strip_prefix(local_root)?;
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            let remote_path = format!("{}/{}", remote_root.trim_end_matches('/'), relative);
+            if entry.file_type().is_dir() {
+                self.ensure_sftp_dir(&sftp, &remote_path).await?;
+            } else if entry.file_type().is_symlink() {
+                return Err(anyhow!(
+                    "symbolic links require rsync for cache mirroring: {}",
+                    entry.path().display()
+                ));
+            }
+        }
+
+        for file in local_files {
+            let unchanged = remote_by_path
+                .get(file.path.as_str())
+                .is_some_and(|remote| remote.size == file.size && remote.sha256 == file.sha256);
+            if unchanged {
+                continue;
+            }
+            let local_path = local_root.join(&file.path);
+            let remote_path = format!("{}/{}", remote_root.trim_end_matches('/'), file.path);
+            if let Some(parent) = remote_path.rsplit_once('/').map(|(parent, _)| parent) {
+                self.ensure_sftp_dir(&sftp, parent).await?;
+            }
+            let temporary_path = format!("{}.mirror-uploading-{}", remote_path, std::process::id());
+            let _ = sftp.remove_file(temporary_path.clone()).await;
+            Self::sftp_upload(
+                &sftp,
+                &local_path,
+                &temporary_path,
+                Some(&format!("mirror {}", file.path)),
+            )
+            .await?;
+            let _ = sftp.remove_file(remote_path.clone()).await;
+            sftp.rename(temporary_path, remote_path)
+                .await
+                .with_context(|| format!("failed installing mirrored file {}", file.path))?;
+        }
+
+        self.upload_mirror_manifest(remote_root, local_files).await
+    }
+
+    pub(crate) async fn upload_mirror_manifest(
+        &self,
+        remote_root: &str,
+        local_files: &[MirrorFile],
+    ) -> Result<()> {
+        let sftp = self.open_sftp().await?;
+        let manifest_path = std::env::temp_dir().join(format!(
+            "marina-mirror-manifest-{}.json",
+            std::process::id()
+        ));
+        fs::write(&manifest_path, serde_json::to_vec(local_files)?)?;
+        let remote_manifest = format!(
+            "{}/.marina-mirror-manifest.json",
+            remote_root.trim_end_matches('/')
+        );
+        let upload_result = Self::sftp_upload(&sftp, &manifest_path, &remote_manifest, None).await;
+        let _ = fs::remove_file(manifest_path);
+        upload_result
+    }
+
+    async fn ensure_sftp_dir(&self, sftp: &SftpSession, remote_dir: &str) -> Result<()> {
+        let mut current = if remote_dir.starts_with('/') {
+            String::from("/")
+        } else {
+            String::new()
+        };
+        for part in remote_dir.split('/').filter(|part| !part.is_empty()) {
+            if current != "/" && !current.is_empty() {
+                current.push('/');
+            }
+            current.push_str(part);
+            if !sftp.try_exists(current.clone()).await.unwrap_or(false) {
+                sftp.create_dir(current.clone())
+                    .await
+                    .with_context(|| format!("failed creating remote directory {}", current))?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn try_rsync_directory(
+        &self,
+        local_root: &Path,
+        remote_root: &str,
+    ) -> Result<bool> {
+        if self.ensure_openssh_auth_supported().is_err()
+            || Command::new("rsync")
+                .arg("--version")
+                .output()
+                .await
+                .map(|output| !output.status.success())
+                .unwrap_or(true)
+            || self
+                .run_ssh("command -v rsync >/dev/null 2>&1")
+                .await
+                .is_err()
+        {
+            return Ok(false);
+        }
+
+        let mut probe = self.openssh_command("ssh", "true");
+        if !probe
+            .output()
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            return Ok(false);
+        }
+
+        let mut rsh = format!("ssh -p {} -o BatchMode=yes", self.endpoint.port);
+        if let Some(var) = &self.auth_env {
+            if let Ok(secret) = std::env::var(var) {
+                if Path::new(&secret).exists() {
+                    rsh.push_str(" -i ");
+                    rsh.push_str(&shell_quote(&secret));
+                }
+            }
+        }
+        if let Some(proxy) = &self.proxy_jump {
+            rsh.push_str(" -J ");
+            rsh.push_str(&shell_quote(&proxy.open_ssh_jump_arg()));
+        }
+
+        let source = format!("{}/", local_root.display());
+        let destination = format!(
+            "{}:{}/",
+            self.endpoint.user_host,
+            shell_quote(remote_root.trim_end_matches('/'))
+        );
+        let output = Command::new("rsync")
+            .arg("-a")
+            .arg("--delete")
+            .arg("-e")
+            .arg(rsh)
+            .arg(source)
+            .arg(destination)
+            .output()
+            .await?;
+        Ok(output.status.success())
     }
 
     /// Fetch all MetaFile records from the registry in a single SSH command.

@@ -31,6 +31,24 @@ pub struct MirrorStats {
     pub skipped: u32,
 }
 
+/// Statistics returned by a direct local-cache to remote-cache mirror.
+#[derive(Debug, Default, Clone)]
+pub struct CacheMirrorStats {
+    pub pushed: u32,
+    pub updated: u32,
+    pub skipped: u32,
+    pub rsync_datasets: u32,
+    pub native_datasets: u32,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CacheMirrorOptions {
+    pub auth_env: Option<String>,
+    pub proxy_jump: Option<String>,
+    pub ssh_transport: Option<String>,
+    pub remote_marina: Option<String>,
+}
+
 pub async fn connection_warning(
     name: &str,
     uri: &str,
@@ -1323,6 +1341,124 @@ impl Marina {
         Ok(stats)
     }
 
+    /// Mirror unpacked local cache entries directly into another user's cache
+    /// over SSH. Rsync is used opportunistically; native SFTP is always
+    /// available as the fallback.
+    pub async fn mirror_cache_to_ssh(
+        &self,
+        target: &str,
+        patterns: &[String],
+        options: CacheMirrorOptions,
+        progress: &mut ProgressReporter<'_>,
+    ) -> Result<CacheMirrorStats> {
+        let patterns = if patterns.is_empty() {
+            vec![glob::Pattern::new("*")?]
+        } else {
+            patterns
+                .iter()
+                .map(|pattern| {
+                    glob::Pattern::new(pattern)
+                        .with_context(|| format!("invalid pattern '{}'", pattern))
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
+        let mut selected = self
+            .list_cached_bags()
+            .into_iter()
+            .filter(|cached| {
+                cached.local_dir.exists()
+                    && patterns
+                        .iter()
+                        .any(|pattern| pattern.matches(&cached.bag.to_string()))
+            })
+            .collect::<Vec<_>>();
+        selected.sort_by_key(|cached| cached.bag.to_string());
+        if selected.is_empty() {
+            return Err(anyhow!("no cached datasets match the requested patterns"));
+        }
+
+        let uri = if target.starts_with("ssh://") {
+            target.to_string()
+        } else {
+            format!("ssh://{}", target)
+        };
+        let ssh = SshRegistry::from_uri(
+            "cache-mirror",
+            &uri,
+            options.auth_env,
+            options.proxy_jump,
+            options.ssh_transport,
+        )?;
+        let remote_marina = options.remote_marina.as_deref().unwrap_or("marina");
+        let mut stats = CacheMirrorStats::default();
+
+        for cached in selected {
+            let bag = cached.bag.without_attachment();
+            progress.emit("mirror", format!("preparing {} on {}", bag, target));
+            let prepare_command = format!(
+                "{} cache-receive prepare {}",
+                cache_mirror_shell_quote(remote_marina),
+                cache_mirror_shell_quote(&bag.to_string())
+            );
+            let prepare_json = ssh
+                .run_remote_capture(&prepare_command)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed preparing remote cache; ensure '{}' is installed and compatible",
+                        remote_marina
+                    )
+                })?;
+            let plan: cache::MirrorReceivePlan = serde_json::from_str(prepare_json.trim())
+                .context("remote Marina returned an invalid mirror preparation response")?;
+            let local_files = cache::mirror_manifest(&cached.local_dir)?;
+            let unchanged = local_files == plan.files;
+
+            let used_rsync = if unchanged {
+                false
+            } else {
+                progress.emit("mirror", format!("syncing {}", bag));
+                ssh.try_rsync_directory(&cached.local_dir, &plan.staging_dir.to_string_lossy())
+                    .await?
+            };
+            if !unchanged && !used_rsync {
+                progress.emit("mirror", format!("syncing {} with native SFTP", bag));
+                ssh.sync_directory_native(
+                    &cached.local_dir,
+                    &plan.staging_dir.to_string_lossy(),
+                    &local_files,
+                    &plan.files,
+                )
+                .await?;
+                stats.native_datasets += 1;
+            } else if used_rsync {
+                ssh.upload_mirror_manifest(&plan.staging_dir.to_string_lossy(), &local_files)
+                    .await?;
+                progress.emit("mirror", format!("synced {} with rsync", bag));
+                stats.rsync_datasets += 1;
+            }
+
+            let commit_command = format!(
+                "{} cache-receive commit {}",
+                cache_mirror_shell_quote(remote_marina),
+                cache_mirror_shell_quote(&bag.to_string())
+            );
+            ssh.run_remote_capture(&commit_command)
+                .await
+                .with_context(|| format!("failed committing '{}' to remote cache", bag))?;
+
+            if unchanged {
+                stats.skipped += 1;
+                progress.emit("mirror", format!("skip {} (up to date)", bag));
+            } else if plan.had_existing {
+                stats.updated += 1;
+            } else {
+                stats.pushed += 1;
+            }
+        }
+        Ok(stats)
+    }
+
     /// List bags in a specific registry with their stored metadata.
     pub async fn search_remote_with_info(
         &self,
@@ -1551,6 +1687,10 @@ fn format_mirror_patterns(patterns: &[impl AsRef<str>]) -> String {
             .join(", ");
         format!("patterns {}", joined)
     }
+}
+
+fn cache_mirror_shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn compute_bundle_hash(path: &Path) -> Result<String> {
