@@ -924,16 +924,19 @@ impl SshRegistry {
             self.endpoint.user_host,
             shell_quote(remote_root.trim_end_matches('/'))
         );
-        let output = Command::new("rsync")
-            .arg("-a")
-            .arg("--delete")
+        let mut cmd = Command::new("rsync");
+        cmd.arg("-a").arg("--delete");
+        if std::io::stdout().is_terminal() {
+            cmd.arg("--info=progress2").arg("--human-readable");
+        }
+        let status = cmd
             .arg("-e")
             .arg(rsh)
             .arg(source)
             .arg(destination)
-            .output()
+            .status()
             .await?;
-        Ok(output.status.success())
+        Ok(status.success())
     }
 
     /// Fetch all MetaFile records from the registry in a single SSH command.

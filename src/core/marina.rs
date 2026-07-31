@@ -1400,24 +1400,29 @@ impl Marina {
                 remote_marina,
                 &["cache-receive", "prepare", &bag.to_string()],
             );
-            let prepare_json = ssh
-                .run_remote_capture(&prepare_command)
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed preparing remote cache; ensure '{}' is installed and compatible",
-                        remote_marina_display
-                    )
-                })?;
+            let prepare_json = run_remote_capture_with_progress(
+                &ssh,
+                &prepare_command,
+                progress,
+                &format!("still preparing {} on {}", bag, target),
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "failed preparing remote cache; ensure '{}' is installed and compatible",
+                    remote_marina_display
+                )
+            })?;
             let plan: cache::MirrorReceivePlan = serde_json::from_str(prepare_json.trim())
                 .context("remote Marina returned an invalid mirror preparation response")?;
+            progress.emit("mirror", format!("remote staging ready for {}", bag));
+            progress.emit("mirror", format!("scanning local cache for {}", bag));
             let local_files = cache::mirror_manifest(&cached.local_dir)?;
             let unchanged = local_files == plan.files;
 
             let used_rsync = if unchanged {
                 false
             } else {
-                progress.emit("mirror", format!("syncing {}", bag));
                 ssh.try_rsync_directory(&cached.local_dir, &plan.staging_dir.to_string_lossy())
                     .await?
             };
@@ -1432,6 +1437,7 @@ impl Marina {
                 .await?;
                 stats.native_datasets += 1;
             } else if used_rsync {
+                progress.emit("mirror", format!("syncing {} with rsync", bag));
                 ssh.upload_mirror_manifest(&plan.staging_dir.to_string_lossy(), &local_files)
                     .await?;
                 progress.emit("mirror", format!("synced {} with rsync", bag));
@@ -1442,9 +1448,15 @@ impl Marina {
                 remote_marina,
                 &["cache-receive", "commit", &bag.to_string()],
             );
-            ssh.run_remote_capture(&commit_command)
-                .await
-                .with_context(|| format!("failed committing '{}' to remote cache", bag))?;
+            progress.emit("mirror", format!("committing {} on {}", bag, target));
+            run_remote_capture_with_progress(
+                &ssh,
+                &commit_command,
+                progress,
+                &format!("still committing {} on {}", bag, target),
+            )
+            .await
+            .with_context(|| format!("failed committing '{}' to remote cache", bag))?;
 
             if unchanged {
                 stats.skipped += 1;
@@ -1709,6 +1721,29 @@ fn cache_mirror_remote_marina_command(remote_marina: Option<&str>, args: &[&str]
          elif [ -x \"$HOME/.cargo/bin/marina\" ]; then \"$HOME/.cargo/bin/marina\" {args}; \
          else marina {args}; fi"
     )
+}
+
+async fn run_remote_capture_with_progress(
+    ssh: &SshRegistry,
+    command: &str,
+    progress: &mut ProgressReporter<'_>,
+    waiting_message: &str,
+) -> Result<String> {
+    let mut remote = Box::pin(ssh.run_remote_capture(command));
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
+    let mut elapsed = 0u64;
+
+    loop {
+        tokio::select! {
+            result = &mut remote => return result,
+            _ = tick.tick() => {
+                if elapsed > 0 {
+                    progress.emit("mirror", format!("{waiting_message} ({elapsed}s)"));
+                }
+                elapsed += 10;
+            }
+        }
+    }
 }
 
 fn compute_bundle_hash(path: &Path) -> Result<String> {
