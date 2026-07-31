@@ -1389,16 +1389,16 @@ impl Marina {
             options.proxy_jump,
             options.ssh_transport,
         )?;
-        let remote_marina = options.remote_marina.as_deref().unwrap_or("marina");
+        let remote_marina = options.remote_marina.as_deref();
+        let remote_marina_display = remote_marina.unwrap_or("marina");
         let mut stats = CacheMirrorStats::default();
 
         for cached in selected {
             let bag = cached.bag.without_attachment();
             progress.emit("mirror", format!("preparing {} on {}", bag, target));
-            let prepare_command = format!(
-                "{} cache-receive prepare {}",
-                cache_mirror_shell_quote(remote_marina),
-                cache_mirror_shell_quote(&bag.to_string())
+            let prepare_command = cache_mirror_remote_marina_command(
+                remote_marina,
+                &["cache-receive", "prepare", &bag.to_string()],
             );
             let prepare_json = ssh
                 .run_remote_capture(&prepare_command)
@@ -1406,7 +1406,7 @@ impl Marina {
                 .with_context(|| {
                     format!(
                         "failed preparing remote cache; ensure '{}' is installed and compatible",
-                        remote_marina
+                        remote_marina_display
                     )
                 })?;
             let plan: cache::MirrorReceivePlan = serde_json::from_str(prepare_json.trim())
@@ -1438,10 +1438,9 @@ impl Marina {
                 stats.rsync_datasets += 1;
             }
 
-            let commit_command = format!(
-                "{} cache-receive commit {}",
-                cache_mirror_shell_quote(remote_marina),
-                cache_mirror_shell_quote(&bag.to_string())
+            let commit_command = cache_mirror_remote_marina_command(
+                remote_marina,
+                &["cache-receive", "commit", &bag.to_string()],
             );
             ssh.run_remote_capture(&commit_command)
                 .await
@@ -1693,6 +1692,25 @@ fn cache_mirror_shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+fn cache_mirror_remote_marina_command(remote_marina: Option<&str>, args: &[&str]) -> String {
+    let args = args
+        .iter()
+        .map(|arg| cache_mirror_shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if let Some(remote_marina) = remote_marina {
+        return format!("{} {}", cache_mirror_shell_quote(remote_marina), args);
+    }
+
+    format!(
+        "if command -v marina >/dev/null 2>&1; then marina {args}; \
+         elif [ -n \"${{CARGO_HOME:-}}\" ] && [ -x \"${{CARGO_HOME}}/bin/marina\" ]; then \"${{CARGO_HOME}}/bin/marina\" {args}; \
+         elif [ -x \"$HOME/.cargo/bin/marina\" ]; then \"$HOME/.cargo/bin/marina\" {args}; \
+         else marina {args}; fi"
+    )
+}
+
 fn compute_bundle_hash(path: &Path) -> Result<String> {
     use std::io::Read as _;
     let mut file = fs::File::open(path)
@@ -1855,5 +1873,29 @@ mod tests {
 
         assert_eq!(marina.cached_bag_dir(&bag), None);
         Ok(())
+    }
+
+    #[test]
+    fn cache_mirror_default_remote_marina_checks_cargo_install_path() {
+        let command =
+            cache_mirror_remote_marina_command(None, &["cache-receive", "prepare", "demo:v1"]);
+
+        assert!(command.contains("command -v marina"));
+        assert!(command.contains("${CARGO_HOME}/bin/marina"));
+        assert!(command.contains("$HOME/.cargo/bin/marina"));
+        assert!(command.contains("'cache-receive' 'prepare' 'demo:v1'"));
+    }
+
+    #[test]
+    fn cache_mirror_explicit_remote_marina_is_used_as_given() {
+        let command = cache_mirror_remote_marina_command(
+            Some("/opt/marina/bin/marina"),
+            &["cache-receive", "prepare", "demo:v1"],
+        );
+
+        assert_eq!(
+            command,
+            "'/opt/marina/bin/marina' 'cache-receive' 'prepare' 'demo:v1'"
+        );
     }
 }
