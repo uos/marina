@@ -1414,7 +1414,7 @@ fn transfer_bar(total: u64, message: &str) -> ProgressBar {
         pb.set_draw_target(ProgressDrawTarget::hidden());
     }
     pb.set_style(
-        ProgressStyle::with_template("{msg} [{bar:40.green/blue}] {bytes}/{total_bytes} ({eta})")
+        ProgressStyle::with_template("{msg} [{bar:40.green/blue}] {bytes}/{total_bytes} {bytes_per_sec} ({eta})")
             .unwrap_or_else(|_| ProgressStyle::default_bar()),
     );
     pb.set_message(message.to_string());
