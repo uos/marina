@@ -217,7 +217,11 @@ pub fn mirror_manifest(root: &Path) -> Result<Vec<MirrorFile>> {
         files.push(MirrorFile {
             path: relative.to_string_lossy().replace('\\', "/"),
             size,
-            sha256: format!("{:x}", hasher.finalize()),
+            sha256: hasher
+                .finalize()
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect(),
         });
     }
     files.sort_by(|a, b| a.path.cmp(&b.path));

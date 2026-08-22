@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-dev-resolute
     steps:
       - name: checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
       - name: Install sudo
         run: apt-get update && apt-get install -y sudo
       - name: install nix

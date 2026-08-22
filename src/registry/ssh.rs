@@ -10,7 +10,7 @@ use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use russh::ChannelMsg;
 use russh::client::{self, Config, Handle};
 use russh::keys::PrivateKeyWithHashAlg;
-use russh::keys::PublicKey;
+use russh::keys::PublicKeyOrCertificate;
 use russh_sftp::client::SftpSession;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -111,7 +111,7 @@ impl client::Handler for ClientHandler {
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &PublicKey,
+        _server_public_key: &PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
         Ok(true)
     }

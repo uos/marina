@@ -9,9 +9,6 @@ on:
       - v*
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 env:
   RUST_FONTCONFIG_DLOPEN: 1
 
@@ -44,7 +41,7 @@ jobs:
           - image: docker.io/stelzo/ubuntu-dev:resolute
             arch: amd64
             repo: resolute
-            runner: ubuntu-latest
+            runner: ubuntu-dev-resolute
           - image: docker.io/stelzo/ubuntu-dev:resolute
             arch: arm64
             repo: resolute
@@ -52,7 +49,7 @@ jobs:
           - image: docker.io/stelzo/ubuntu-dev:noble
             arch: amd64
             repo: noble
-            runner: ubuntu-latest
+            runner: ubuntu-dev-resolute
           - image: docker.io/stelzo/ubuntu-dev:noble
             arch: arm64
             repo: noble
@@ -60,7 +57,7 @@ jobs:
           - image: docker.io/stelzo/ubuntu-dev:jammy
             arch: amd64
             repo: jammy
-            runner: ubuntu-latest
+            runner: ubuntu-dev-resolute
           - image: docker.io/stelzo/ubuntu-dev:jammy
             repo: jammy
             arch: arm64
@@ -148,13 +145,13 @@ jobs:
         include:
           - image: docker.io/stelzo/ubuntu-dev:lyrical
             repo: resolute
-            runner: ubuntu-latest
+            runner: ubuntu-dev-resolute
           - image: docker.io/stelzo/ubuntu-dev:jazzy
             repo: noble
-            runner: ubuntu-latest
+            runner: ubuntu-dev-resolute
           - image: docker.io/stelzo/ubuntu-dev:humble
             repo: jammy
-            runner: ubuntu-latest
+            runner: ubuntu-dev-resolute
           - image: docker.io/stelzo/ubuntu-dev:lyrical
             repo: resolute
             runner: ubuntu-latest-arm
@@ -212,7 +209,7 @@ jobs:
             runner: ubuntu-dev-resolute
             arch: amd64
           - target: aarch64-unknown-linux-musl
-            runner: ubuntu-dev-resolute-arm
+            runner: ubuntu-latest-arm
             arch: arm64
     runs-on: ${{ matrix.runner }}
     steps:
