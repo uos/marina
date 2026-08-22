@@ -207,11 +207,15 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             runner: ubuntu-dev-resolute
+            image: docker.io/stelzo/ubuntu-dev:resolute
             arch: amd64
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-latest-arm
+            image: docker.io/stelzo/ubuntu-dev:resolute
             arch: arm64
     runs-on: ${{ matrix.runner }}
+    container:
+      image: ${{ matrix.image }}
     steps:
       - uses: actions/checkout@v4
       - name: Build
