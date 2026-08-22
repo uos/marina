@@ -227,7 +227,7 @@ jobs:
 
           ./update_mirror.bash
 
-          apt-get update && apt-get install -y pkg-config cmake libclang-dev clang openssl libssl-dev libsqlite3-dev
+          apt-get update && apt-get install -y pkg-config cmake libclang-dev clang openssl libssl-dev libsqlite3-dev musl-tools
           rustup toolchain uninstall stable
           rustup toolchain install stable
           rustup target add $TARGET
@@ -235,7 +235,7 @@ jobs:
           mkdir -p "dist/${ARCH}"
 
           export RUSTFLAGS="-C target-feature=+crt-static"
-          cargo zigbuild --bin marina --release --target $TARGET
+          cargo build --bin marina --release --target $TARGET
           mv target/$TARGET/release/marina dist/${ARCH}/
 
       - name: Upload
