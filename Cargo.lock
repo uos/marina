@@ -438,13 +438,13 @@ dependencies = [
 
 [[package]]
 name = "cdr-encoding"
-version = "0.10.2"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73f0cdb643d85bb03b1b786ab8d332747f386f0a25b19367d559b437f44f1e46"
+checksum = "7cd0f96619d833f771daff46c9755785f6fdea3d9ff67ec329f52f66936b0d6d"
 dependencies = [
  "byteorder",
  "log",
- "paste",
+ "pastey",
  "serde",
  "serde_repr",
  "static_assertions",
@@ -698,9 +698,9 @@ dependencies = [
 
 [[package]]
 name = "crc32fast"
-version = "1.5.0"
+version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
+checksum = "8498c871161e1742aaa9d52551b2d6ebdd4c3d45a3be423e3728f33b955be550"
 dependencies = [
  "cfg-if 1.0.4",
 ]
@@ -755,7 +755,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e0b1fab2ae45819af2d0731d60f2afe17227ebb1a1538a236da84c93e9a60162"
 dependencies = [
  "dispatch2",
- "nix",
+ "nix 0.31.3",
  "windows-sys 0.61.2",
 ]
 
@@ -2304,7 +2304,7 @@ dependencies = [
 
 [[package]]
 name = "marina"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2562,6 +2562,19 @@ dependencies = [
 
 [[package]]
 name = "nix"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
+dependencies = [
+ "bitflags 2.13.1",
+ "cfg-if 1.0.4",
+ "cfg_aliases",
+ "libc",
+ "memoffset",
+]
+
+[[package]]
+name = "nix"
 version = "0.31.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
@@ -2791,6 +2804,12 @@ name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
+
+[[package]]
+name = "pastey"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
 name = "pbkdf2"
@@ -3227,9 +3246,9 @@ dependencies = [
 
 [[package]]
 name = "ratslang"
-version = "0.4.2"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dc8b9d347d8340ceabac7295c7a40076208ef8ac936f3750962b5fa614efe51"
+checksum = "08d19094b383e26695ad36d1d7061d2eba5946d19bcd6c3e1c0ed644974b34a5"
 dependencies = [
  "anyhow",
  "ariadne",
@@ -3415,9 +3434,9 @@ dependencies = [
 
 [[package]]
 name = "ros2-client"
-version = "0.8.2"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d57a4ff0179262099ae1656739d04f6ea928913a242b2f0465ba158a55723b0b"
+checksum = "2465ff4307d2c74e86ff2ae1f1219d03e1d764d94c553e303dc790c5d8ff6748"
 dependencies = [
  "async-channel",
  "bstr",
@@ -3444,9 +3463,9 @@ dependencies = [
 
 [[package]]
 name = "ros2-interfaces-jazzy-serde"
-version = "0.0.4"
+version = "0.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de18ba74e333de437e1472b84bc60bed824cd5b4477df13077522b0ce87c0a7e"
+checksum = "190064dda744d8fdf8ddc7c5a662733a1c4dcd786c522e04898b32a44f3eb099"
 dependencies = [
  "ros2-client",
  "serde",
@@ -3585,7 +3604,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3aec6cb630dbe85d72ffd7bcd95f07e1bd69f9f270ee8adfa1afe443a6331438"
 dependencies = [
  "log",
- "nix",
+ "nix 0.31.3",
  "ssh-encoding",
  "windows-sys 0.61.2",
 ]
@@ -3639,9 +3658,9 @@ dependencies = [
 
 [[package]]
 name = "rustdds"
-version = "0.11.8"
+version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54aa8af0cee7a6cad5a1fb81ae338ee5ffe5e41d26fc02d8798ce4a071fa4ac6"
+checksum = "679e56ae1ec6eb11214e965875e732ef5fd265e63d82200f4aa7cd7f43b1c1d5"
 dependencies = [
  "bit-vec",
  "byteorder",
@@ -3659,9 +3678,10 @@ dependencies = [
  "mio 0.6.23",
  "mio 0.8.11",
  "mio-extras",
+ "nix 0.29.0",
  "num-derive",
  "num-traits",
- "paste",
+ "pastey",
  "pnet",
  "pnet_sys",
  "rand 0.9.5",

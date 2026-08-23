@@ -1,6 +1,6 @@
 [package]
 name = "marina"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 include = ["**/*.rs", "**/*.md", "**/Cargo.toml", "**/LICENSE*", "default.rl"]
 keywords = ["robotics"]
@@ -51,7 +51,7 @@ reqwest = { version = "0.13", default-features = false, features = [
 ] }
 regex = { version = "1.13", optional = true }
 rusqlite = { version = "0.40", features = ["bundled"], optional = true }
-ros2-interfaces-jazzy-serde = { version = "0.0.4", features = [
+ros2-interfaces-jazzy-serde = { version = "0.0.5", features = [
   "sensor_msgs",
   "std_msgs",
   "builtin_interfaces",
@@ -78,7 +78,7 @@ tokio = { version = "1", features = [
 async-trait = "0.1"
 rpassword = "7"
 tar = "0.4"
-ratslang = "0.4.2"
+ratslang = "0.4.3"
 walkdir = "2.5"
 libc = "0.2"
 log = "0.4"
