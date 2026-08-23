@@ -15,10 +15,6 @@ jobs:
     runs-on: ubuntu-dev-resolute
     steps:
       - uses: actions/checkout@v4
-      - name: Deps
-        run: |
-          rustup toolchain uninstall stable
-          rustup toolchain install stable
       - name: Check
         run: |
           set -euo pipefail
