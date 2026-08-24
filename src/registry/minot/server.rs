@@ -65,6 +65,9 @@ pub async fn serve(driver: Arc<dyn RegistryDriver>, options: ServeOptions) -> Re
     if options.local_only {
         mt_sea::network::set_local_only(true);
     } else {
+        // Direct clients address this server explicitly. Multicast discovery
+        // would merge it with unrelated Minot runs on the same LAN.
+        mt_sea::network::set_unicast_only(true);
         log::warn!(
             "marina serve is not restricted to this machine. Minot provides no \
              authentication, so anything that can reach this port can read the \
