@@ -38,16 +38,18 @@ use super::block_store::{BlockStore, CacheMode, NullBlockStore};
 
 /// Bytes per block.
 ///
-/// Phase 0 measured MCAP chunk reads at a p95 of ~700 KiB. Four MiB amortizes
-/// SSH and query overhead across several chunks while remaining small enough
-/// for seeks and a bounded hot window.
-pub const DEFAULT_BLOCK_BYTES: usize = 4 * 1024 * 1024;
+/// Phase 0 measured MCAP chunk reads at a p95 of ~700 KiB. One MiB normally
+/// contains a whole chunk, while keeping an underrun short enough that a slow
+/// link does not turn it into a long visible playback freeze.
+pub const DEFAULT_BLOCK_BYTES: usize = 1024 * 1024;
 
 /// How many blocks ahead to fetch in the background on a forward read.
 ///
 /// Chunk offsets were measured to be strictly monotonic, so "the next few
-/// blocks" is a good guess and needs no cleverness.
-pub const DEFAULT_READAHEAD_BLOCKS: usize = 4;
+/// blocks" is a good guess and needs no cleverness. Sixteen one-MiB blocks keep
+/// the same 16 MiB byte window as four four-MiB blocks, but make each possible
+/// underrun four times shorter.
+pub const DEFAULT_READAHEAD_BLOCKS: usize = 16;
 
 /// Fetches byte ranges for a [`RemoteFile`].
 ///
