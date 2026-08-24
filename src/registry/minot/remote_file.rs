@@ -530,9 +530,17 @@ impl Seek for RemoteFile {
         // Seeking past the end is legal and reads return nothing, matching a
         // real file.
         self.position = target as u64;
-        self.last_readahead = None;
-        if let Some(prefetch) = &self.prefetch {
-            prefetch.discard_ready();
+        let target_block = self.position / self.block_bytes as u64;
+        let inside_active_window = self.hot.blocks.contains_key(&target_block)
+            || self.last_readahead.is_some_and(|anchor| {
+                target_block >= anchor
+                    && target_block <= anchor.saturating_add(self.readahead as u64)
+            });
+        if !inside_active_window {
+            self.last_readahead = None;
+            if let Some(prefetch) = &self.prefetch {
+                prefetch.discard_ready();
+            }
         }
         Ok(self.position)
     }
@@ -1066,6 +1074,42 @@ mod tests {
         assert_eq!(
             result.expect("the current block must not wait for speculative reads"),
             bytes[0]
+        );
+    }
+
+    #[test]
+    fn a_forward_seek_inside_the_window_keeps_prefetched_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = payload(4096 * 4);
+        std::fs::write(dir.path().join("data.bin"), &bytes).unwrap();
+        let fetcher = Arc::new(CountingFetcher::new(LocalFetcher {
+            root: dir.path().to_path_buf(),
+        }));
+        let mut remote = RemoteFile::new(
+            Arc::clone(&fetcher) as Arc<dyn RangeFetcher>,
+            "data.bin",
+            bytes.len() as u64,
+        )
+        .with_block_bytes(4096)
+        .with_readahead(3);
+
+        let mut first = [0u8; 1];
+        remote.read_exact(&mut first).unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while fetcher.requests() < 4 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(fetcher.requests(), 4, "the complete window should be warm");
+
+        remote.seek(SeekFrom::Start(4096 * 2 + 17)).unwrap();
+        let mut byte = [0u8; 1];
+        remote.read_exact(&mut byte).unwrap();
+        assert_eq!(byte[0], bytes[4096 * 2 + 17]);
+        assert_eq!(
+            fetcher.requests(),
+            4,
+            "a normal forward seek must use the prefetched block, not refetch it"
         );
     }
 }
