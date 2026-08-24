@@ -281,6 +281,29 @@ impl Marina {
             .and_then(|(_, driver)| driver.as_streaming())
     }
 
+    /// Open a resumable local-first upload to a write-enabled Minot registry.
+    #[cfg(feature = "minot-registry")]
+    pub async fn begin_stream_write<'a>(
+        &'a self,
+        bag: &BagRef,
+        registry: &str,
+    ) -> Result<crate::registry::minot::WriteSession<'a>> {
+        let (config, driver) = self
+            .registries
+            .get(registry)
+            .ok_or_else(|| anyhow!("registry '{registry}' not found"))?;
+        Self::ensure_auth(config, true)?;
+        let minot = driver
+            .as_any()
+            .downcast_ref::<crate::registry::minot::MinotRegistry>()
+            .ok_or_else(|| {
+                anyhow!(
+                    "registry '{registry}' is not a minot:// streaming registry; live replication requires marina serve"
+                )
+            })?;
+        minot.begin_write(bag).await
+    }
+
     /// Adds a new registry and persists it to `registries.toml`.
     pub fn add_registry(&mut self, registry: RegistryConfig) -> Result<()> {
         validate_registry_name(&registry.name)?;

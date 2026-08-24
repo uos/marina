@@ -21,7 +21,7 @@ use crate::registry::driver::BagInfo;
 /// is no newer than its own; anything else is refused at [`Hello`] with a
 /// message naming both versions, because "connection reset" is a miserable way
 /// to learn your marina is out of date.
-pub const PROTOCOL_VERSION: (u16, u16) = (2, 0);
+pub const PROTOCOL_VERSION: (u16, u16) = (2, 1);
 
 /// A [`BagRef`] as it travels.
 #[derive(Archive, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -99,6 +99,14 @@ pub struct WireFile {
     pub size: u64,
 }
 
+/// A completed file as committed by a streaming writer.
+#[derive(Archive, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct WireManifestFile {
+    pub path: String,
+    pub size: u64,
+    pub sha256: String,
+}
+
 #[derive(Archive, Serialize, Deserialize, Debug, Clone)]
 pub enum Request {
     /// Sent first. Establishes that both ends speak the same protocol.
@@ -127,6 +135,20 @@ pub enum Request {
         path: String,
         offset: u64,
         len: u32,
+    },
+    /// Open or resume a local-first streaming upload.
+    BeginWrite { bag: WireBagRef },
+    /// Idempotently append bytes at the server's current durable watermark.
+    WriteRange {
+        bag: WireBagRef,
+        path: String,
+        offset: u64,
+        data: Vec<u8>,
+    },
+    /// Verify all files and atomically publish the completed dataset.
+    CommitWrite {
+        bag: WireBagRef,
+        files: Vec<WireManifestFile>,
     },
 }
 
@@ -166,6 +188,16 @@ pub enum Response {
         /// Fewer bytes than asked for means end of file, never an error.
         data: Vec<u8>,
     },
+    WriteStatus {
+        /// Durable byte watermarks for files already staged on the server.
+        files: Vec<WireFile>,
+    },
+    WriteAck {
+        /// Next offset the client should send. Repeating an acknowledged range
+        /// is safe and returns the same or a later watermark.
+        next_offset: u64,
+    },
+    WriteCommitted,
 }
 
 /// Service topic a server listens on for a given registry name.

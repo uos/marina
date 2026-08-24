@@ -53,6 +53,12 @@ enum Commands {
     Rm(RemoveArgs),
     Clean(CleanArgs),
     Import(ImportArgs),
+    /// Finish a locally recorded dataset and atomically publish its remote tag.
+    #[cfg(feature = "minot-registry")]
+    Finalize(FinalizeArgs),
+    #[cfg(feature = "minot-registry")]
+    #[command(hide = true)]
+    StreamUpload(StreamUploadArgs),
     Inspect(InspectArgs),
     #[command(hide = true)]
     CompleteRefresh,
@@ -83,6 +89,10 @@ struct ServeArgs {
     /// is providing transport security.
     #[arg(long, default_value_t = false)]
     listen_all: bool,
+    /// Accept resumable dataset uploads. Use only behind the SSH tunnel; this
+    /// server has no application-level authentication of its own.
+    #[arg(long, default_value_t = false)]
+    allow_write: bool,
 }
 
 #[derive(Args)]
@@ -315,6 +325,27 @@ struct ImportArgs {
     path: Option<PathBuf>,
     #[arg(long)]
     move_to_cache: bool,
+    /// Replicate a growing recording to this write-enabled minot:// registry.
+    #[cfg(feature = "minot-registry")]
+    #[arg(long)]
+    registry: Option<String>,
+}
+
+#[cfg(feature = "minot-registry")]
+#[derive(Args)]
+struct FinalizeArgs {
+    target: BagRef,
+    /// Override the registry stored by `marina import --registry`.
+    #[arg(long)]
+    registry: Option<String>,
+}
+
+#[cfg(feature = "minot-registry")]
+#[derive(Args)]
+struct StreamUploadArgs {
+    target: BagRef,
+    #[arg(long)]
+    registry: String,
 }
 
 #[derive(Args)]
@@ -372,6 +403,75 @@ fn spawn_complete_refresh() {
             .stderr(std::process::Stdio::null())
             .spawn();
     }
+}
+
+#[cfg(feature = "minot-registry")]
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StreamUploadIntent {
+    bag: BagRef,
+    registry: String,
+}
+
+#[cfg(feature = "minot-registry")]
+fn stream_upload_paths(ready: &std::path::Path) -> anyhow::Result<(PathBuf, PathBuf, PathBuf)> {
+    let parent = ready
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Marina cache path has no dataset parent"))?;
+    Ok((
+        parent.join("upload.json"),
+        parent.join("upload.finalize"),
+        parent.join("upload.log"),
+    ))
+}
+
+#[cfg(feature = "minot-registry")]
+fn start_stream_uploader(
+    ready: &std::path::Path,
+    target: &BagRef,
+    registry: &str,
+) -> anyhow::Result<()> {
+    use std::io::Write;
+
+    let (intent_path, finalize_path, log_path) = stream_upload_paths(ready)?;
+    let _ = std::fs::remove_file(&finalize_path);
+    let intent = StreamUploadIntent {
+        bag: target.without_attachment(),
+        registry: registry.to_string(),
+    };
+    let temporary = intent_path.with_extension("json.tmp");
+    std::fs::write(&temporary, serde_json::to_vec_pretty(&intent)?)?;
+    std::fs::rename(&temporary, &intent_path)?;
+
+    let executable = std::env::current_exe()?;
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+    let error_log = log.try_clone()?;
+    writeln!(&log, "starting live upload of {target} to {registry}")?;
+    std::process::Command::new(executable)
+        .arg("stream-upload")
+        .arg(target.to_string())
+        .arg("--registry")
+        .arg(registry)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(log))
+        .stderr(std::process::Stdio::from(error_log))
+        .spawn()
+        .context("could not start the background Marina uploader")?;
+    Ok(())
+}
+
+#[cfg(feature = "minot-registry")]
+fn load_stream_upload_intent(ready: &std::path::Path) -> anyhow::Result<StreamUploadIntent> {
+    let (intent_path, _, _) = stream_upload_paths(ready)?;
+    let bytes = std::fs::read(&intent_path).with_context(|| {
+        format!(
+            "no live upload exists for this dataset (missing {}); use --registry",
+            intent_path.display()
+        )
+    })?;
+    serde_json::from_slice(&bytes).context("could not read the live upload intent")
 }
 
 fn mirror_patterns(patterns: &[String]) -> Vec<String> {
@@ -1801,12 +1901,96 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
         Commands::Import(args) => {
             let path =
                 marina.import_local(&args.target, args.path.as_deref(), args.move_to_cache)?;
+            #[cfg(feature = "minot-registry")]
+            if let Some(registry) = args.registry.as_deref() {
+                let config = marina
+                    .list_registry_configs()
+                    .into_iter()
+                    .find(|candidate| candidate.name == registry)
+                    .ok_or_else(|| anyhow::anyhow!("registry '{registry}' not found"))?;
+                if config.kind != "minot" {
+                    anyhow::bail!(
+                        "live recording replication requires a minot:// registry; '{}' is {}",
+                        registry,
+                        config.kind
+                    );
+                }
+                start_stream_uploader(&path, &args.target, registry)?;
+            }
             if args.path.is_some() {
                 println!("imported {} -> {}", args.target, path.display());
             } else {
                 // Print just the path so the command can be used in $() substitution.
                 println!("{}", path.display());
             }
+            spawn_complete_refresh();
+        }
+        #[cfg(feature = "minot-registry")]
+        Commands::StreamUpload(args) => {
+            let ready = marina.cached_bag_dir(&args.target).ok_or_else(|| {
+                anyhow::anyhow!("{} is not in the local Marina cache", args.target)
+            })?;
+            let (_, finalize_path, _) = stream_upload_paths(&ready)?;
+            loop {
+                if finalize_path.exists() {
+                    break;
+                }
+                match marina
+                    .begin_stream_write(&args.target, &args.registry)
+                    .await
+                {
+                    Ok(mut upload) => loop {
+                        if finalize_path.exists() {
+                            break;
+                        }
+                        match upload.sync_snapshot(&ready).await {
+                            Ok(bytes) if bytes > 0 => {
+                                println!("uploaded {bytes} new bytes for {}", args.target)
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                eprintln!("live upload interrupted: {error}; retrying");
+                                break;
+                            }
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    },
+                    Err(error) => eprintln!("cannot reach upload server: {error}; retrying"),
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+        #[cfg(feature = "minot-registry")]
+        Commands::Finalize(args) => {
+            let ready = marina.cached_bag_dir(&args.target).ok_or_else(|| {
+                anyhow::anyhow!("{} is not in the local Marina cache", args.target)
+            })?;
+            crate::io::bag::discover_bag(&ready).with_context(|| {
+                format!(
+                    "cannot finalize '{}': the local recording is not a complete ROS bag",
+                    args.target
+                )
+            })?;
+            let intent = load_stream_upload_intent(&ready).ok();
+            let registry = args
+                .registry
+                .or_else(|| intent.as_ref().map(|intent| intent.registry.clone()))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no output registry recorded for '{}'; pass --registry",
+                        args.target
+                    )
+                })?;
+            let (intent_path, finalize_path, _) = stream_upload_paths(&ready)?;
+            std::fs::write(&finalize_path, b"finalize\n")?;
+            let upload = marina.begin_stream_write(&args.target, &registry).await?;
+            upload.commit(&ready).await?;
+            let _ = std::fs::remove_file(&intent_path);
+            // Leave the marker until the next `import` of this tag. The
+            // detached tailer may still be returning from an in-flight network
+            // request; removing it here could make that process miss the stop
+            // signal and start a second upload after the commit.
+            println!("finalized {} in registry {}", args.target, registry);
             spawn_complete_refresh();
         }
         Commands::Inspect(args) => {
@@ -1920,6 +2104,7 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
 
             let mut options = crate::registry::minot::server::ServeOptions::new(exposed_as.clone());
             options.local_only = !args.listen_all;
+            options.allow_write = args.allow_write;
 
             println!(
                 "serving registry '{}' ({}) as '{}'{}",
@@ -1932,6 +2117,9 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                     " on this machine only"
                 }
             );
+            if args.allow_write {
+                println!("remote dataset uploads are enabled");
+            }
             println!("clients should configure: marina registry add <name> minot://{exposed_as}");
             crate::registry::minot::server::serve(driver, options).await?;
         }
@@ -2233,5 +2421,28 @@ mod tests {
         assert_eq!(args.target, "alice@example.org:2222");
         assert_eq!(args.patterns, vec!["team/*", "demo:*"]);
         assert_eq!(args.proxy_jump.as_deref(), Some("jump@example.org"));
+    }
+
+    #[cfg(feature = "minot-registry")]
+    #[test]
+    fn import_can_start_a_live_registry_upload() {
+        let cli = Cli::try_parse_from(["marina", "import", "team/run:v1", "--registry", "robot"])
+            .unwrap();
+        let Commands::Import(args) = cli.cmd else {
+            panic!("expected import command");
+        };
+        assert_eq!(args.target.to_string(), "team/run:v1");
+        assert_eq!(args.registry.as_deref(), Some("robot"));
+        assert!(args.path.is_none());
+    }
+
+    #[cfg(feature = "minot-registry")]
+    #[test]
+    fn finalize_accepts_the_same_marina_reference() {
+        let cli = Cli::try_parse_from(["marina", "finalize", "team/run:v1"]).unwrap();
+        let Commands::Finalize(args) = cli.cmd else {
+            panic!("expected finalize command");
+        };
+        assert_eq!(args.target.to_string(), "team/run:v1");
     }
 }

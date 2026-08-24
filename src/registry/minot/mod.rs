@@ -34,7 +34,9 @@ use crate::registry::driver::{
 };
 use crate::registry::ssh::{SshRegistry, SshTunnel};
 use block_store::CacheMode;
-use protocol::{PROTOCOL_VERSION, Request, Response, WireBagRef, WireFile, service_topic};
+use protocol::{
+    PROTOCOL_VERSION, Request, Response, WireBagRef, WireFile, WireManifestFile, service_topic,
+};
 use remote_file::{NetworkFetcher, RangeFetcher, RemoteFile};
 
 /// How long to wait for a control reply. Bulk transfer has its own, longer,
@@ -105,6 +107,27 @@ impl MinotRegistry {
     /// Registry name requested from the remote `marina serve` process.
     pub fn remote_registry_name(&self) -> &str {
         &self.remote_registry
+    }
+
+    /// Open or resume a local-first dataset upload.
+    pub async fn begin_write<'a>(&'a self, bag: &BagRef) -> Result<WriteSession<'a>> {
+        let bag = bag.without_attachment();
+        let response = self
+            .request(Request::BeginWrite {
+                bag: WireBagRef::from(&bag),
+            })
+            .await?;
+        let Response::WriteStatus { files } = response else {
+            return Err(anyhow!("unexpected begin-write response: {response:?}"));
+        };
+        Ok(WriteSession {
+            registry: self,
+            bag,
+            offsets: files
+                .into_iter()
+                .map(|file| (file.path, file.size))
+                .collect(),
+        })
     }
 
     /// Parse a `minot://` URI.
@@ -435,6 +458,120 @@ impl MinotRegistry {
 
 /// A dataset on the far side, opened for reading without downloading it.
 ///
+/// A resumable upload whose durable watermarks live on the server.
+///
+/// The source directory remains the authoritative copy. Calling
+/// [`WriteSession::sync_snapshot`] repeatedly tails files that are still
+/// growing; [`WriteSession::commit`] is only valid after the recorder has
+/// closed the bag and written `metadata.yaml`.
+pub struct WriteSession<'a> {
+    registry: &'a MinotRegistry,
+    bag: BagRef,
+    offsets: std::collections::HashMap<String, u64>,
+}
+
+impl WriteSession<'_> {
+    /// Upload every byte currently visible in `root`, resuming from server
+    /// watermarks. Files may continue growing while this runs.
+    pub async fn sync_snapshot(&mut self, root: &Path) -> Result<u64> {
+        use std::io::{Read, Seek, SeekFrom};
+
+        const UPLOAD_CHUNK_BYTES: usize = 1024 * 1024;
+        let mut entries = Vec::new();
+        for entry in walkdir::WalkDir::new(root).follow_links(false) {
+            let entry = entry?;
+            if entry.path() == root || entry.file_type().is_dir() {
+                continue;
+            }
+            if entry.file_type().is_symlink() {
+                return Err(anyhow!(
+                    "symbolic links are not supported in streamed uploads: {}",
+                    entry.path().display()
+                ));
+            }
+            let relative = entry
+                .path()
+                .strip_prefix(root)?
+                .to_string_lossy()
+                .replace('\\', "/");
+            entries.push((
+                relative,
+                entry.path().to_path_buf(),
+                entry.metadata()?.len(),
+            ));
+        }
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+
+        let mut uploaded = 0u64;
+        for (relative, path, snapshot_size) in entries {
+            let mut offset = self.offsets.get(&relative).copied().unwrap_or(0);
+            if offset > snapshot_size {
+                return Err(anyhow!(
+                    "remote staging for '{}' is {} bytes but the local file is only {} bytes; the file was replaced during an interrupted upload",
+                    relative,
+                    offset,
+                    snapshot_size
+                ));
+            }
+            let mut file = std::fs::File::open(&path)
+                .with_context(|| format!("could not open upload source {}", path.display()))?;
+            while offset < snapshot_size {
+                let len = (snapshot_size - offset).min(UPLOAD_CHUNK_BYTES as u64) as usize;
+                let mut data = vec![0u8; len];
+                file.seek(SeekFrom::Start(offset))?;
+                file.read_exact(&mut data)?;
+                let response = self
+                    .registry
+                    .request(Request::WriteRange {
+                        bag: WireBagRef::from(&self.bag),
+                        path: relative.clone(),
+                        offset,
+                        data,
+                    })
+                    .await
+                    .with_context(|| format!("uploading '{}' at byte {offset}", relative))?;
+                let Response::WriteAck { next_offset } = response else {
+                    return Err(anyhow!("unexpected write response: {response:?}"));
+                };
+                if next_offset == offset {
+                    return Err(anyhow!(
+                        "server made no progress uploading '{}' at byte {offset}",
+                        relative
+                    ));
+                }
+                uploaded += next_offset.saturating_sub(offset);
+                offset = next_offset;
+                self.offsets.insert(relative.clone(), offset);
+            }
+        }
+        Ok(uploaded)
+    }
+
+    /// Verify and atomically publish a closed local bag.
+    pub async fn commit(mut self, root: &Path) -> Result<()> {
+        self.sync_snapshot(root).await?;
+        let files = crate::storage::cache::mirror_manifest(root)?
+            .into_iter()
+            .map(|file| WireManifestFile {
+                path: file.path,
+                size: file.size,
+                sha256: file.sha256,
+            })
+            .collect();
+        let response = self
+            .registry
+            .request(Request::CommitWrite {
+                bag: WireBagRef::from(&self.bag),
+                files,
+            })
+            .await?;
+        match response {
+            Response::WriteCommitted => Ok(()),
+            other => Err(anyhow!("unexpected commit response: {other:?}")),
+        }
+    }
+}
+
 /// Holds the file list and hands out [`RemoteFile`]s. Everything it returns
 /// implements `Read + Seek`, which is all a sans-io bag reader needs.
 pub struct RemoteDataset {

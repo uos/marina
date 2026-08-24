@@ -24,8 +24,8 @@ use mt_service::ServiceServer;
 
 use crate::registry::driver::RegistryDriver;
 use crate::registry::minot::protocol::{
-    PROTOCOL_VERSION, Request, Response, WireBagInfo, WireBagRef, WireFile, service_topic,
-    version_mismatch,
+    PROTOCOL_VERSION, Request, Response, WireBagInfo, WireBagRef, WireFile, WireManifestFile,
+    service_topic, version_mismatch,
 };
 
 /// How a served registry is reached and what it is allowed to do.
@@ -46,6 +46,9 @@ pub struct ServeOptions {
     /// Largest range a client may ask for in one request, as a guard against a
     /// misbehaving or hostile client asking for a gigabyte.
     pub max_range_bytes: u32,
+    /// Accept staged dataset uploads. Off by default because Minot itself does
+    /// not authenticate clients; SSH is the intended authorization boundary.
+    pub allow_write: bool,
 }
 
 impl ServeOptions {
@@ -56,6 +59,7 @@ impl ServeOptions {
             flow: FlowConfig::default(),
             materialize_root: None,
             max_range_bytes: 8 * 1024 * 1024,
+            allow_write: false,
         }
     }
 }
@@ -70,8 +74,13 @@ pub async fn serve(driver: Arc<dyn RegistryDriver>, options: ServeOptions) -> Re
         mt_sea::network::set_unicast_only(true);
         log::warn!(
             "marina serve is not restricted to this machine. Minot provides no \
-             authentication, so anything that can reach this port can read the \
+             authentication, so anything that can reach this port can {} the \
              '{}' registry. Prefer an SSH tunnel to a loopback-bound server.",
+            if options.allow_write {
+                "read and write"
+            } else {
+                "read"
+            },
             options.registry
         );
     }
@@ -80,6 +89,12 @@ pub async fn serve(driver: Arc<dyn RegistryDriver>, options: ServeOptions) -> Re
         .check_connection()
         .await
         .context("the registry being served is not reachable")?;
+    if options.allow_write {
+        driver
+            .check_write_access()
+            .await
+            .context("the registry being served is not writable")?;
+    }
 
     // TryReliable, never Reliable: a client that dies must not torpedo the
     // server, and the server must survive its own coordinator restarting.
@@ -127,9 +142,11 @@ pub async fn serve(driver: Arc<dyn RegistryDriver>, options: ServeOptions) -> Re
         flow: options.flow,
         materialize_root,
         max_range_bytes: options.max_range_bytes,
+        allow_write: options.allow_write,
         materialize_lock: tokio::sync::Mutex::new(()),
         materializing: tokio::sync::Mutex::new(HashSet::new()),
         materialize_errors: tokio::sync::Mutex::new(HashMap::new()),
+        write_lock: tokio::sync::Mutex::new(()),
     });
 
     ServiceServer::start(
@@ -151,6 +168,7 @@ struct RequestHandler {
     flow: FlowConfig,
     materialize_root: std::path::PathBuf,
     max_range_bytes: u32,
+    allow_write: bool,
     /// Serialises the disk-heavy restore itself.
     materialize_lock: tokio::sync::Mutex<()>,
     /// Dataset keys currently restoring, so every poll returns immediately and
@@ -159,6 +177,9 @@ struct RequestHandler {
     /// A background failure is returned by the next poll instead of leaving a
     /// client waiting forever.
     materialize_errors: tokio::sync::Mutex<HashMap<String, String>>,
+    /// Serialises staging mutations and commits. Upload traffic is already
+    /// sequential per client; this also prevents two clients racing one tag.
+    write_lock: tokio::sync::Mutex<()>,
 }
 
 impl RequestHandler {
@@ -207,6 +228,17 @@ impl RequestHandler {
                 offset,
                 len,
             } => self.read_range(bag.into(), &path, offset, len).await,
+
+            Request::BeginWrite { bag } => self.begin_write(bag.into()).await,
+
+            Request::WriteRange {
+                bag,
+                path,
+                offset,
+                data,
+            } => self.write_range(bag.into(), &path, offset, data).await,
+
+            Request::CommitWrite { bag, files } => self.commit_write(bag.into(), files).await,
         }
     }
 
@@ -390,6 +422,234 @@ impl RequestHandler {
         Ok(Response::ReadRange { data })
     }
 
+    fn ensure_writes_enabled(&self) -> Result<(), String> {
+        if self.allow_write {
+            Ok(())
+        } else {
+            Err("this marina server is read-only; restart it with --allow-write".to_string())
+        }
+    }
+
+    fn write_staging_dir(&self, bag: &crate::model::bag_ref::BagRef) -> std::path::PathBuf {
+        self.dataset_dir(bag).join(".write-incoming")
+    }
+
+    async fn begin_write(&self, bag: crate::model::bag_ref::BagRef) -> Result<Response, String> {
+        self.ensure_writes_enabled()?;
+        let _guard = self.write_lock.lock().await;
+        let staging = self.write_staging_dir(&bag);
+        std::fs::create_dir_all(&staging)
+            .map_err(|error| format!("could not stage '{bag}': {error}"))?;
+        let files = list_file_sizes(&staging)
+            .map_err(|error| format!("could not inspect staged upload '{bag}': {error}"))?;
+        Ok(Response::WriteStatus { files })
+    }
+
+    async fn write_range(
+        &self,
+        bag: crate::model::bag_ref::BagRef,
+        path: &str,
+        offset: u64,
+        data: Vec<u8>,
+    ) -> Result<Response, String> {
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        self.ensure_writes_enabled()?;
+        if data.len() > self.max_range_bytes as usize {
+            return Err(format!(
+                "upload range of {} bytes exceeds this server's limit of {}",
+                data.len(),
+                self.max_range_bytes
+            ));
+        }
+        let _guard = self.write_lock.lock().await;
+        let staging = self.write_staging_dir(&bag);
+        std::fs::create_dir_all(&staging)
+            .map_err(|error| format!("could not stage '{bag}': {error}"))?;
+        let target = safe_join(&staging, path)?;
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("could not create upload directory: {error}"))?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&target)
+            .map_err(|error| format!("could not open staged file '{path}': {error}"))?;
+        let current = file
+            .metadata()
+            .map_err(|error| format!("could not inspect staged file '{path}': {error}"))?
+            .len();
+
+        // A client may retry after losing the acknowledgement. Verify the
+        // overlap, then append only bytes the server does not already have.
+        if offset < current {
+            let overlap = (current - offset).min(data.len() as u64) as usize;
+            let mut existing = vec![0u8; overlap];
+            file.seek(SeekFrom::Start(offset))
+                .and_then(|_| file.read_exact(&mut existing))
+                .map_err(|error| {
+                    format!("could not verify repeated range for '{path}': {error}")
+                })?;
+            if existing != data[..overlap] {
+                return Err(format!(
+                    "staged file '{path}' differs at offset {offset}; use a new Marina tag or clear the interrupted upload"
+                ));
+            }
+            if overlap == data.len() {
+                return Ok(Response::WriteAck {
+                    next_offset: current,
+                });
+            }
+            file.seek(SeekFrom::End(0))
+                .and_then(|_| file.write_all(&data[overlap..]))
+                .and_then(|_| file.flush())
+                .map_err(|error| format!("could not append staged file '{path}': {error}"))?;
+            return Ok(Response::WriteAck {
+                next_offset: current + (data.len() - overlap) as u64,
+            });
+        }
+
+        if offset > current {
+            // The watermark is authoritative. Returning it lets a resumed
+            // client repair the missing prefix without creating a sparse hole.
+            return Ok(Response::WriteAck {
+                next_offset: current,
+            });
+        }
+        file.seek(SeekFrom::End(0))
+            .and_then(|_| file.write_all(&data))
+            .and_then(|_| file.flush())
+            .map_err(|error| format!("could not append staged file '{path}': {error}"))?;
+        Ok(Response::WriteAck {
+            next_offset: current + data.len() as u64,
+        })
+    }
+
+    async fn commit_write(
+        &self,
+        bag: crate::model::bag_ref::BagRef,
+        files: Vec<WireManifestFile>,
+    ) -> Result<Response, String> {
+        use crate::io::mcap_transform::{McapChunkCompression, PointCloudCompressionMode};
+        use crate::io::pack::{ArchiveCompression, PackOptions};
+        use crate::registry::driver::PushMeta;
+        use crate::storage::cache::MirrorFile;
+        use sha2::{Digest, Sha256};
+
+        self.ensure_writes_enabled()?;
+        let _guard = self.write_lock.lock().await;
+        let parent = self.dataset_dir(&bag);
+        let staging = self.write_staging_dir(&bag);
+        let ready = parent.join("ready");
+        let backup = parent.join(".write-previous");
+        let mut expected = files
+            .into_iter()
+            .map(|file| MirrorFile {
+                path: file.path,
+                size: file.size,
+                sha256: file.sha256,
+            })
+            .collect::<Vec<_>>();
+        expected.sort_by(|left, right| left.path.cmp(&right.path));
+
+        let source_dir = if staging.is_dir() {
+            staging.clone()
+        } else if ready.is_dir() {
+            ready.clone()
+        } else {
+            return Err(format!("no staged upload exists for '{bag}'"));
+        };
+        let actual = crate::storage::cache::mirror_manifest(&source_dir)
+            .map_err(|error| format!("could not verify staged upload '{bag}': {error}"))?;
+        if actual != expected {
+            return Err(format!(
+                "cannot commit '{bag}': staged files do not match the completed local bag"
+            ));
+        }
+        crate::io::bag::discover_bag(&source_dir)
+            .map_err(|error| format!("cannot commit invalid ROS bag '{bag}': {error}"))?;
+
+        if source_dir == staging {
+            if backup.exists() {
+                std::fs::remove_dir_all(&backup)
+                    .map_err(|error| format!("could not clear old '{bag}' backup: {error}"))?;
+            }
+            if ready.exists() {
+                std::fs::rename(&ready, &backup)
+                    .map_err(|error| format!("could not preserve old '{bag}': {error}"))?;
+            }
+            if let Err(error) = std::fs::rename(&staging, &ready) {
+                if backup.exists() {
+                    let _ = std::fs::rename(&backup, &ready);
+                }
+                return Err(format!("could not publish staged '{bag}': {error}"));
+            }
+        }
+
+        // The served registry still stores its ordinary packed object. Build
+        // it losslessly from the atomically installed native bag, then delegate
+        // the final write to the backing registry driver.
+        let packed = parent.join(".write-bundle.marina.tar.gz");
+        let ready_for_pack = ready.clone();
+        let packed_for_task = packed.clone();
+        let packed_meta = tokio::task::spawn_blocking(move || {
+            let source = crate::io::bag::discover_bag(&ready_for_pack)?;
+            let mut progress = crate::ProgressReporter::silent();
+            crate::io::pack::pack_bag_with_progress_and_options(
+                &source,
+                &packed_for_task,
+                PackOptions {
+                    transform: crate::io::mcap_transform::PushTransformOptions {
+                        pointcloud_mode: PointCloudCompressionMode::Disabled,
+                        pointcloud_precision_m: 0.001,
+                        output_mcap_compression: McapChunkCompression::None,
+                    },
+                    archive_compression: ArchiveCompression::Gzip,
+                    db3_vacuum: false,
+                },
+                &mut progress,
+            )
+        })
+        .await
+        .map_err(|error| format!("packing '{bag}' panicked: {error}"))?
+        .map_err(|error| format!("could not pack '{bag}': {error}"))?;
+        let packed_bytes = std::fs::read(&packed)
+            .map_err(|error| format!("could not hash packed '{bag}': {error}"))?;
+        let bundle_hash = Sha256::digest(&packed_bytes)
+            .iter()
+            .take(6)
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let pushed_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.driver
+            .push(
+                &self.registry,
+                &bag,
+                &packed,
+                &PushMeta {
+                    original_bytes: packed_meta.original_bytes,
+                    packed_bytes: packed_meta.packed_bytes,
+                    bundle_hash,
+                    pointcloud: "disabled".to_string(),
+                    mcap_compression: "none".to_string(),
+                    pushed_at,
+                },
+            )
+            .await
+            .map_err(|error| format!("could not publish '{bag}' to backing registry: {error}"))?;
+        let _ = std::fs::remove_file(&packed);
+        if backup.exists() {
+            let _ = std::fs::remove_dir_all(&backup);
+        }
+        Ok(Response::WriteCommitted)
+    }
+
     /// Fetch the bundle from the backing registry and start streaming it.
     ///
     /// The bundle is materialised into a temporary file first, because the
@@ -476,6 +736,30 @@ fn safe_join(root: &std::path::Path, relative: &str) -> Result<std::path::PathBu
     Ok(root.join(candidate))
 }
 
+fn list_file_sizes(root: &std::path::Path) -> anyhow::Result<Vec<WireFile>> {
+    let mut files = Vec::new();
+    for entry in walkdir::WalkDir::new(root).follow_links(false) {
+        let entry = entry?;
+        if entry.path() == root || entry.file_type().is_dir() {
+            continue;
+        }
+        anyhow::ensure!(
+            !entry.file_type().is_symlink(),
+            "symbolic links are not supported in streamed uploads"
+        );
+        files.push(WireFile {
+            path: entry
+                .path()
+                .strip_prefix(root)?
+                .to_string_lossy()
+                .replace('\\', "/"),
+            size: entry.metadata()?.len(),
+        });
+    }
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(files)
+}
+
 /// A short, collision-resistant-enough token for a flow name.
 ///
 /// Not a real UUID: this only has to distinguish concurrent transfers within one
@@ -532,6 +816,10 @@ mod tests {
         assert!(
             options.local_only,
             "Minot has no authentication, so the safe default is loopback"
+        );
+        assert!(
+            !options.allow_write,
+            "remote writes must be explicitly enabled"
         );
     }
 }
