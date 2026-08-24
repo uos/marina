@@ -1,7 +1,9 @@
+use std::collections::HashMap;
+#[cfg(feature = "db3")]
+use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::{collections::HashMap, ffi::OsString};
 
 #[cfg(unix)]
 fn available_space(path: &Path) -> Result<u64> {

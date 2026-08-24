@@ -10,6 +10,8 @@ use crate::io::mcap_transform::{McapChunkCompression, PointCloudCompressionMode}
 use crate::io::{bag, pack};
 use crate::model::bag_ref::BagRef;
 use crate::progress::ProgressReporter;
+#[cfg(feature = "minot-registry")]
+use crate::registry::driver::StreamingDriver;
 use crate::registry::driver::{BagInfo, PushMeta, RegistryDriver};
 use crate::registry::folder::FolderRegistry;
 #[cfg(feature = "gdrive")]
@@ -78,6 +80,54 @@ pub enum ResolveResult {
     },
     /// Target found in multiple registries; caller must pick one.
     Ambiguous { candidates: Vec<(String, BagRef)> },
+}
+
+/// How [`Marina::resolve_access`] should trade network access for a local copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessMode {
+    /// Open a range-readable remote dataset when possible; pull otherwise.
+    PreferStream,
+    /// Prefer materialising a local copy, but stream if that fails and the
+    /// registry supports it.
+    PreferLocal,
+    /// Return only a local path. Streaming is never used as a fallback.
+    RequireLocal,
+}
+
+/// A resolved dataset that a bag reader can consume.
+pub enum DatasetAccess {
+    Local(PathBuf),
+    #[cfg(feature = "minot-registry")]
+    Streamed(crate::registry::minot::RemoteDataset),
+}
+
+impl DatasetAccess {
+    pub fn local_path(&self) -> Option<&Path> {
+        match self {
+            Self::Local(path) => Some(path),
+            #[cfg(feature = "minot-registry")]
+            Self::Streamed(_) => None,
+        }
+    }
+
+    #[cfg(feature = "minot-registry")]
+    pub fn streamed(&self) -> Option<&crate::registry::minot::RemoteDataset> {
+        match self {
+            Self::Local(_) => None,
+            Self::Streamed(dataset) => Some(dataset),
+        }
+    }
+
+    /// Finish caching a streamed dataset and return an ordinary local path.
+    pub fn materialize(self, progress: &mut ProgressReporter<'_>) -> Result<PathBuf> {
+        #[cfg(not(feature = "minot-registry"))]
+        let _ = progress;
+        match self {
+            Self::Local(path) => Ok(path),
+            #[cfg(feature = "minot-registry")]
+            Self::Streamed(dataset) => dataset.materialize(progress),
+        }
+    }
 }
 
 /// Result of removing a registry configuration.
@@ -217,6 +267,14 @@ impl Marina {
     /// Returns the configured default registry name, if any.
     pub fn default_registry(&self) -> Option<&str> {
         self.default_registry.as_deref()
+    }
+
+    /// Return a configured registry's optional byte-range capability.
+    #[cfg(feature = "minot-registry")]
+    pub fn streaming_driver(&self, name: &str) -> Option<&dyn StreamingDriver> {
+        self.registries
+            .get(name)
+            .and_then(|(_, driver)| driver.as_streaming())
     }
 
     /// Adds a new registry and persists it to `registries.toml`.
@@ -670,6 +728,63 @@ impl Marina {
         Ok(ready_dir)
     }
 
+    /// Make a dataset available locally, streaming it when the registry can.
+    ///
+    /// The result is the same as [`Marina::pull_exact_with_progress`] — a local
+    /// directory, registered in the catalog — but the route differs. A registry
+    /// that supports byte-range reads is streamed block by block, which means:
+    ///
+    /// - an interrupted attempt **resumes** instead of starting over, and
+    /// - blocks already fetched by ordinary streamed reads are not fetched again.
+    ///
+    /// Everything else falls back to an ordinary pull, so callers can use this
+    /// unconditionally and get the better behaviour where it is available.
+    pub async fn materialize_with_progress(
+        &mut self,
+        bag: &BagRef,
+        registry: Option<&str>,
+        progress: &mut ProgressReporter<'_>,
+    ) -> Result<PathBuf> {
+        #[cfg(feature = "minot-registry")]
+        {
+            let bag_owned = bag.without_attachment();
+            let streamed = {
+                let (cfg, driver) = self.choose_registry(registry)?;
+                match driver.as_streaming() {
+                    Some(streaming) => {
+                        progress.emit(
+                            "stream",
+                            format!("streaming '{bag_owned}' from registry '{}'", cfg.name),
+                        );
+                        match streaming.open_dataset(&bag_owned).await {
+                            Ok(dataset) => Some(dataset.materialize(progress)),
+                            Err(error) => {
+                                // Not fatal: a dataset that cannot be streamed
+                                // (a sqlite3 bag, say) is still perfectly
+                                // pullable, and saying so beats failing.
+                                progress.emit(
+                                    "stream",
+                                    format!(
+                                        "cannot stream '{bag_owned}' ({error}); pulling instead"
+                                    ),
+                                );
+                                None
+                            }
+                        }
+                    }
+                    None => None,
+                }
+            };
+            if let Some(result) = streamed {
+                return result;
+            }
+        }
+        #[cfg(not(feature = "minot-registry"))]
+        let _ = progress;
+
+        self.pull_exact_with_progress(bag, registry, progress).await
+    }
+
     /// Returns true if `s` could be a hash prefix (all hex digits, at least 4 chars).
     fn looks_like_hash_prefix(s: &str) -> bool {
         s.len() >= 4 && s.chars().all(|c| c.is_ascii_hexdigit())
@@ -844,6 +959,103 @@ impl Marina {
             _ => Ok(ResolveResult::Ambiguous {
                 candidates: matches,
             }),
+        }
+    }
+
+    /// Resolve a target to either a local path or a range-readable dataset.
+    ///
+    /// Unlike [`Marina::resolve_target`], this method is allowed to transfer
+    /// data: it pulls when the selected access mode requires a local result or
+    /// when streaming is unavailable. Ambiguous targets remain an error so a
+    /// caller never reads from an arbitrary registry.
+    pub async fn resolve_access(
+        &mut self,
+        target: &str,
+        registry: Option<&str>,
+        mode: AccessMode,
+    ) -> Result<DatasetAccess> {
+        let mut progress = ProgressReporter::silent();
+        self.resolve_access_with_progress(target, registry, mode, &mut progress)
+            .await
+    }
+
+    /// [`Marina::resolve_access`] with progress events for any transfer.
+    pub async fn resolve_access_with_progress(
+        &mut self,
+        target: &str,
+        registry: Option<&str>,
+        mode: AccessMode,
+        progress: &mut ProgressReporter<'_>,
+    ) -> Result<DatasetAccess> {
+        #[cfg(not(feature = "minot-registry"))]
+        let _ = mode;
+        let (bag, remote_registry) = match self.resolve_target(target, registry).await? {
+            ResolveResult::LocalPath(path) | ResolveResult::Cached(path) => {
+                return Ok(DatasetAccess::Local(path));
+            }
+            ResolveResult::RemoteAvailable { registry, bag, .. } => (bag, registry),
+            ResolveResult::Ambiguous { candidates } => {
+                let choices = candidates
+                    .iter()
+                    .map(|(registry, bag)| format!("{bag}@{registry}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(anyhow!(
+                    "target '{target}' is available in multiple registries ({choices}); \
+                     select one explicitly"
+                ));
+            }
+        };
+
+        #[cfg(feature = "minot-registry")]
+        if mode == AccessMode::PreferStream {
+            let streamed = match self.streaming_driver(&remote_registry) {
+                Some(driver) => driver.open_dataset(&bag).await,
+                None => Err(anyhow!(
+                    "registry '{remote_registry}' does not support streaming"
+                )),
+            };
+            match streamed {
+                Ok(dataset) => return Ok(DatasetAccess::Streamed(dataset)),
+                Err(error) => progress.emit(
+                    "stream",
+                    format!("cannot stream '{bag}' ({error}); pulling instead"),
+                ),
+            }
+        }
+
+        let pulled = self
+            .pull_exact_with_progress(&bag, Some(&remote_registry), progress)
+            .await;
+        match pulled {
+            Ok(path) => Ok(DatasetAccess::Local(path)),
+            Err(pull_error) => {
+                #[cfg(feature = "minot-registry")]
+                if mode == AccessMode::PreferLocal {
+                    if let Some(driver) = self.streaming_driver(&remote_registry) {
+                        match driver.open_dataset(&bag).await {
+                            Ok(dataset) => {
+                                progress.emit(
+                                    "stream",
+                                    format!(
+                                        "could not materialise '{bag}' ({pull_error}); \
+                                         using remote access"
+                                    ),
+                                );
+                                return Ok(DatasetAccess::Streamed(dataset));
+                            }
+                            Err(stream_error) => {
+                                return Err(pull_error).with_context(|| {
+                                    format!(
+                                        "streaming fallback for '{bag}' also failed: {stream_error}"
+                                    )
+                                });
+                            }
+                        }
+                    }
+                }
+                Err(pull_error)
+            }
         }
     }
 
@@ -1614,7 +1826,7 @@ fn validate_registry_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn make_registry_driver(registry: &RegistryConfig) -> Result<Arc<dyn RegistryDriver>> {
+pub(crate) fn make_registry_driver(registry: &RegistryConfig) -> Result<Arc<dyn RegistryDriver>> {
     let driver: Arc<dyn RegistryDriver> = match registry.kind.as_str() {
         "folder" | "directory" => {
             Arc::new(FolderRegistry::from_uri(&registry.name, &registry.uri)?)
@@ -1627,6 +1839,26 @@ fn make_registry_driver(registry: &RegistryConfig) -> Result<Arc<dyn RegistryDri
             registry.ssh_transport.clone(),
         )?),
         "http" => Arc::new(HttpRegistry::from_uri(&registry.name, &registry.uri)?),
+        "minot" => {
+            #[cfg(feature = "minot-registry")]
+            {
+                Arc::new(crate::registry::minot::MinotRegistry::from_uri_with_auth(
+                    &registry.name,
+                    &registry.uri,
+                    registry.auth_env.clone(),
+                    registry.proxy_jump.clone(),
+                    registry.ssh_transport.clone(),
+                )?)
+            }
+            #[cfg(not(feature = "minot-registry"))]
+            {
+                return Err(anyhow!(
+                    "registry '{}' is a minot:// registry, but this marina was built without \
+                     the 'minot-registry' feature",
+                    registry.name
+                ));
+            }
+        }
         "gdrive" => {
             #[cfg(feature = "gdrive")]
             {
@@ -1907,6 +2139,40 @@ mod tests {
         };
 
         assert_eq!(marina.cached_bag_dir(&bag), None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn resolve_access_keeps_local_bags_local_in_every_mode() -> Result<()> {
+        let tmp = tempdir()?;
+        fs::write(tmp.path().join("run.mcap"), b"not parsed during resolution")?;
+        let mut marina = Marina {
+            registries: HashMap::new(),
+            catalog: Catalog::default(),
+            default_registry: None,
+        };
+
+        for mode in [
+            AccessMode::PreferStream,
+            AccessMode::PreferLocal,
+            AccessMode::RequireLocal,
+        ] {
+            let access = marina
+                .resolve_access(tmp.path().to_str().unwrap(), None, mode)
+                .await?;
+            assert_eq!(access.local_path(), Some(tmp.path()));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn materializing_local_access_is_a_noop() -> Result<()> {
+        let path = PathBuf::from("/already/local");
+        let mut progress = ProgressReporter::silent();
+        assert_eq!(
+            DatasetAccess::Local(path.clone()).materialize(&mut progress)?,
+            path
+        );
         Ok(())
     }
 

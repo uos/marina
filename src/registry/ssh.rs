@@ -54,6 +54,38 @@ impl Clone for SshRegistry {
     }
 }
 
+/// A live local-port forward. Dropping it tears the forward down.
+///
+/// Only built for `minot://` registries, which are feature-gated.
+#[cfg(feature = "minot-registry")]
+pub(crate) struct SshTunnel {
+    local_port: u16,
+    /// The accept loop, for the native transport.
+    accept: Option<tokio::task::JoinHandle<()>>,
+    /// The `ssh -L` process, for the OpenSSH transport.
+    child: Option<tokio::process::Child>,
+}
+
+#[cfg(feature = "minot-registry")]
+impl SshTunnel {
+    /// Loopback port on this machine that now reaches the far side.
+    pub(crate) fn local_port(&self) -> u16 {
+        self.local_port
+    }
+}
+
+#[cfg(feature = "minot-registry")]
+impl Drop for SshTunnel {
+    fn drop(&mut self) {
+        if let Some(accept) = self.accept.take() {
+            accept.abort();
+        }
+        if let Some(mut child) = self.child.take() {
+            let _ = child.start_kill();
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SshTransport {
     Native,
@@ -335,6 +367,119 @@ impl SshRegistry {
         }
 
         Ok(())
+    }
+
+    /// Forward a local port to `remote_port` on the far side's loopback.
+    ///
+    /// This is what makes `marina serve` reachable across machines. The server
+    /// binds loopback only because Minot carries no authentication of its own,
+    /// so the SSH connection *is* the security boundary — and the credentials
+    /// are the ones already configured for this registry, so nothing new has to
+    /// be set up.
+    ///
+    /// The returned [`SshTunnel`] keeps the forwarder alive; dropping it stops
+    /// accepting new connections.
+    #[cfg(feature = "minot-registry")]
+    pub(crate) async fn open_local_forward(&self, remote_port: u16) -> Result<SshTunnel> {
+        if self.transport == SshTransport::OpenSsh {
+            return self.open_local_forward_openssh(remote_port).await;
+        }
+
+        let handle = self.get_handle().await?;
+        // Port 0: let the OS pick, so two marina processes on one machine do not
+        // collide over a hardcoded choice.
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .context("failed to bind a local port for the ssh tunnel")?;
+        let local_port = listener
+            .local_addr()
+            .context("failed to read the tunnel's local address")?
+            .port();
+
+        let host_label = self.endpoint.display_host_port();
+        let accept = tokio::spawn(async move {
+            loop {
+                let Ok((mut local, _)) = listener.accept().await else {
+                    return;
+                };
+                let handle = Arc::clone(&handle);
+                let host_label = host_label.clone();
+                tokio::spawn(async move {
+                    let channel = match handle
+                        .channel_open_direct_tcpip("127.0.0.1", remote_port.into(), "127.0.0.1", 0)
+                        .await
+                    {
+                        Ok(channel) => channel,
+                        Err(error) => {
+                            log::error!(
+                                "ssh tunnel to {host_label}: could not reach 127.0.0.1:{remote_port} \
+                                 on the far side — is `marina serve` running there? ({error})"
+                            );
+                            return;
+                        }
+                    };
+                    let mut remote = channel.into_stream();
+                    // Errors here are ordinary connection lifecycle, not faults.
+                    if let Err(error) = tokio::io::copy_bidirectional(&mut local, &mut remote).await
+                    {
+                        log::debug!("ssh tunnel connection ended: {error}");
+                    }
+                });
+            }
+        });
+
+        log::info!(
+            "ssh tunnel: 127.0.0.1:{local_port} -> {}:{remote_port}",
+            self.endpoint.display_host_port()
+        );
+        Ok(SshTunnel {
+            local_port,
+            accept: Some(accept),
+            child: None,
+        })
+    }
+
+    /// The same forward, delegated to the `ssh` binary.
+    ///
+    /// Used when the registry is configured for the OpenSSH transport, so that
+    /// agent forwarding, `~/.ssh/config`, and everything else the user has set
+    /// up keeps working rather than being quietly bypassed.
+    #[cfg(feature = "minot-registry")]
+    async fn open_local_forward_openssh(&self, remote_port: u16) -> Result<SshTunnel> {
+        self.ensure_openssh_auth_supported()?;
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .context("failed to reserve a local port for the ssh tunnel")?;
+        let local_port = listener
+            .local_addr()
+            .context("failed to read the tunnel's local address")?
+            .port();
+        // Released so ssh can take it. A race is possible in principle; the
+        // window is tiny and the failure is a clear bind error from ssh.
+        drop(listener);
+
+        let mut command = Command::new("ssh");
+        self.add_openssh_args(&mut command, true);
+        command
+            .arg("-N")
+            .arg("-L")
+            .arg(format!("127.0.0.1:{local_port}:127.0.0.1:{remote_port}"))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        let child = command
+            .spawn()
+            .context("failed to start `ssh` for the tunnel")?;
+
+        log::info!(
+            "ssh tunnel (openssh): 127.0.0.1:{local_port} -> {}:{remote_port}",
+            self.endpoint.display_host_port()
+        );
+        Ok(SshTunnel {
+            local_port,
+            accept: None,
+            child: Some(child),
+        })
     }
 
     async fn get_handle(&self) -> Result<Arc<Handle<ClientHandler>>> {

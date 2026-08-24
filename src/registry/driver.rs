@@ -45,6 +45,12 @@ pub struct BagInfo {
 pub trait RegistryDriver: Send + Sync {
     fn as_any(&self) -> &dyn Any;
 
+    /// Return the registry's byte-range streaming capability, when available.
+    #[cfg(feature = "minot-registry")]
+    fn as_streaming(&self) -> Option<&dyn StreamingDriver> {
+        None
+    }
+
     async fn push(
         &self,
         registry_name: &str,
@@ -89,4 +95,12 @@ pub trait RegistryDriver: Send + Sync {
     async fn check_write_access(&self) -> Result<()> {
         self.check_connection().await
     }
+}
+
+/// Optional capability implemented by registries that can open datasets
+/// without first materialising them locally.
+#[cfg(feature = "minot-registry")]
+#[async_trait]
+pub trait StreamingDriver: RegistryDriver {
+    async fn open_dataset(&self, bag: &BagRef) -> Result<crate::registry::minot::RemoteDataset>;
 }

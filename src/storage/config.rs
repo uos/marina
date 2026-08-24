@@ -161,7 +161,9 @@ pub fn ensure_dir(path: &Path) -> Result<()> {
 }
 
 pub fn infer_kind_from_uri(uri: &str) -> &'static str {
-    if uri.starts_with("ssh://") {
+    if uri.starts_with("minot://") || uri.starts_with("minot+ssh://") {
+        "minot"
+    } else if uri.starts_with("ssh://") {
         "ssh"
     } else if uri.starts_with("gdrive://") {
         "gdrive"

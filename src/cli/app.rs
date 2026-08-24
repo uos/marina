@@ -59,7 +59,30 @@ enum Commands {
     #[command(hide = true)]
     CacheReceive(CacheReceiveCmd),
     Completions(CompletionsArgs),
+    /// Serve a configured registry over a Minot network
+    #[cfg(feature = "minot-registry")]
+    Serve(ServeArgs),
     Version,
+}
+
+/// Expose a local registry so other machines can pull from it.
+///
+/// Minot carries no authentication of its own, so this binds to loopback and
+/// expects to be reached through an SSH tunnel. `--listen-all` overrides that
+/// and says so loudly.
+#[cfg(feature = "minot-registry")]
+#[derive(Args)]
+struct ServeArgs {
+    /// Registry to expose. Defaults to the configured default registry.
+    #[arg(long)]
+    registry: Option<String>,
+    /// Name clients use to address this registry. Defaults to the registry name.
+    #[arg(long)]
+    r#as: Option<String>,
+    /// Accept connections from other machines. Only do this when something else
+    /// is providing transport security.
+    #[arg(long, default_value_t = false)]
+    listen_all: bool,
 }
 
 #[derive(Args)]
@@ -1872,6 +1895,45 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
             clap_complete::CompleteEnv::with_factory(|| Cli::command().name(prog_name))
                 .completer(prog_name)
                 .complete();
+        }
+        #[cfg(feature = "minot-registry")]
+        Commands::Serve(args) => {
+            let name = match args.registry.as_deref() {
+                Some(name) => name.to_string(),
+                None => marina
+                    .default_registry()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "no registry given and no default is configured; pass --registry"
+                        )
+                    })?
+                    .to_string(),
+            };
+            let config = marina
+                .list_registry_configs()
+                .into_iter()
+                .find(|candidate| candidate.name == name)
+                .ok_or_else(|| anyhow::anyhow!("no registry named '{name}' is configured"))?
+                .clone();
+            let driver = crate::core::marina::make_registry_driver(&config)?;
+            let exposed_as = args.r#as.clone().unwrap_or_else(|| name.clone());
+
+            let mut options = crate::registry::minot::server::ServeOptions::new(exposed_as.clone());
+            options.local_only = !args.listen_all;
+
+            println!(
+                "serving registry '{}' ({}) as '{}'{}",
+                name,
+                config.kind,
+                exposed_as,
+                if args.listen_all {
+                    " on all interfaces"
+                } else {
+                    " on this machine only"
+                }
+            );
+            println!("clients should configure: marina registry add <name> minot://{exposed_as}");
+            crate::registry::minot::server::serve(driver, options).await?;
         }
         Commands::Version => {
             println!("{}", env!("CARGO_PKG_VERSION"));
