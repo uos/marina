@@ -3,6 +3,8 @@ use std::fs;
 use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(feature = "minot-registry")]
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use glob::Pattern;
@@ -16,6 +18,11 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::Mutex;
+
+#[cfg(feature = "minot-registry")]
+const REMOTE_FORWARD_READY_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(feature = "minot-registry")]
+const REMOTE_FORWARD_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 
 use crate::model::bag_ref::BagRef;
 use crate::registry::driver::{BagInfo, PushMeta, RegistryDriver, RemoteDescriptor};
@@ -64,6 +71,9 @@ pub(crate) struct SshTunnel {
     accept: Option<tokio::task::JoinHandle<()>>,
     /// The `ssh -L` process, for the OpenSSH transport.
     child: Option<tokio::process::Child>,
+    /// Drains OpenSSH's stderr after startup so repeated reconnect diagnostics
+    /// cannot fill its pipe and stall the forwarding process.
+    stderr_drain: Option<tokio::task::JoinHandle<()>>,
 }
 
 #[cfg(feature = "minot-registry")]
@@ -82,6 +92,9 @@ impl Drop for SshTunnel {
         }
         if let Some(mut child) = self.child.take() {
             let _ = child.start_kill();
+        }
+        if let Some(stderr_drain) = self.stderr_drain.take() {
+            stderr_drain.abort();
         }
     }
 }
@@ -386,6 +399,7 @@ impl SshRegistry {
         }
 
         let handle = self.get_handle().await?;
+        self.wait_for_remote_port(&handle, remote_port).await?;
         // Port 0: let the OS pick, so two marina processes on one machine do not
         // collide over a hardcoded choice.
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -436,7 +450,55 @@ impl SshRegistry {
             local_port,
             accept: Some(accept),
             child: None,
+            stderr_drain: None,
         })
+    }
+
+    /// Do not advertise a forward until SSH has proved that its destination is
+    /// accepting connections. Binding the local listener alone only proves the
+    /// near side; without this check Zenoh enters its reconnect loop and emits a
+    /// stream of `ConnectFailed` errors while `marina serve` is still starting.
+    #[cfg(feature = "minot-registry")]
+    async fn wait_for_remote_port(
+        &self,
+        handle: &Arc<Handle<ClientHandler>>,
+        remote_port: u16,
+    ) -> Result<()> {
+        let started = Instant::now();
+        let mut announced_wait = false;
+        let mut last_error = None;
+
+        while started.elapsed() < REMOTE_FORWARD_READY_TIMEOUT {
+            match tokio::time::timeout(
+                Duration::from_secs(3),
+                handle.channel_open_direct_tcpip("127.0.0.1", remote_port.into(), "127.0.0.1", 0),
+            )
+            .await
+            {
+                Ok(Ok(channel)) => {
+                    drop(channel);
+                    return Ok(());
+                }
+                Ok(Err(error)) => last_error = Some(error.to_string()),
+                Err(_) => last_error = Some("connection attempt timed out".to_string()),
+            }
+
+            if !announced_wait {
+                log::info!(
+                    "SSH connected to {}; waiting for `marina serve` on remote 127.0.0.1:{remote_port}",
+                    self.endpoint.display_host_port()
+                );
+                announced_wait = true;
+            }
+            tokio::time::sleep(REMOTE_FORWARD_RETRY_INTERVAL).await;
+        }
+
+        Err(anyhow!(
+            "SSH connected to {}, but remote 127.0.0.1:{remote_port} did not become reachable within {}s; is `marina serve` running there? (last error: {})",
+            self.endpoint.display_host_port(),
+            REMOTE_FORWARD_READY_TIMEOUT.as_secs(),
+            last_error.unwrap_or_else(|| "unknown".to_string())
+        ))
     }
 
     /// The same forward, delegated to the `ssh` binary.
@@ -467,9 +529,53 @@ impl SshRegistry {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped());
-        let child = command
+        let mut child = command
             .spawn()
             .context("failed to start `ssh` for the tunnel")?;
+
+        let started = Instant::now();
+        let mut announced_wait = false;
+        loop {
+            if let Some(status) = child
+                .try_wait()
+                .context("failed to inspect the ssh tunnel process")?
+            {
+                let mut stderr = String::new();
+                if let Some(mut pipe) = child.stderr.take() {
+                    pipe.read_to_string(&mut stderr).await.ok();
+                }
+                return Err(anyhow!(
+                    "ssh tunnel exited before remote 127.0.0.1:{remote_port} became reachable ({status}): {}",
+                    stderr.trim()
+                ));
+            }
+
+            if local_forward_destination_is_open(local_port).await {
+                break;
+            }
+            if started.elapsed() >= REMOTE_FORWARD_READY_TIMEOUT {
+                let _ = child.start_kill();
+                return Err(anyhow!(
+                    "SSH connected to {}, but remote 127.0.0.1:{remote_port} did not become reachable within {}s; is `marina serve` running there?",
+                    self.endpoint.display_host_port(),
+                    REMOTE_FORWARD_READY_TIMEOUT.as_secs()
+                ));
+            }
+            if !announced_wait {
+                log::info!(
+                    "SSH connected to {}; waiting for `marina serve` on remote 127.0.0.1:{remote_port}",
+                    self.endpoint.display_host_port()
+                );
+                announced_wait = true;
+            }
+            tokio::time::sleep(REMOTE_FORWARD_RETRY_INTERVAL).await;
+        }
+
+        let stderr_drain = child.stderr.take().map(|mut stderr| {
+            tokio::spawn(async move {
+                let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
+            })
+        });
 
         log::info!(
             "ssh tunnel (openssh): 127.0.0.1:{local_port} -> {}:{remote_port}",
@@ -479,6 +585,7 @@ impl SshRegistry {
             local_port,
             accept: None,
             child: Some(child),
+            stderr_drain,
         })
     }
 
@@ -1097,6 +1204,27 @@ impl SshRegistry {
         let output = self.run_ssh_capture(&cmd).await?;
         parse_meta_listing(&output)
     }
+}
+
+/// OpenSSH accepts a connection to its local listener before attempting the
+/// far-side connection. A destination that is down is closed immediately; a
+/// live Zenoh listener leaves the idle connection open.
+#[cfg(feature = "minot-registry")]
+async fn local_forward_destination_is_open(local_port: u16) -> bool {
+    let Ok(Ok(mut stream)) = tokio::time::timeout(
+        Duration::from_secs(1),
+        tokio::net::TcpStream::connect(("127.0.0.1", local_port)),
+    )
+    .await
+    else {
+        return false;
+    };
+
+    let mut byte = [0_u8; 1];
+    matches!(
+        tokio::time::timeout(Duration::from_millis(200), stream.read(&mut byte)).await,
+        Err(_)
+    )
 }
 
 fn parse_meta_listing(output: &str) -> Result<Vec<MetaFile>> {

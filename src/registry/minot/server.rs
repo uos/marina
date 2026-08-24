@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use mt_flow::{BytesSource, FlowConfig, FlowSender};
-use mt_pubsub::{Node, NodeConfig, Qos};
+use mt_pubsub::{CoordMode, Node, NodeConfig, Qos};
 use mt_service::ServiceServer;
 
 use crate::registry::driver::RegistryDriver;
@@ -84,6 +84,7 @@ pub async fn serve(driver: Arc<dyn RegistryDriver>, options: ServeOptions) -> Re
         Node::create(
             NodeConfig::new(format!("marina_serve_{}", options.registry))
                 .mode(Qos::TryReliable)
+                .coord_mode(CoordMode::Start)
                 .wan(),
         )
         .await

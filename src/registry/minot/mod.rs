@@ -23,7 +23,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use mt_flow::{ChunkSink, FlowConfig, FlowReceiver};
-use mt_pubsub::{Node, NodeConfig, Qos};
+use mt_pubsub::{CoordMode, Node, NodeConfig, Qos};
 use mt_service::ServiceClient;
 use tokio::sync::OnceCell;
 
@@ -244,6 +244,7 @@ impl MinotRegistry {
                     Node::create(
                         NodeConfig::new(format!("marina_client_{}", std::process::id()))
                             .mode(Qos::TryReliable)
+                            .coord_mode(CoordMode::External)
                             .wan(),
                     )
                     .await
