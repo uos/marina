@@ -87,6 +87,10 @@ pub enum ResolveResult {
 pub enum AccessMode {
     /// Open a range-readable remote dataset when possible; pull otherwise.
     PreferStream,
+    /// Reuse an ordinary cached dataset first, then open a range-readable
+    /// remote dataset when no local copy exists. This is intended for players
+    /// that promote a completed stream into the ordinary cache.
+    PreferCachedThenStream,
     /// Prefer materialising a local copy, but stream if that fails and the
     /// registry supports it.
     PreferLocal,
@@ -1046,7 +1050,11 @@ impl Marina {
         };
 
         #[cfg(feature = "minot-registry")]
-        if mode == AccessMode::PreferStream && !stream_attempted {
+        if matches!(
+            mode,
+            AccessMode::PreferStream | AccessMode::PreferCachedThenStream
+        ) && !stream_attempted
+        {
             let streamed = match self.streaming_driver(&remote_registry) {
                 Some(driver) => driver.open_dataset(&bag).await,
                 None => Err(anyhow!(
@@ -2192,6 +2200,7 @@ mod tests {
 
         for mode in [
             AccessMode::PreferStream,
+            AccessMode::PreferCachedThenStream,
             AccessMode::PreferLocal,
             AccessMode::RequireLocal,
         ] {
