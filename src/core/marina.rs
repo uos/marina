@@ -989,6 +989,44 @@ impl Marina {
     ) -> Result<DatasetAccess> {
         #[cfg(not(feature = "minot-registry"))]
         let _ = mode;
+        #[cfg(feature = "minot-registry")]
+        let mut stream_attempted = false;
+
+        // An explicit registry is an instruction, not merely a search filter:
+        // `PreferStream` must consult it before the local catalog. This is what
+        // lets callers compare or test a remote copy even when the same bag is
+        // already cached. Concrete filesystem paths keep their local fast path.
+        #[cfg(feature = "minot-registry")]
+        if mode == AccessMode::PreferStream
+            && let Some(registry_name) = registry
+            && !Path::new(target).exists()
+            && !Self::looks_like_hash_prefix(target)
+        {
+            let bag: BagRef = target.parse()?;
+            stream_attempted = true;
+            match self.streaming_driver(registry_name) {
+                Some(driver) => {
+                    let dataset = driver
+                        .open_dataset(&bag.without_attachment())
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "cannot stream '{bag}' from explicitly selected registry \
+                                 '{registry_name}'"
+                            )
+                        })?;
+                    return Ok(DatasetAccess::Streamed(dataset));
+                }
+                None => progress.emit(
+                    "stream",
+                    format!(
+                        "registry '{registry_name}' does not support streaming; \
+                         using normal local resolution instead"
+                    ),
+                ),
+            }
+        }
+
         let (bag, remote_registry) = match self.resolve_target(target, registry).await? {
             ResolveResult::LocalPath(path) | ResolveResult::Cached(path) => {
                 return Ok(DatasetAccess::Local(path));
@@ -1008,7 +1046,7 @@ impl Marina {
         };
 
         #[cfg(feature = "minot-registry")]
-        if mode == AccessMode::PreferStream {
+        if mode == AccessMode::PreferStream && !stream_attempted {
             let streamed = match self.streaming_driver(&remote_registry) {
                 Some(driver) => driver.open_dataset(&bag).await,
                 None => Err(anyhow!(

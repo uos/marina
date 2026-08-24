@@ -297,11 +297,24 @@ impl MinotRegistry {
     /// large dataset can take as long as a pull would.
     pub async fn stat(&self, bag: &BagRef) -> Result<StatResult> {
         let bag = bag.without_attachment();
-        let response = self
-            .request(Request::Stat {
-                bag: WireBagRef::from(&bag),
-            })
-            .await?;
+        let mut last_status = std::time::Instant::now() - Duration::from_secs(30);
+        let response = loop {
+            let response = self
+                .request(Request::Stat {
+                    bag: WireBagRef::from(&bag),
+                })
+                .await?;
+            match response {
+                Response::Materializing { message } => {
+                    if last_status.elapsed() >= Duration::from_secs(5) {
+                        log::info!("{message}; waiting");
+                        last_status = std::time::Instant::now();
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                ready => break ready,
+            }
+        };
         let Response::Stat {
             files,
             streamable,

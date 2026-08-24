@@ -21,7 +21,7 @@ use crate::registry::driver::BagInfo;
 /// is no newer than its own; anything else is refused at [`Hello`] with a
 /// message naming both versions, because "connection reset" is a miserable way
 /// to learn your marina is out of date.
-pub const PROTOCOL_VERSION: (u16, u16) = (1, 1);
+pub const PROTOCOL_VERSION: (u16, u16) = (2, 0);
 
 /// A [`BagRef`] as it travels.
 #[derive(Archive, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -156,6 +156,11 @@ pub enum Response {
         streamable: bool,
         /// Why not, when `streamable` is false. Shown to the user.
         reason: Option<String>,
+    },
+    /// The first `Stat` found only a packed registry object. Restoration is
+    /// running in the background; the client should wait and ask again.
+    Materializing {
+        message: String,
     },
     ReadRange {
         /// Fewer bytes than asked for means end of file, never an error.

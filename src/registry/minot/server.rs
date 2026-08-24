@@ -14,6 +14,7 @@
 //! using the credentials the SSH registry already manages, so users configure
 //! them once.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -122,7 +123,9 @@ pub async fn serve(driver: Arc<dyn RegistryDriver>, options: ServeOptions) -> Re
         flow: options.flow,
         materialize_root,
         max_range_bytes: options.max_range_bytes,
-        materializing: tokio::sync::Mutex::new(()),
+        materialize_lock: tokio::sync::Mutex::new(()),
+        materializing: tokio::sync::Mutex::new(HashSet::new()),
+        materialize_errors: tokio::sync::Mutex::new(HashMap::new()),
     });
 
     ServiceServer::start(
@@ -144,13 +147,18 @@ struct RequestHandler {
     flow: FlowConfig,
     materialize_root: std::path::PathBuf,
     max_range_bytes: u32,
-    /// Serialises materialisation so two clients asking for the same dataset at
-    /// once do not both unpack it on top of each other.
-    materializing: tokio::sync::Mutex<()>,
+    /// Serialises the disk-heavy restore itself.
+    materialize_lock: tokio::sync::Mutex<()>,
+    /// Dataset keys currently restoring, so every poll returns immediately and
+    /// only the first one starts work.
+    materializing: tokio::sync::Mutex<HashSet<String>>,
+    /// A background failure is returned by the next poll instead of leaving a
+    /// client waiting forever.
+    materialize_errors: tokio::sync::Mutex<HashMap<String, String>>,
 }
 
 impl RequestHandler {
-    async fn handle(&self, request: Request) -> Result<Response, String> {
+    async fn handle(self: &Arc<Self>, request: Request) -> Result<Response, String> {
         match request {
             Request::Hello { major, minor } => {
                 if let Some(reason) = version_mismatch(major, minor) {
@@ -215,7 +223,7 @@ impl RequestHandler {
             return Ok(ready);
         }
 
-        let _guard = self.materializing.lock().await;
+        let _guard = self.materialize_lock.lock().await;
         // Checked again under the lock: another request may have done it while
         // this one waited.
         if ready.is_dir() {
@@ -259,8 +267,42 @@ impl RequestHandler {
         Ok(ready)
     }
 
-    async fn stat(&self, bag: crate::model::bag_ref::BagRef) -> Result<Response, String> {
-        let ready = self.materialize(&bag).await?;
+    async fn stat(
+        self: &Arc<Self>,
+        bag: crate::model::bag_ref::BagRef,
+    ) -> Result<Response, String> {
+        let ready = self.dataset_dir(&bag).join("ready");
+        if !ready.is_dir() {
+            let key = bag.without_attachment().to_string();
+            if let Some(error) = self.materialize_errors.lock().await.get(&key).cloned() {
+                return Err(format!("materialising '{bag}' failed: {error}"));
+            }
+
+            let should_start = self.materializing.lock().await.insert(key.clone());
+            if should_start {
+                let handler = Arc::clone(self);
+                let bag_for_task = bag.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = handler.materialize(&bag_for_task).await {
+                        log::error!("marina serve: materialising '{bag_for_task}' failed: {error}");
+                        handler
+                            .materialize_errors
+                            .lock()
+                            .await
+                            .insert(key.clone(), error);
+                    }
+                    handler.materializing.lock().await.remove(&key);
+                });
+            }
+
+            return Ok(Response::Materializing {
+                message: if should_start {
+                    format!("restoring '{bag}' on the server")
+                } else {
+                    format!("still restoring '{bag}' on the server")
+                },
+            });
+        }
 
         let mut files = Vec::new();
         for entry in walkdir::WalkDir::new(&ready).follow_links(false) {
