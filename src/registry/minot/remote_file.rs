@@ -29,8 +29,8 @@
 //! async transport under a synchronous `Read`.
 
 use std::io::{self, Read, Seek, SeekFrom};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 
 use anyhow::Result;
 
@@ -38,12 +38,12 @@ use super::block_store::{BlockStore, CacheMode, NullBlockStore};
 
 /// Bytes per block.
 ///
-/// One MCAP chunk is usually one block: Phase 0 measured chunk reads at a p95 of
-/// ~700 KiB. Smaller would split them; much larger would waste bandwidth on a
-/// seek-heavy read.
-pub const DEFAULT_BLOCK_BYTES: usize = 1024 * 1024;
+/// Phase 0 measured MCAP chunk reads at a p95 of ~700 KiB. Four MiB amortizes
+/// SSH and query overhead across several chunks while remaining small enough
+/// for seeks and a bounded hot window.
+pub const DEFAULT_BLOCK_BYTES: usize = 4 * 1024 * 1024;
 
-/// How many blocks ahead to fetch on a forward read.
+/// How many blocks ahead to fetch in the background on a forward read.
 ///
 /// Chunk offsets were measured to be strictly monotonic, so "the next few
 /// blocks" is a good guess and needs no cleverness.
@@ -123,6 +123,100 @@ impl RangeFetcher for LocalFetcher {
 /// job is to catch repeats, not to be the cache.
 pub const DEFAULT_HOT_BLOCKS: usize = 8;
 
+enum PrefetchedBlock {
+    Pending,
+    Ready(Result<Vec<u8>, String>),
+}
+
+struct PrefetchState {
+    blocks: std::collections::HashMap<u64, PrefetchedBlock>,
+}
+
+/// A bounded, best-effort worker that keeps network reads off the playback
+/// thread. The block store deliberately remains owned by `RemoteFile`; the
+/// worker only fetches bytes, and the reader commits them when it needs them.
+struct Prefetch {
+    requests: std::sync::mpsc::SyncSender<u64>,
+    state: Arc<(Mutex<PrefetchState>, Condvar)>,
+    capacity: usize,
+}
+
+impl Prefetch {
+    fn spawn(
+        fetcher: Arc<dyn RangeFetcher>,
+        path: String,
+        block_bytes: usize,
+        capacity: usize,
+    ) -> Self {
+        let (requests, incoming) = std::sync::mpsc::sync_channel(capacity);
+        let state = Arc::new((
+            Mutex::new(PrefetchState {
+                blocks: std::collections::HashMap::new(),
+            }),
+            Condvar::new(),
+        ));
+        let worker_state = Arc::clone(&state);
+        std::thread::Builder::new()
+            .name("marina-readahead".to_string())
+            .spawn(move || {
+                while let Ok(index) = incoming.recv() {
+                    let offset = index * block_bytes as u64;
+                    let result = fetcher
+                        .fetch(&path, offset, block_bytes as u32)
+                        .map_err(|error| error.to_string());
+                    let (lock, ready) = &*worker_state;
+                    let mut state = lock.lock().unwrap_or_else(|error| error.into_inner());
+                    state.blocks.insert(index, PrefetchedBlock::Ready(result));
+                    ready.notify_all();
+                }
+            })
+            .expect("the readahead thread should start");
+        Self {
+            requests,
+            state,
+            capacity,
+        }
+    }
+
+    fn schedule(&self, index: u64) {
+        let (lock, _) = &*self.state;
+        let mut state = lock.lock().unwrap_or_else(|error| error.into_inner());
+        if state.blocks.contains_key(&index) || state.blocks.len() >= self.capacity {
+            return;
+        }
+        state.blocks.insert(index, PrefetchedBlock::Pending);
+        if self.requests.try_send(index).is_err() {
+            state.blocks.remove(&index);
+        }
+    }
+
+    /// Wait for a block that is already on its way. Waiting here is still
+    /// useful: normally the request started while the previous block was being
+    /// decoded, instead of only being issued at this boundary.
+    fn take(&self, index: u64) -> Option<Result<Vec<u8>, String>> {
+        let (lock, ready) = &*self.state;
+        let mut state = lock.lock().unwrap_or_else(|error| error.into_inner());
+        loop {
+            match state.blocks.remove(&index) {
+                Some(PrefetchedBlock::Ready(result)) => return Some(result),
+                Some(PrefetchedBlock::Pending) => {
+                    state.blocks.insert(index, PrefetchedBlock::Pending);
+                    state = ready.wait(state).unwrap_or_else(|error| error.into_inner());
+                }
+                None => return None,
+            }
+        }
+    }
+
+    fn discard_ready(&self) {
+        let (lock, _) = &*self.state;
+        let mut state = lock.lock().unwrap_or_else(|error| error.into_inner());
+        state
+            .blocks
+            .retain(|_, block| matches!(block, PrefetchedBlock::Pending));
+    }
+}
+
 /// A bounded most-recently-used window of blocks held in memory.
 ///
 /// Bounded is the point: in ephemeral mode this is the *only* thing holding
@@ -192,6 +286,8 @@ pub struct RemoteFile {
     position: u64,
     block_bytes: usize,
     readahead: usize,
+    last_readahead: Option<u64>,
+    prefetch: Option<Prefetch>,
     hot: HotBlocks,
     /// Built on first use, not at construction.
     ///
@@ -215,6 +311,8 @@ impl RemoteFile {
             position: 0,
             block_bytes: DEFAULT_BLOCK_BYTES,
             readahead: DEFAULT_READAHEAD_BLOCKS,
+            last_readahead: None,
+            prefetch: None,
             hot: HotBlocks::new(DEFAULT_HOT_BLOCKS),
             store: None,
             mode: CacheMode::Ephemeral,
@@ -239,6 +337,8 @@ impl RemoteFile {
             position: 0,
             block_bytes: DEFAULT_BLOCK_BYTES,
             readahead: DEFAULT_READAHEAD_BLOCKS,
+            last_readahead: None,
+            prefetch: None,
             hot: HotBlocks::new(DEFAULT_HOT_BLOCKS),
             store: None,
             mode: mode.clone(),
@@ -323,16 +423,31 @@ impl RemoteFile {
     /// A block, from memory, then the store, then the network.
     fn block(&mut self, index: u64) -> io::Result<Arc<Vec<u8>>> {
         if let Some(block) = self.hot.get(index) {
+            self.schedule_readahead(index);
             return Ok(block);
         }
         if let Some(stored) = self.ensure_store().get(index) {
             let block = Arc::new(stored);
             self.hot.insert(index, Arc::clone(&block));
+            self.schedule_readahead(index);
             return Ok(block);
         }
-        let block = Arc::new(self.fetch_block(index)?);
+        let prefetched = self
+            .prefetch
+            .as_ref()
+            .and_then(|prefetch| prefetch.take(index));
+        let data = match prefetched {
+            Some(Ok(data)) => data,
+            Some(Err(error)) => {
+                log::debug!("readahead of block {index} failed, retrying on demand: {error}");
+                self.fetch_block(index)?
+            }
+            None => self.fetch_block(index)?,
+        };
+        let block = Arc::new(data);
         self.ensure_store().put(index, &block);
         self.hot.insert(index, Arc::clone(&block));
+        self.schedule_readahead(index);
         Ok(block)
     }
 
@@ -347,13 +462,22 @@ impl RemoteFile {
         self.hot.blocks.contains_key(&index) || self.ensure_store().get(index).is_some()
     }
 
-    /// Pull in the next few blocks after `index` that are not cached yet.
+    /// Start pulling the next few blocks after `index` that are not cached yet.
     ///
-    /// Best effort: a readahead that fails is not an error, because the real
-    /// read will ask for the block again and report properly then.
-    fn readahead_from(&mut self, index: u64) {
-        if self.readahead == 0 {
+    /// This is deliberately non-blocking. A failed speculative read is retried
+    /// normally if playback actually reaches that block.
+    fn schedule_readahead(&mut self, index: u64) {
+        if self.readahead == 0 || self.last_readahead == Some(index) {
             return;
+        }
+        self.last_readahead = Some(index);
+        if self.prefetch.is_none() {
+            self.prefetch = Some(Prefetch::spawn(
+                Arc::clone(&self.fetcher),
+                self.path.clone(),
+                self.block_bytes,
+                self.readahead,
+            ));
         }
         let last = self.size.div_ceil(self.block_bytes as u64);
         for ahead in 1..=self.readahead as u64 {
@@ -361,17 +485,7 @@ impl RemoteFile {
             if next >= last || self.holds(next) {
                 continue;
             }
-            match self.fetch_block(next) {
-                Ok(data) => {
-                    let block = Arc::new(data);
-                    self.ensure_store().put(next, &block);
-                    self.hot.insert(next, block);
-                }
-                Err(error) => {
-                    log::debug!("readahead of block {next} failed, will retry on demand: {error}");
-                    return;
-                }
-            }
+            self.prefetch.as_ref().expect("just built").schedule(next);
         }
     }
 }
@@ -394,11 +508,6 @@ impl Read for RemoteFile {
         buf[..taken].copy_from_slice(&available[..taken]);
         self.position += taken as u64;
 
-        // Only after a read that consumed a whole block is it worth guessing
-        // that this is a forward scan.
-        if within + taken >= block.len() {
-            self.readahead_from(index);
-        }
         Ok(taken)
     }
 }
@@ -419,6 +528,10 @@ impl Seek for RemoteFile {
         // Seeking past the end is legal and reads return nothing, matching a
         // real file.
         self.position = target as u64;
+        self.last_readahead = None;
+        if let Some(prefetch) = &self.prefetch {
+            prefetch.discard_ready();
+        }
         Ok(self.position)
     }
 }
@@ -491,6 +604,26 @@ impl RangeFetcher for NetworkFetcher {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    struct GatedFetcher {
+        bytes: Vec<u8>,
+        release_readahead: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl RangeFetcher for GatedFetcher {
+        fn fetch(&self, _path: &str, offset: u64, len: u32) -> Result<Vec<u8>> {
+            if offset > 0 {
+                let (lock, released) = &*self.release_readahead;
+                let mut open = lock.lock().unwrap();
+                while !*open {
+                    open = released.wait(open).unwrap();
+                }
+            }
+            let start = offset as usize;
+            let end = (start + len as usize).min(self.bytes.len());
+            Ok(self.bytes[start..end].to_vec())
+        }
+    }
 
     fn payload(len: usize) -> Vec<u8> {
         (0..len).map(|i| (i.wrapping_mul(31) % 251) as u8).collect()
@@ -885,14 +1018,52 @@ mod tests {
         let mut first = vec![0u8; 65536];
         remote.read_exact(&mut first).unwrap();
         assert_eq!(first, bytes[..65536]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while fetcher.requests() == 1 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         assert!(
             fetcher.requests() > 1,
-            "a completed block should have triggered readahead"
+            "reading a block should have started background readahead"
         );
 
         // The content must be unaffected by prefetching.
         let mut rest = Vec::new();
         remote.read_to_end(&mut rest).unwrap();
         assert_eq!(rest, &bytes[65536..]);
+    }
+
+    #[test]
+    fn readahead_never_holds_up_the_current_block() {
+        let bytes = payload(4096 * 5);
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let fetcher = Arc::new(GatedFetcher {
+            bytes: bytes.clone(),
+            release_readahead: Arc::clone(&gate),
+        });
+        let mut remote = RemoteFile::new(
+            fetcher as Arc<dyn RangeFetcher>,
+            "data.bin",
+            bytes.len() as u64,
+        )
+        .with_block_bytes(4096)
+        .with_readahead(3);
+
+        let (finished, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut byte = [0u8; 1];
+            remote.read_exact(&mut byte).unwrap();
+            finished.send(byte[0]).unwrap();
+        });
+
+        let result = answer.recv_timeout(std::time::Duration::from_millis(250));
+        let (lock, released) = &*gate;
+        *lock.lock().unwrap() = true;
+        released.notify_all();
+
+        assert_eq!(
+            result.expect("the current block must not wait for speculative reads"),
+            bytes[0]
+        );
     }
 }

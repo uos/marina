@@ -61,7 +61,7 @@ impl BlockStore for NullBlockStore {
 /// `<root>/<escaped rel path>.blocks` — one byte per block, 1 = present
 ///
 /// The map is a plain byte per block rather than a packed bitset. A 640 MB file
-/// at 1 MiB blocks needs 640 bytes either way once the filesystem has rounded
+/// at 4 MiB blocks needs 160 bytes either way once the filesystem has rounded
 /// up, and a file you can read with `xxd` is worth more during a bad afternoon
 /// than the bytes saved.
 struct Layout {
