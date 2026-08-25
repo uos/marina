@@ -26,7 +26,7 @@ db3 = ["dep:rusqlite"]
 gdrive = ["dep:base64", "dep:ring", "dep:regex"]
 # Serve and consume registries over a Minot network. Off by default: it pulls in
 # Zenoh, which roughly doubles marina's build time and binary size.
-minot-registry = ["dep:mt_flow", "dep:mt_log", "dep:mt_pubsub", "dep:mt_sea", "dep:mt_service", "dep:rkyv"]
+minot-registry = ["dep:mt_flow", "dep:mt_pubsub", "dep:mt_sea", "dep:mt_service", "dep:rkyv"]
 cloudini-cpp = ["cloudini/use_cpp"]
 
 [dependencies]
@@ -47,7 +47,6 @@ mcap = { version = "0.25", features = ["zstd", "lz4"] }
 # Path dependencies while the streaming work is in flight; these versions are
 # not published yet. Revisit before releasing with `minot-registry` enabled.
 mt_flow = { path = "../minot/mt_flow", optional = true }
-mt_log = { path = "../minot/mt_log", optional = true }
 mt_pubsub = { path = "../minot/mt_pubsub", optional = true }
 mt_sea = { path = "../minot/mt_sea", optional = true }
 mt_service = { path = "../minot/mt_service", optional = true }
