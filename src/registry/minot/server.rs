@@ -156,9 +156,9 @@ pub async fn serve(driver: Arc<dyn RegistryDriver>, options: ServeOptions) -> Re
         write_lock: tokio::sync::Mutex::new(()),
     });
 
-    handler.sweep_cache().await;
     let sweeper = Arc::clone(&handler);
     tokio::spawn(async move {
+        sweeper.sweep_cache().await;
         loop {
             tokio::time::sleep(Duration::from_secs(60 * 60)).await;
             sweeper.sweep_cache().await;
@@ -223,15 +223,21 @@ impl RequestHandler {
     }
 
     async fn sweep_cache(&self) {
-        let _guard = self.cache_sweep_lock.write().await;
         let last_access = self.last_access.lock().await.clone();
         let materialize_root = self.materialize_root.clone();
         let temp_root = std::env::temp_dir();
         let cache_max_age = self.cache_max_age;
-        let result = tokio::task::spawn_blocking(move || {
-            sweep_cache_paths(&materialize_root, &temp_root, cache_max_age, &last_access)
-        })
-        .await;
+        let plan = {
+            let _guard = self.cache_sweep_lock.write().await;
+            prepare_cache_sweep(&materialize_root, &temp_root, cache_max_age, &last_access)
+        };
+        let result = match plan {
+            Ok(plan) => tokio::task::spawn_blocking(move || remove_sweep_paths(plan)).await,
+            Err(error) => {
+                log::warn!("marina serve: cache sweep failed: {error}");
+                return;
+            }
+        };
         match result {
             Ok(Ok(summary)) if summary.entries > 0 => log::info!(
                 "marina serve: removed {} expired streaming cache entries ({})",
@@ -1012,16 +1018,31 @@ struct SweepSummary {
     bytes: u64,
 }
 
-fn sweep_cache_paths(
+#[derive(Default)]
+struct SweepPlan {
+    trees: Vec<std::path::PathBuf>,
+    files: Vec<std::path::PathBuf>,
+}
+
+fn prepare_cache_sweep(
     materialize_root: &std::path::Path,
     temp_root: &std::path::Path,
     max_age: Duration,
     last_access: &HashMap<String, SystemTime>,
-) -> std::io::Result<SweepSummary> {
+) -> std::io::Result<SweepPlan> {
     let now = SystemTime::now();
-    let mut summary = SweepSummary::default();
+    let mut plan = SweepPlan::default();
 
     if materialize_root.is_dir() {
+        let trash = materialize_root.join(".sweep-trash");
+        if trash.is_dir() {
+            for entry in std::fs::read_dir(&trash)? {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() {
+                    plan.trees.push(entry.path());
+                }
+            }
+        }
         for entry in std::fs::read_dir(materialize_root)? {
             let entry = entry?;
             let file_type = entry.file_type()?;
@@ -1054,9 +1075,14 @@ fn sweep_cache_paths(
                 continue;
             }
 
-            summary.bytes += directory_size(&path);
-            std::fs::remove_dir_all(path)?;
-            summary.entries += 1;
+            std::fs::create_dir_all(&trash)?;
+            let suffix = now
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let staged = trash.join(format!("{key}-{suffix}"));
+            std::fs::rename(path, &staged)?;
+            plan.trees.push(staged);
         }
     }
 
@@ -1078,13 +1104,43 @@ fn sweep_cache_paths(
             {
                 continue;
             }
-            summary.bytes += metadata.len();
-            std::fs::remove_file(entry.path())?;
-            summary.entries += 1;
+            plan.files.push(entry.path());
         }
     }
 
+    Ok(plan)
+}
+
+fn remove_sweep_paths(plan: SweepPlan) -> std::io::Result<SweepSummary> {
+    let mut summary = SweepSummary::default();
+    for path in plan.trees {
+        summary.bytes += directory_size(&path);
+        std::fs::remove_dir_all(path)?;
+        summary.entries += 1;
+    }
+    for path in plan.files {
+        summary.bytes += std::fs::metadata(&path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        std::fs::remove_file(path)?;
+        summary.entries += 1;
+    }
     Ok(summary)
+}
+
+#[cfg(test)]
+fn sweep_cache_paths(
+    materialize_root: &std::path::Path,
+    temp_root: &std::path::Path,
+    max_age: Duration,
+    last_access: &HashMap<String, SystemTime>,
+) -> std::io::Result<SweepSummary> {
+    remove_sweep_paths(prepare_cache_sweep(
+        materialize_root,
+        temp_root,
+        max_age,
+        last_access,
+    )?)
 }
 
 fn is_expired(now: SystemTime, timestamp: SystemTime, max_age: Duration) -> bool {
