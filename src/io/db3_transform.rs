@@ -72,7 +72,7 @@ pub fn compress_db3_for_push(
     if !has_rosbag_db3_schema(&conn)? {
         progress.emit(
             "pack",
-            "db3 file is not rosbag2 schema; skipping db3 transform",
+            "db3 file has an unsupported schema. Skipping db3 transform",
         );
         return Ok(stats);
     }
@@ -122,7 +122,7 @@ pub fn compress_db3_for_push(
         .context("failed beginning db3 transaction")?;
 
     let result = (|| -> Result<String> {
-        // Stream (id, data) in one pass; prepare update statement once.
+        // Stream (id, data) in one pass. Prepare the update statement once.
         let select_sql =
             format!("SELECT id, data FROM messages WHERE topic_id IN ({placeholders}) ORDER BY id");
         let mut read_stmt = conn

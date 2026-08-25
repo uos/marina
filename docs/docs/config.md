@@ -50,15 +50,15 @@ registries {
 
 ## Registry Blocks
 
-Each block inside `registries { }` defines a storage backend. The block name is the registry identifier — use underscores; they are displayed as-is.
+Each block inside `registries { }` defines a storage backend. The block name is the registry identifier. Use underscores because names are displayed as written.
 
 | Field | Required | Description |
 |---|---|---|
 | `uri` | yes | Connection URI (see below) |
-| `kind` | no | Explicit backend type; inferred from URI scheme if omitted |
+| `kind` | no | Explicit backend type, inferred from the URI scheme when omitted |
 | `auth_env` | no | Name of the environment variable holding credentials at runtime (SSH key path/password or GDrive service-account JSON) |
-| `proxy_jump` | no | SSH jump host in `user@host[:port]` form; SSH registries can also read `MARINA_SSH_PROXY_JUMP` |
-| `ssh_transport` | no | SSH implementation: `native` (default) or `openssh`; SSH registries can also read `MARINA_SSH_TRANSPORT` |
+| `proxy_jump` | no | SSH jump host in `user@host[:port]` form. SSH registries can also read `MARINA_SSH_PROXY_JUMP` |
+| `ssh_transport` | no | SSH implementation: `native` (default) or `openssh`. SSH registries can also read `MARINA_SSH_TRANSPORT` |
 
 ### URI Schemes
 
@@ -106,7 +106,7 @@ Global behaviour settings live under the `settings` block.
 | `MARINA_CONFIG_DIR` | Override the config directory (default: `~/.config/marina`). Useful in CI to point Marina at a config committed to the repo. |
 | `MARINA_CACHE_DIR` | Override the dataset cache directory (default: `~/.cache/marina`). |
 | `MARINA_SSH_PROXY_JUMP` | SSH jump host used by SSH registries when `proxy_jump` is not set in the registry config. |
-| `MARINA_SSH_TRANSPORT` | SSH implementation used by SSH registries when `ssh_transport` is not set; use `openssh` to call system `ssh`/`scp`. |
+| `MARINA_SSH_TRANSPORT` | SSH implementation used by SSH registries. Set `openssh` to call system `ssh` and `scp`. |
 | `MARINA_GDRIVE_CLIENT_ID` | OAuth client ID for Google Drive auth (alternative to `--client-id` flag) |
 | `MARINA_GDRIVE_CLIENT_SECRET` | OAuth client secret for Google Drive auth (alternative to `--client-secret` flag) |
 | `MARINA_PROG_NAME` | Override the program name used in CLI help output (used by ROS verb wrapper) |

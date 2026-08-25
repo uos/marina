@@ -42,7 +42,7 @@ fn read_summary_from_file(file: &mut File) -> Result<Summary> {
 
     summary_reader
         .finish()
-        .ok_or_else(|| anyhow!("mcap file has no summary; indexed streaming requires summary"))
+        .ok_or_else(|| anyhow!("MCAP summary missing. Indexed streaming requires a summary"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -250,7 +250,7 @@ pub fn compress_mcap_for_push_with_progress(
         progress.emit(
             "pack",
             format!(
-                "reader finished: {} chunk(s) loaded; transformed {} PointCloud2 messages out of {} total MCAP messages (mode: {}, precision: {:.3} mm)",
+                "reader finished: {} chunks loaded, {} of {} MCAP messages transformed as PointCloud2 (mode {}, precision {:.3} mm)",
                 loaded_chunks,
                 stats.pointcloud_messages,
                 stats.total_messages,
@@ -416,7 +416,7 @@ pub fn decompress_mcap_after_pull_with_progress(
         progress.emit(
             "unpack",
             format!(
-                "reader finished: {} chunk(s) loaded; restored {} PointCloud2 messages out of {} total MCAP messages",
+                "reader finished: {} chunks loaded, {} of {} MCAP messages restored as PointCloud2",
                 loaded_chunks, stats.pointcloud_messages, stats.total_messages
             ),
         );

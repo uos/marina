@@ -228,7 +228,7 @@ pub unsafe extern "C" fn marina_resolve_detailed(
             bag: cstring_from_string(bag.to_string()),
             registry: cstring_from_string(registry),
             message: cstring_from_string(
-                "remote bag available; call marina_pull(...) to fetch".to_string(),
+                "remote bag available. Call marina_pull(...) to fetch".to_string(),
             ),
         },
         Ok(ResolveResult::Ambiguous { mut candidates }) => {
@@ -240,7 +240,7 @@ pub unsafe extern "C" fn marina_resolve_detailed(
                 bag: cstring_from_string(bag.to_string()),
                 registry: cstring_from_string(registry),
                 message: cstring_from_string(
-                    "bag found in multiple registries; first registry selected".to_string(),
+                    "bag found in multiple registries. First registry selected".to_string(),
                 ),
             }
         }

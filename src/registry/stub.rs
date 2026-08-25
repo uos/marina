@@ -27,7 +27,7 @@ impl StubRegistry {
             self.kind, self.uri
         );
         if let Some(var) = &self.auth_env {
-            msg.push_str(&format!("; auth env configured: {}", var));
+            msg.push_str(&format!(". Auth environment: {}", var));
         }
         anyhow!(msg)
     }

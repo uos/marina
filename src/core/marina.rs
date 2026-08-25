@@ -78,14 +78,14 @@ pub enum ResolveResult {
         bag: BagRef,
         needs_pull: bool,
     },
-    /// Target found in multiple registries; caller must pick one.
+    /// Target found in multiple registries. The caller must pick one.
     Ambiguous { candidates: Vec<(String, BagRef)> },
 }
 
 /// How [`Marina::resolve_access`] should trade network access for a local copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccessMode {
-    /// Open a range-readable remote dataset when possible; pull otherwise.
+    /// Open a range-readable remote dataset when available. Pull other datasets.
     PreferStream,
     /// Reuse an ordinary cached dataset first, then open a range-readable
     /// remote dataset when no local copy exists. This is intended for players
@@ -187,7 +187,7 @@ pub struct InspectResult {
     pub bag: BagRef,
     /// Present when the bag is in the local cache.
     pub local_dir: Option<PathBuf>,
-    /// File listing from the local cache; empty when not cached.
+    /// File listing from the local cache. Uncached datasets return an empty list.
     pub local_files: Vec<InspectFile>,
     /// Metadata from each queried remote registry.
     pub remote_hits: Vec<InspectRemoteHit>,
@@ -204,7 +204,7 @@ pub struct PushOptions {
     /// Run SQLite VACUUM after DB3 pointcloud compression.
     pub db3_vacuum: bool,
     pub dry_run: bool,
-    /// Move the source into the cache instead of copying it.
+    /// Move the source into the cache.
     pub move_source_to_cache: bool,
 }
 
@@ -298,7 +298,7 @@ impl Marina {
             .downcast_ref::<crate::registry::minot::MinotRegistry>()
             .ok_or_else(|| {
                 anyhow!(
-                    "registry '{registry}' is not a minot:// streaming registry; live replication requires marina serve"
+                    "registry '{registry}' does not support live replication. Configure a minot:// registry served by Marina"
                 )
             })?;
         minot.begin_write(bag).await
@@ -488,7 +488,7 @@ impl Marina {
             progress.emit(
                 "push",
                 format!(
-                    "dry-run: packed bundle prepared for registry '{}' ({}); upload/index/cache update skipped",
+                    "dry-run: packed bundle prepared for registry '{}' ({})",
                     cfg.name, cfg.kind
                 ),
             );
@@ -761,7 +761,7 @@ impl Marina {
     /// directory, registered in the catalog — but the route differs. A registry
     /// that supports byte-range reads is streamed block by block, which means:
     ///
-    /// - an interrupted attempt **resumes** instead of starting over, and
+    /// - interrupted transfers resume from their saved position, and
     /// - blocks already fetched by ordinary streamed reads are not fetched again.
     ///
     /// Everything else falls back to an ordinary pull, so callers can use this
@@ -792,7 +792,7 @@ impl Marina {
                                 progress.emit(
                                     "stream",
                                     format!(
-                                        "cannot stream '{bag_owned}' ({error}); pulling instead"
+                                        "stream unavailable for '{bag_owned}' ({error}). Pulling the dataset"
                                     ),
                                 );
                                 None
@@ -1046,10 +1046,7 @@ impl Marina {
                 }
                 None => progress.emit(
                     "stream",
-                    format!(
-                        "registry '{registry_name}' does not support streaming; \
-                         using normal local resolution instead"
-                    ),
+                    format!("registry '{registry_name}' uses local dataset resolution"),
                 ),
             }
         }
@@ -1088,7 +1085,7 @@ impl Marina {
                 Ok(dataset) => return Ok(DatasetAccess::Streamed(dataset)),
                 Err(error) => progress.emit(
                     "stream",
-                    format!("cannot stream '{bag}' ({error}); pulling instead"),
+                    format!("stream unavailable for '{bag}' ({error}). Pulling the dataset"),
                 ),
             }
         }
@@ -1202,7 +1199,7 @@ impl Marina {
         let key = bag.without_attachment().to_string();
         if let Some(entry) = self.catalog.entries.remove(&key) {
             let root = cache::bag_cache_dir(&bag.without_attachment())?;
-            // Only delete local_dir if it lives inside the marina cache; pushed bags
+            // Delete local_dir only when it lives inside the Marina cache. Pushed bags
             // point at the original source directory and must not be deleted.
             if entry.local_dir.starts_with(&root) && entry.local_dir.exists() {
                 fs::remove_dir_all(&entry.local_dir)?;
@@ -1623,8 +1620,7 @@ impl Marina {
     }
 
     /// Mirror unpacked local cache entries directly into another user's cache
-    /// over SSH. Rsync is used opportunistically; native SFTP is always
-    /// available as the fallback.
+    /// over SSH. Rsync handles compatible peers. Native SFTP handles the rest.
     pub async fn mirror_cache_to_ssh(
         &self,
         target: &str,
@@ -1690,7 +1686,7 @@ impl Marina {
             .await
             .with_context(|| {
                 format!(
-                    "failed preparing remote cache; ensure '{}' is installed and compatible",
+                    "failed to prepare remote cache. Install a compatible '{}' binary",
                     remote_marina_display
                 )
             })?;
@@ -2119,7 +2115,7 @@ fn normalize_local_registry_path(uri: &str) -> PathBuf {
     }
 }
 
-/// Tries a cheap `rename` first; falls back to copy+delete on cross-device errors.
+/// Tries a cheap `rename` first. Cross-device moves use copy and delete.
 fn move_or_copy(src: &Path, dst: &Path) -> Result<()> {
     if fs::rename(src, dst).is_ok() {
         return Ok(());

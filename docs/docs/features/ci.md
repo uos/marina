@@ -149,7 +149,7 @@ env:
   MARINA_SSH_PROXY_JUMP: ci@bastion.example.org:22
 ~~~
 
-`proxy_jump` is intentionally simple and uses `user@host[:port]`; it does not parse OpenSSH config aliases.
+`proxy_jump` accepts `user@host[:port]`. Use the resolved host value for OpenSSH config aliases.
 
 **OpenSSH transport**
 

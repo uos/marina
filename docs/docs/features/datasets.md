@@ -144,7 +144,7 @@ The bag is copied into the Marina cache and appears immediately in `marina ls` a
 
 | Flag | Description |
 |---|---|
-| `--move-to-cache` | Move instead of copy. Free when source and cache are on the same filesystem |
+| `--move-to-cache` | Move the source into the cache. This is free on one filesystem |
 
 ### Recording directly with `ros2 bag`
 
@@ -205,8 +205,7 @@ same glob syntax as search and removal (`*`, `?`, and character classes).
 The remote user must have a compatible `marina` executable installed. Marina
 always supports a self-contained native SSH/SFTP transfer. If `rsync` is
 available locally and remotely and OpenSSH authentication succeeds, Marina
-uses it automatically as a faster incremental transfer; otherwise it falls
-back to native SFTP without requiring any additional software.
+uses it for incremental transfer. Other peers use native SFTP.
 
 The transfer is staged and verified before the remote cache catalog is
 updated. Existing datasets are updated, but unrelated datasets in the remote

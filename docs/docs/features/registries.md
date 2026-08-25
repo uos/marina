@@ -85,11 +85,11 @@ Share the Drive folder with the service account email address from the JSON key.
 
 !!! warning "Private Folders"
 
-    Marina currently cannot access privately shared folders (shared only with specific users). If your data is sensitive but you want to share it, use a private SSH registry instead.
+    Google Drive folders require link sharing. Use a private SSH registry for sensitive data.
 
 ### HTTP / HTTPS
 
-HTTP registries are read-only, so you can pull and search but `push` and `rm` are not supported. They are typically maintained by pushing through a corresponding SSH registry with `--write-http-index`.
+HTTP registries provide pull and search. Publish through a corresponding SSH registry with `--write-http-index`.
 
 ~~~bash
 marina registry add web_main https://datasets.example.org/marina

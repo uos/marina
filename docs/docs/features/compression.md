@@ -10,9 +10,9 @@ Marina uses **lossy compression with 1 mm accuracy** by default. At this setting
 
 | Mode | Description |
 |---|---|
-| `off` | No PointCloud2 compression; messages are stored as-is |
+| `off` | Stores PointCloud2 messages as-is |
 | `lossy` | Coordinate rounding to `pointcloud_accuracy` (default: `1mm`) |
-| `lossless` | Lossless cloudini encoding; larger files than lossy |
+| `lossless` | Lossless cloudini encoding with larger files than lossy mode |
 
 ## MCAP Chunk Compression
 

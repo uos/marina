@@ -35,7 +35,8 @@ use crate::registry::driver::{
 use crate::registry::ssh::{SshRegistry, SshTunnel};
 use block_store::CacheMode;
 use protocol::{
-    PROTOCOL_VERSION, Request, Response, WireBagRef, WireFile, WireManifestFile, service_topic,
+    PROTOCOL_VERSION, Request, Response, WireBagRef, WireFile, WireManifestFile, WirePushMeta,
+    service_topic,
 };
 use remote_file::{NetworkFetcher, RangeFetcher, RemoteFile};
 
@@ -137,7 +138,7 @@ impl MinotRegistry {
     /// - `minot://<registry>` — the server is already reachable on this machine
     ///   (both ends local, or a tunnel you opened yourself).
     /// - `minot://<host>:<port>/<registry>` — address a coordinator directly.
-    ///   No authentication; only for a network you trust.
+    ///   Use this on a trusted network. This transport has no authentication.
     /// - `minot+ssh://[user@]<host>[:port]/<registry>` — open an SSH tunnel and
     ///   reach a loopback-bound `marina serve` through it. This is the
     ///   supported way to reach another machine.
@@ -210,12 +211,10 @@ impl MinotRegistry {
             _ => (Reach::Local, rest.to_string()),
         };
 
-        // A registry name is a name, not an address. Anything that looks like a
-        // host is a URI missing its registry — almost always `minot://host:port`
-        // where `minot://host:port/registry` was meant.
+        // A colon identifies a host URI that needs a registry path.
         if remote_registry.contains(':') {
             return Err(anyhow!(
-                "minot registry URI '{uri}' names a host but no registry. \
+                "minot registry URI '{uri}' is missing a registry name. \
                  Use minot://<host>:<port>/<registry>, minot+ssh://<host>/<registry>, \
                  or minot://<registry> when reaching the server through a tunnel."
             ));
@@ -242,7 +241,7 @@ impl MinotRegistry {
                     }
                     Reach::Direct(address) => {
                         // SAFETY: set before any Minot session exists in this
-                        // process; mt_sea reads it when opening one.
+                        // process. mt_sea reads it when opening a session.
                         unsafe { std::env::set_var("MINOT_COORD_ADDR", address) };
                         None
                     }
@@ -289,8 +288,8 @@ impl MinotRegistry {
                     client,
                     _tunnel: tunnel,
                 };
-                // Fail on a version mismatch here rather than at the first
-                // confusing decode error later.
+                // Check the version during the handshake so later requests use
+                // compatible wire types.
                 let response = session
                     .client
                     .request(
@@ -331,7 +330,7 @@ impl MinotRegistry {
             match response {
                 Response::Materializing { message } => {
                     if last_status.elapsed() >= Duration::from_secs(5) {
-                        log::info!("{message}; waiting");
+                        log::info!("{message}. Waiting");
                         last_status = std::time::Instant::now();
                     }
                     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -371,8 +370,7 @@ impl MinotRegistry {
 
     /// Open a dataset for reading without downloading it.
     ///
-    /// Fails rather than silently pulling when the dataset cannot be streamed,
-    /// so a caller decides what to do about it.
+    /// Requires a streamable dataset. The caller controls pull fallback.
     pub async fn open_dataset(&self, bag: &BagRef) -> Result<RemoteDataset> {
         match self.stat(bag).await? {
             StatResult::Streamable(dataset) => Ok(*dataset),
@@ -454,6 +452,18 @@ impl MinotRegistry {
             .await
             .map_err(|error| anyhow!("{error}"))
     }
+
+    /// Await a disk-bound server operation until it completes or the transport
+    /// reports that the peer disappeared. Packing or publishing a large bag is
+    /// not a control-plane timeout and has no honest fixed duration.
+    async fn request_without_deadline(&self, request: Request) -> Result<Response> {
+        let session = self.session().await?;
+        session
+            .client
+            .request(request, None)
+            .await
+            .map_err(|error| anyhow!("{error}"))
+    }
 }
 
 /// A dataset on the far side, opened for reading without downloading it.
@@ -462,7 +472,7 @@ impl MinotRegistry {
 ///
 /// The source directory remains the authoritative copy. Calling
 /// [`WriteSession::sync_snapshot`] repeatedly tails files that are still
-/// growing; [`WriteSession::commit`] is only valid after the recorder has
+/// growing. [`WriteSession::commit`] is valid after the recorder has
 /// closed the bag and written `metadata.yaml`.
 pub struct WriteSession<'a> {
     registry: &'a MinotRegistry,
@@ -507,7 +517,7 @@ impl WriteSession<'_> {
             let mut offset = self.offsets.get(&relative).copied().unwrap_or(0);
             if offset > snapshot_size {
                 return Err(anyhow!(
-                    "remote staging for '{}' is {} bytes but the local file is only {} bytes; the file was replaced during an interrupted upload",
+                    "remote staging for '{}' is {} bytes while the local file is {} bytes. Clear the interrupted upload before replacing this file",
                     relative,
                     offset,
                     snapshot_size
@@ -560,7 +570,7 @@ impl WriteSession<'_> {
             .collect();
         let response = self
             .registry
-            .request(Request::CommitWrite {
+            .request_without_deadline(Request::CommitWrite {
                 bag: WireBagRef::from(&self.bag),
                 files,
             })
@@ -681,7 +691,7 @@ impl RemoteDataset {
     ///
     /// This is the point the whole design turns on: **streaming and pulling are
     /// the same operation in different orders.** A streamed read fills the
-    /// block cache; once every block of every file is present, the sparse files
+    /// block cache. Once every block of every file is present, the sparse files
     /// *are* the dataset, so they are moved into `ready/` and registered in the
     /// catalog. From then on `marina resolve` returns a plain path and nothing
     /// downstream knows or cares that it arrived by streaming.
@@ -716,7 +726,7 @@ impl RemoteDataset {
             progress.emit("stream", format!("fetching {}", file.path));
             let mut remote = self.open(&file.path)?;
             // Read it through: the bytes are wanted only for their effect on
-            // the cache, so they are discarded as they arrive rather than held.
+            // the cache. Ephemeral mode discards completed blocks as they arrive.
             std::io::copy(&mut remote, &mut std::io::sink())
                 .with_context(|| format!("failed streaming '{}'", file.path))?;
             if !remote.is_complete() {
@@ -767,7 +777,7 @@ impl RemoteDataset {
                 std::fs::create_dir_all(parent)?;
             }
             // A rename keeps the bytes where they are when the cache and the
-            // dataset share a filesystem, which is the normal case; the copy is
+            // dataset usually share a filesystem. The copy is
             // the fallback when they do not.
             if std::fs::rename(&complete, &target).is_err() {
                 std::fs::copy(&complete, &target).with_context(|| {
@@ -813,7 +823,7 @@ impl RemoteDataset {
             [] => Err(anyhow!("dataset '{}' contains no .mcap file", self.bag)),
             [only] => self.open(&only.path),
             many => Err(anyhow!(
-                "dataset '{}' contains {} MCAP files; open one by name: {}",
+                "dataset '{}' contains {} MCAP files. Open one by name: {}",
                 self.bag,
                 many.len(),
                 many.iter()
@@ -827,7 +837,7 @@ impl RemoteDataset {
 
 /// What a `Stat` said about a dataset.
 pub enum StatResult {
-    /// Readable by range; open it as a [`RemoteDataset`].
+    /// Readable by range. Open it as a [`RemoteDataset`].
     Streamable(Box<RemoteDataset>),
     /// Not readable by range — a sqlite3 bag. Pull it instead.
     NotStreamable { reason: String },
@@ -836,7 +846,7 @@ pub enum StatResult {
 /// Writes a flow straight to disk at the offset the sender gave it.
 ///
 /// A sparse write is exactly what a resumed transfer produces, so the file is
-/// extended as needed rather than assuming chunks arrive in order.
+/// extended as needed to support resumed chunks in any order.
 struct FileSink {
     file: std::fs::File,
 }
@@ -863,17 +873,85 @@ impl RegistryDriver for MinotRegistry {
     async fn push(
         &self,
         _registry_name: &str,
-        _bag: &BagRef,
-        _packed_file: &Path,
-        _meta: &PushMeta,
+        bag: &BagRef,
+        packed_file: &Path,
+        meta: &PushMeta,
     ) -> Result<()> {
-        // Deliberately unimplemented rather than silently accepted: the write
-        // path is its own design problem (see the streaming plan's write
-        // section) and a half-working push would be worse than none.
-        Err(anyhow!(
-            "pushing to a minot:// registry is not supported yet; push to the registry \
-             being served instead"
-        ))
+        use std::io::{Read, Seek, SeekFrom};
+
+        const UPLOAD_CHUNK_BYTES: usize = 1024 * 1024;
+        let bag = bag.without_attachment();
+        let actual_size = std::fs::metadata(packed_file)
+            .with_context(|| format!("could not inspect {}", packed_file.display()))?
+            .len();
+        if actual_size != meta.packed_bytes {
+            return Err(anyhow!(
+                "packed bundle is {actual_size} bytes but its push metadata says {} bytes",
+                meta.packed_bytes
+            ));
+        }
+
+        let response = self
+            .request(Request::BeginPush {
+                bag: WireBagRef::from(&bag),
+                packed_bytes: meta.packed_bytes,
+                bundle_hash: meta.bundle_hash.clone(),
+            })
+            .await?;
+        let Response::PushStatus { mut next_offset } = response else {
+            return Err(anyhow!("unexpected begin-push response: {response:?}"));
+        };
+        if next_offset > actual_size {
+            return Err(anyhow!(
+                "remote staging for '{bag}' is {next_offset} bytes but the local bundle is only {actual_size} bytes"
+            ));
+        }
+
+        let mut file = std::fs::File::open(packed_file)
+            .with_context(|| format!("could not open {}", packed_file.display()))?;
+        while next_offset < actual_size {
+            let offset = next_offset;
+            let len = (actual_size - offset).min(UPLOAD_CHUNK_BYTES as u64) as usize;
+            let mut data = vec![0u8; len];
+            file.seek(SeekFrom::Start(offset))?;
+            file.read_exact(&mut data)?;
+            let response = self
+                .request(Request::PushRange {
+                    bag: WireBagRef::from(&bag),
+                    offset,
+                    data,
+                })
+                .await
+                .with_context(|| format!("uploading packed '{bag}' at byte {offset}"))?;
+            let Response::PushAck {
+                next_offset: acknowledged,
+            } = response
+            else {
+                return Err(anyhow!("unexpected packed-push response: {response:?}"));
+            };
+            if acknowledged == offset {
+                return Err(anyhow!(
+                    "server made no progress uploading packed '{bag}' at byte {offset}"
+                ));
+            }
+            if acknowledged > actual_size {
+                return Err(anyhow!(
+                    "server acknowledged byte {acknowledged} beyond the {actual_size}-byte packed bundle"
+                ));
+            }
+            next_offset = acknowledged;
+        }
+
+        match self
+            .request_without_deadline(Request::CommitPush {
+                bag: WireBagRef::from(&bag),
+                meta: WirePushMeta::from(meta),
+            })
+            .await?
+        {
+            Response::PushCommitted => Ok(()),
+            other => Err(anyhow!("unexpected push-commit response: {other:?}")),
+        }
     }
 
     async fn pull(&self, bag: &BagRef, out_packed_file: &Path) -> Result<RemoteDescriptor> {
@@ -910,7 +988,7 @@ impl RegistryDriver for MinotRegistry {
             .with_context(|| format!("transfer of '{bag}' failed"))?;
 
         // The server told us the size up front, so a stream that ended early
-        // for any reason is caught here rather than becoming a corrupt bundle.
+        // so a short transfer is reported before the bundle is installed.
         if received != packed_bytes {
             return Err(anyhow!(
                 "incomplete transfer of '{bag}': received {received} of {packed_bytes} bytes"
@@ -937,11 +1015,16 @@ impl RegistryDriver for MinotRegistry {
         }
     }
 
-    async fn remove(&self, _bag: &BagRef) -> Result<()> {
-        Err(anyhow!(
-            "removing from a minot:// registry is not supported yet; remove from the \
-             registry being served instead"
-        ))
+    async fn remove(&self, bag: &BagRef) -> Result<()> {
+        let response = self
+            .request(Request::Remove {
+                bag: WireBagRef::from(&bag.without_attachment()),
+            })
+            .await?;
+        match response {
+            Response::Removed => Ok(()),
+            other => Err(anyhow!("unexpected remove response: {other:?}")),
+        }
     }
 
     async fn bag_info(&self, bag: &BagRef) -> Result<Option<BagInfo>> {
@@ -964,9 +1047,10 @@ impl RegistryDriver for MinotRegistry {
     }
 
     async fn check_write_access(&self) -> Result<()> {
-        Err(anyhow!(
-            "a minot:// registry is read-only; push to the registry being served instead"
-        ))
+        match self.request(Request::CheckWrite).await? {
+            Response::WriteAllowed => Ok(()),
+            other => Err(anyhow!("unexpected write-access response: {other:?}")),
+        }
     }
 }
 
@@ -1055,15 +1139,5 @@ mod tests {
         for registry in [&local, &direct, &tunnelled] {
             assert_eq!(registry.remote_registry, "team");
         }
-    }
-
-    #[tokio::test]
-    async fn writes_are_refused_rather_than_silently_dropped() {
-        let registry = MinotRegistry::from_uri("team", "minot://team").unwrap();
-        assert!(registry.check_write_access().await.is_err());
-        assert!(
-            registry.remove(&"run:v1".parse().unwrap()).await.is_err(),
-            "a read-only transport must say so rather than appear to succeed"
-        );
     }
 }

@@ -89,7 +89,7 @@ struct ServeArgs {
     /// is providing transport security.
     #[arg(long, default_value_t = false)]
     listen_all: bool,
-    /// Accept resumable dataset uploads. Use only behind the SSH tunnel; this
+    /// Accept resumable dataset uploads. Use this behind an SSH tunnel. This
     /// server has no application-level authentication of its own.
     #[arg(long, default_value_t = false)]
     allow_write: bool,
@@ -131,7 +131,7 @@ enum CacheReceiveSub {
 
 #[derive(Args)]
 struct LocalListArgs {
-    /// List datasets available in all remote registries instead of the local cache
+    /// List datasets available in all remote registries
     #[arg(long)]
     remote: bool,
     /// Filter to a specific registry (only with --remote)
@@ -210,7 +210,7 @@ struct AuthRegistryArgs {
     /// Show persisted OAuth status for this registry
     #[arg(long)]
     status: bool,
-    /// Print the OAuth URL instead of trying to open a browser
+    /// Print the OAuth URL
     #[arg(long)]
     no_browser: bool,
     /// Bind the local OAuth callback server to a fixed port
@@ -467,7 +467,7 @@ fn load_stream_upload_intent(ready: &std::path::Path) -> anyhow::Result<StreamUp
     let (intent_path, _, _) = stream_upload_paths(ready)?;
     let bytes = std::fs::read(&intent_path).with_context(|| {
         format!(
-            "no live upload exists for this dataset (missing {}); use --registry",
+            "live upload metadata missing at {}. Pass --registry",
             intent_path.display()
         )
     })?;
@@ -1075,7 +1075,7 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                 {
                     let _ = args;
                     return Err(anyhow::anyhow!(
-                        "gdrive support is disabled in this build; rebuild with feature `gdrive`"
+                        "Google Drive support requires a build with the `gdrive` feature"
                     ));
                 }
                 #[cfg(feature = "gdrive")]
@@ -1376,7 +1376,7 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                 Some(source) => source.to_path_buf(),
                 None => marina.cached_bag_dir(&args.bag).ok_or_else(|| {
                     anyhow::anyhow!(
-                        "no source path provided and '{}' is not available locally; import it first or pass SOURCE",
+                        "dataset '{}' is unavailable locally. Import it or pass SOURCE",
                         args.bag.without_attachment()
                     )
                 })?,
@@ -1596,7 +1596,7 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                         } else {
                             if !quiet_non_interactive_yes {
                                 println!(
-                                    "{} available in registry '{}'; run: {prog} pull {} --registry {}",
+                                    "{} available in registry '{}'. Run: {prog} pull {} --registry {}",
                                     bag, registry, bag, registry
                                 );
                             }
@@ -1910,7 +1910,7 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                     .ok_or_else(|| anyhow::anyhow!("registry '{registry}' not found"))?;
                 if config.kind != "minot" {
                     anyhow::bail!(
-                        "live recording replication requires a minot:// registry; '{}' is {}",
+                        "live recording replication requires a minot:// registry. '{}' is {}",
                         registry,
                         config.kind
                     );
@@ -1949,13 +1949,13 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                             }
                             Ok(_) => {}
                             Err(error) => {
-                                eprintln!("live upload interrupted: {error}; retrying");
+                                eprintln!("live upload interrupted: {error}. Retrying");
                                 break;
                             }
                         }
                         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                     },
-                    Err(error) => eprintln!("cannot reach upload server: {error}; retrying"),
+                    Err(error) => eprintln!("cannot reach upload server: {error}. Retrying"),
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
@@ -1977,7 +1977,7 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                 .or_else(|| intent.as_ref().map(|intent| intent.registry.clone()))
                 .ok_or_else(|| {
                     anyhow::anyhow!(
-                        "no output registry recorded for '{}'; pass --registry",
+                        "output registry missing for '{}'. Pass --registry",
                         args.target
                     )
                 })?;
@@ -1988,7 +1988,7 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
             let _ = std::fs::remove_file(&intent_path);
             // Leave the marker until the next `import` of this tag. The
             // detached tailer may still be returning from an in-flight network
-            // request; removing it here could make that process miss the stop
+            // request. Removing it here could make that process miss the stop
             // signal and start a second upload after the commit.
             println!("finalized {} in registry {}", args.target, registry);
             spawn_complete_refresh();
@@ -2087,9 +2087,7 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
                 None => marina
                     .default_registry()
                     .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "no registry given and no default is configured; pass --registry"
-                        )
+                        anyhow::anyhow!("registry missing. Pass --registry or configure a default")
                     })?
                     .to_string(),
             };

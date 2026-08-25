@@ -135,7 +135,7 @@ struct PrefetchState {
 }
 
 /// A bounded, best-effort worker that keeps network reads off the playback
-/// thread. The block store deliberately remains owned by `RemoteFile`; the
+/// thread. `RemoteFile` owns the block store. The
 /// worker only fetches bytes, and the reader commits them when it needs them.
 struct Prefetch {
     requests: std::sync::mpsc::SyncSender<u64>,
@@ -194,7 +194,7 @@ impl Prefetch {
 
     /// Wait for a block that is already on its way. Waiting here is still
     /// useful: normally the request started while the previous block was being
-    /// decoded, instead of only being issued at this boundary.
+    /// decoded, including reads issued between block boundaries.
     fn take(&self, index: u64) -> Option<Result<Vec<u8>, String>> {
         let (lock, ready) = &*self.state;
         let mut state = lock.lock().unwrap_or_else(|error| error.into_inner());
@@ -324,7 +324,7 @@ impl RemoteFile {
     /// A file whose blocks are kept according to `mode`.
     ///
     /// With [`CacheMode::Disk`] a partial read survives a restart and a complete
-    /// read leaves a byte-exact local copy; with [`CacheMode::Ephemeral`] this
+    /// read leaves a byte-exact local copy. With [`CacheMode::Ephemeral`] this
     /// is the same as [`RemoteFile::new`].
     pub fn with_cache(
         fetcher: Arc<dyn RangeFetcher>,
@@ -362,7 +362,7 @@ impl RemoteFile {
             .unwrap_or(false)
     }
 
-    /// Blocks currently held in memory. Bounded; see [`HotBlocks`].
+    /// Blocks currently held in memory. See [`HotBlocks`] for the bound.
     pub fn hot_blocks(&self) -> usize {
         self.hot.len()
     }
@@ -402,9 +402,7 @@ impl RemoteFile {
 
     /// Open the block store, now that the block size is settled.
     ///
-    /// A store that cannot be opened is not fatal: reads still work, they just
-    /// go to the network every time. Losing the cache is a performance problem;
-    /// refusing to read would be a correctness one.
+    /// Cache startup failures leave reads on the network path.
     fn ensure_store(&mut self) -> &dyn BlockStore {
         if self.store.is_none() {
             let store = self
@@ -548,12 +546,9 @@ impl Seek for RemoteFile {
 
 /// Fetches ranges over a Minot service, from synchronous code.
 ///
-/// The bridge is a dedicated OS thread rather than a `block_on` at the call
-/// site, because the caller may already be inside a Tokio runtime — a bag
-/// reader driven from an async task, say — and blocking a worker thread on a
-/// future that needs that same runtime deadlocks. A thread that is not a
-/// runtime worker can block on a runtime handle safely, which is exactly what
-/// this does.
+/// The bridge uses a dedicated OS thread. A caller may already be inside a
+/// Tokio runtime. Blocking that runtime's worker on its own future deadlocks.
+/// The dedicated thread can safely block on the runtime handle.
 pub struct NetworkFetcher {
     requests: std::sync::mpsc::Sender<FetchRequest>,
 }
@@ -568,8 +563,8 @@ struct FetchRequest {
 impl NetworkFetcher {
     /// `fetch` is run on the given runtime, from a thread of this fetcher's own.
     ///
-    /// Takes a closure rather than a client so that the transport stays out of
-    /// this module, and so tests can drive it without a network.
+    /// Takes a closure so the transport stays out of this module and tests can
+    /// drive it without a network.
     pub fn spawn<F, Fut>(handle: tokio::runtime::Handle, fetch: F) -> Self
     where
         F: Fn(String, u64, u32) -> Fut + Send + 'static,
@@ -583,7 +578,7 @@ impl NetworkFetcher {
                 // closes, so the thread cannot outlive its users.
                 while let Ok(request) = incoming.recv() {
                     let result = handle.block_on(fetch(request.path, request.offset, request.len));
-                    // A gone receiver means the reader stopped caring; nothing
+                    // A gone receiver means the reader stopped caring. Nothing
                     // to do but drop the bytes.
                     let _ = request.reply.send(result);
                 }
@@ -727,7 +722,7 @@ mod tests {
     /// The guard for the finding that motivated block caching at all.
     ///
     /// An MCAP summary read is thousands of tiny sequential reads. Served
-    /// naively that is thousands of round trips; served in blocks it is a
+    /// naively that is thousands of round trips. Served in blocks it is a
     /// handful. If this ever regresses, opening a bag over a real link goes
     /// from under a second to several minutes.
     #[test]
@@ -809,7 +804,7 @@ mod tests {
 
     /// A read interrupted partway leaves usable progress behind.
     #[test]
-    fn a_partial_read_is_resumed_rather_than_restarted() {
+    fn a_partial_read_resumes_from_saved_blocks() {
         let dir = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
         let bytes = payload(64 * 1024 * 6);

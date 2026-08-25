@@ -141,7 +141,7 @@ pub fn resolve_client_credentials(
     let secret = client_secret
         .or_else(|| std::env::var("MARINA_GDRIVE_CLIENT_SECRET").ok())
         .or_else(|| (!BUNDLED_CLIENT_SECRET.is_empty()).then(|| BUNDLED_CLIENT_SECRET.to_string()))
-        .ok_or_else(|| anyhow!("no OAuth client secret found; set MARINA_GDRIVE_CLIENT_SECRET or pass --client-secret"))?;
+        .ok_or_else(|| anyhow!("OAuth client secret missing. Set MARINA_GDRIVE_CLIENT_SECRET or pass --client-secret"))?;
     Ok((id, secret))
 }
 

@@ -305,7 +305,7 @@ impl RegistryDriver for HttpRegistry {
         let items = self.fetch_index().await?;
         if items.is_empty() {
             return Err(anyhow!(
-                "http registry '{}' has no index.json; list/search is unavailable (pull by exact bag still works)",
+                "HTTP registry '{}' has no index.json. Use an exact dataset reference to pull",
                 self.name
             ));
         }

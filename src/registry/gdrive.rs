@@ -414,7 +414,7 @@ impl GDriveRegistry {
 
         if files.is_empty() {
             return Err(anyhow!(
-                "public folder page did not expose files; ensure folder and files are shared for anyone with link"
+                "public folder page exposed no files. Share the folder and files with anyone who has the link"
             ));
         }
 
@@ -966,7 +966,7 @@ impl GDriveRegistry {
                     if kind == DownloadContentHint::GoogleDriveQuotaExceeded {
                         return Err(anyhow!(
                             "Google Drive quota exceeded while downloading {}. \
-                             The response returned an HTML quota page instead of archive bytes.",
+                             Google Drive returned an HTML quota page. Retry after the quota resets.",
                             title
                         ));
                     }

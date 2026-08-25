@@ -50,9 +50,9 @@ MarinaResolveDetailed r = marina_resolve_detailed("outdoor-run:v2", "team-ssh");
 | Field | Type | Description |
 |---|---|---|
 | `kind` | `int` | One of the `MARINA_RESOLVE_*` constants |
-| `path` | `char *` | Local path; set when `kind` is `LOCAL` or `CACHED` |
-| `bag` | `char *` | Dataset reference; set when `kind` is `REMOTE_AVAILABLE` or `AMBIGUOUS` |
-| `registry` | `char *` | Registry name; set when `kind` is `REMOTE_AVAILABLE` or `AMBIGUOUS` |
+| `path` | `char *` | Local path for `LOCAL` or `CACHED` results |
+| `bag` | `char *` | Dataset reference for `REMOTE_AVAILABLE` or `AMBIGUOUS` results |
+| `registry` | `char *` | Registry name for `REMOTE_AVAILABLE` or `AMBIGUOUS` results |
 | `message` | `char *` | Human-readable status or error message |
 
 ### `kind` constants
@@ -63,7 +63,7 @@ MarinaResolveDetailed r = marina_resolve_detailed("outdoor-run:v2", "team-ssh");
 | `MARINA_RESOLVE_LOCAL` | `0` | Target is an existing local path |
 | `MARINA_RESOLVE_CACHED` | `1` | Target is in the Marina cache |
 | `MARINA_RESOLVE_REMOTE_AVAILABLE` | `2` | Target exists in a remote registry |
-| `MARINA_RESOLVE_AMBIGUOUS` | `3` | Target found in multiple registries; first match returned |
+| `MARINA_RESOLVE_AMBIGUOUS` | `3` | Target found in multiple registries. The result contains the first match |
 
 ## Pull a dataset
 

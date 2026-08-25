@@ -3,25 +3,24 @@
 //! Both ends are the same binary — one running as a server on the machine that
 //! holds the data, one running as a client — so there is no separate protocol
 //! crate. What matters is that these types are the *only* thing crossing the
-//! link, and that a version mismatch is caught by [`Hello`] rather than by an
-//! rkyv deserialization failure with no useful message.
+//! link. [`Hello`] reports version mismatches with a useful message.
 //!
-//! Everything here is rkyv rather than serde, because that is what Minot's
-//! transport carries. The `BagRef` in `crate::model` stays serde-based for
-//! config and JSON, so [`WireBagRef`] mirrors it for the wire.
+//! Everything here uses rkyv, matching Minot's transport. The `BagRef` in
+//! `crate::model` stays serde-based for config and JSON. [`WireBagRef`] mirrors
+//! it on the wire.
 
 use rkyv::{Archive, Deserialize, Serialize};
 
 use crate::model::bag_ref::BagRef;
-use crate::registry::driver::BagInfo;
+use crate::registry::driver::{BagInfo, PushMeta};
 
 /// Bumped whenever the meaning of anything below changes.
 ///
 /// A server accepts clients whose major version matches and whose minor version
-/// is no newer than its own; anything else is refused at [`Hello`] with a
+/// is no newer than its own. [`Hello`] refuses incompatible versions with a
 /// message naming both versions, because "connection reset" is a miserable way
 /// to learn your marina is out of date.
-pub const PROTOCOL_VERSION: (u16, u16) = (2, 1);
+pub const PROTOCOL_VERSION: (u16, u16) = (2, 3);
 
 /// A [`BagRef`] as it travels.
 #[derive(Archive, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -91,6 +90,43 @@ impl From<WireBagInfo> for BagInfo {
     }
 }
 
+/// Metadata accompanying an ordinary completed bundle push.
+#[derive(Archive, Serialize, Deserialize, Debug, Clone)]
+pub struct WirePushMeta {
+    pub original_bytes: u64,
+    pub packed_bytes: u64,
+    pub bundle_hash: String,
+    pub pointcloud: String,
+    pub mcap_compression: String,
+    pub pushed_at: u64,
+}
+
+impl From<&PushMeta> for WirePushMeta {
+    fn from(meta: &PushMeta) -> Self {
+        Self {
+            original_bytes: meta.original_bytes,
+            packed_bytes: meta.packed_bytes,
+            bundle_hash: meta.bundle_hash.clone(),
+            pointcloud: meta.pointcloud.clone(),
+            mcap_compression: meta.mcap_compression.clone(),
+            pushed_at: meta.pushed_at,
+        }
+    }
+}
+
+impl From<WirePushMeta> for PushMeta {
+    fn from(meta: WirePushMeta) -> Self {
+        Self {
+            original_bytes: meta.original_bytes,
+            packed_bytes: meta.packed_bytes,
+            bundle_hash: meta.bundle_hash,
+            pointcloud: meta.pointcloud,
+            mcap_compression: meta.mcap_compression,
+            pushed_at: meta.pushed_at,
+        }
+    }
+}
+
 /// One file inside a materialised dataset.
 #[derive(Archive, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct WireFile {
@@ -115,8 +151,7 @@ pub enum Request {
     List { pattern: String },
     /// Metadata for one dataset, without transferring it.
     BagInfo { bag: WireBagRef },
-    /// Ask for a bundle. The response names a flow to receive it on; the bytes
-    /// themselves never travel through a service reply.
+    /// Ask for a bundle. The response names a flow that carries the bytes.
     PullBegin { bag: WireBagRef },
     /// What files a dataset contains, once unpacked.
     ///
@@ -125,9 +160,9 @@ pub enum Request {
     Stat { bag: WireBagRef },
     /// A byte range from one file in a materialised dataset.
     ///
-    /// Ranges travel in the reply rather than on a flow. A flow exists to move
-    /// one large object with resume; a random-access reader issues *thousands*
-    /// of small requests, and paying flow setup for each would cost far more
+    /// Ranges travel in the reply. Flows move large resumable objects. A
+    /// random-access reader issues *thousands* of small requests, and flow
+    /// setup for each would cost far more
     /// than it saves. These are idempotent, so a failed range is simply asked
     /// for again.
     ReadRange {
@@ -136,6 +171,24 @@ pub enum Request {
         offset: u64,
         len: u32,
     },
+    /// Check the server and backing registry's write policy without mutating it.
+    CheckWrite,
+    /// Remove a published dataset from the backing registry.
+    Remove { bag: WireBagRef },
+    /// Open or resume an ordinary completed-bundle push.
+    BeginPush {
+        bag: WireBagRef,
+        packed_bytes: u64,
+        bundle_hash: String,
+    },
+    /// Append packed bundle bytes at the server's durable watermark.
+    PushRange {
+        bag: WireBagRef,
+        offset: u64,
+        data: Vec<u8>,
+    },
+    /// Atomically publish the completely uploaded packed bundle.
+    CommitPush { bag: WireBagRef, meta: WirePushMeta },
     /// Open or resume a local-first streaming upload.
     BeginWrite { bag: WireBagRef },
     /// Idempotently append bytes at the server's current durable watermark.
@@ -167,7 +220,7 @@ pub enum Response {
         /// pulls of the same dataset do not collide.
         flow: String,
         /// Size of the bundle, so the client can verify it received all of it
-        /// rather than trusting the stream to have ended for a good reason.
+        /// and verify that the stream completed.
         packed_bytes: u64,
         original_bytes: u64,
     },
@@ -180,7 +233,7 @@ pub enum Response {
         reason: Option<String>,
     },
     /// The first `Stat` found only a packed registry object. Restoration is
-    /// running in the background; the client should wait and ask again.
+    /// running in the background. The client should wait and ask again.
     Materializing {
         message: String,
     },
@@ -188,6 +241,15 @@ pub enum Response {
         /// Fewer bytes than asked for means end of file, never an error.
         data: Vec<u8>,
     },
+    WriteAllowed,
+    Removed,
+    PushStatus {
+        next_offset: u64,
+    },
+    PushAck {
+        next_offset: u64,
+    },
+    PushCommitted,
     WriteStatus {
         /// Durable byte watermarks for files already staged on the server.
         files: Vec<WireFile>,

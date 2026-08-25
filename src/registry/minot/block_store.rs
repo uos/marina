@@ -1,6 +1,6 @@
 //! Where fetched blocks live between reads.
 //!
-//! Two policies, one mechanism. A read asks the store for a block; on a miss it
+//! Two policies share one mechanism. A read asks the store for a block. On a miss it
 //! fetches and offers the block back. What the store does with it is the whole
 //! difference between "streaming warms a local copy" and "streaming leaves no
 //! trace".
@@ -60,7 +60,7 @@ impl BlockStore for NullBlockStore {
 /// `<root>/<escaped rel path>.part`   — sparse data
 /// `<root>/<escaped rel path>.blocks` — one byte per block, 1 = present
 ///
-/// The map is a plain byte per block rather than a packed bitset. A 640 MB file
+/// The map uses one byte per block. A 640 MB file
 /// at 1 MiB blocks needs 640 bytes either way once the filesystem has rounded
 /// up, and a file you can read with `xxd` is worth more during a bad afternoon
 /// than the bytes saved.
@@ -104,7 +104,7 @@ impl DiskBlockStore {
     ///
     /// `validity` identifies *which version* of the file this is — a bundle
     /// hash, or anything that changes when the contents do. A cache whose
-    /// validity or size does not match is discarded rather than mixed with new
+    /// validity or size must match. Mismatched cached data is discarded before new
     /// data, because serving half of one version and half of another would be
     /// silent corruption of exactly the kind nobody would think to look for.
     pub fn open(
@@ -303,7 +303,7 @@ pub enum CacheMode {
     /// complete read leaves a byte-exact local copy. `validity` must change
     /// whenever the remote file's contents do — a bundle hash is ideal.
     Disk { root: PathBuf, validity: String },
-    /// Keep nothing. Blocks are dropped as the read moves past them; memory
+    /// Keep nothing. Blocks are dropped as the read moves past them. Memory
     /// stays bounded and the disk is never written.
     Ephemeral,
 }

@@ -160,7 +160,7 @@ fn resolve_detailed(target: &str, registry: Option<&str>) -> ResolveDetailed {
             path: None,
             bag: Some(bag.to_string()),
             registry: Some(registry),
-            message: Some("remote bag available; call pull(...)".to_string()),
+            message: Some("remote bag available. Call pull(...)".to_string()),
         },
         Ok(ResolveResult::Ambiguous { mut candidates }) => {
             candidates.sort_by(|a, b| a.0.cmp(&b.0));
@@ -171,7 +171,7 @@ fn resolve_detailed(target: &str, registry: Option<&str>) -> ResolveDetailed {
                     bag: Some(bag.to_string()),
                     registry: Some(registry),
                     message: Some(
-                        "bag found in multiple registries; first registry selected".to_string(),
+                        "bag found in multiple registries. First registry selected".to_string(),
                     ),
                 }
             } else {

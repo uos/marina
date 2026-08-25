@@ -390,7 +390,7 @@ impl SshRegistry {
     /// are the ones already configured for this registry, so nothing new has to
     /// be set up.
     ///
-    /// The returned [`SshTunnel`] keeps the forwarder alive; dropping it stops
+    /// The returned [`SshTunnel`] keeps the forwarder alive. Dropping it stops
     /// accepting new connections.
     #[cfg(feature = "minot-registry")]
     pub(crate) async fn open_local_forward(&self, remote_port: u16) -> Result<SshTunnel> {
@@ -456,8 +456,7 @@ impl SshRegistry {
 
     /// Do not advertise a forward until SSH has proved that its destination is
     /// accepting connections. Binding the local listener alone only proves the
-    /// near side; without this check Zenoh enters its reconnect loop and emits a
-    /// stream of `ConnectFailed` errors while `marina serve` is still starting.
+    /// near side. This check avoids Zenoh reconnect noise during server startup.
     #[cfg(feature = "minot-registry")]
     async fn wait_for_remote_port(
         &self,
@@ -485,7 +484,7 @@ impl SshRegistry {
 
             if !announced_wait {
                 log::info!(
-                    "SSH connected to {}; waiting for `marina serve` on remote 127.0.0.1:{remote_port}",
+                    "SSH connected to {}. Waiting for `marina serve` on remote 127.0.0.1:{remote_port}",
                     self.endpoint.display_host_port()
                 );
                 announced_wait = true;
@@ -494,7 +493,7 @@ impl SshRegistry {
         }
 
         Err(anyhow!(
-            "SSH connected to {}, but remote 127.0.0.1:{remote_port} did not become reachable within {}s; is `marina serve` running there? (last error: {})",
+            "Remote 127.0.0.1:{remote_port} on {} stayed unreachable for {}s. Start `marina serve` there. Last error: {}",
             self.endpoint.display_host_port(),
             REMOTE_FORWARD_READY_TIMEOUT.as_secs(),
             last_error.unwrap_or_else(|| "unknown".to_string())
@@ -505,7 +504,7 @@ impl SshRegistry {
     ///
     /// Used when the registry is configured for the OpenSSH transport, so that
     /// agent forwarding, `~/.ssh/config`, and everything else the user has set
-    /// up keeps working rather than being quietly bypassed.
+    /// up keeps working with the configured tunnel.
     #[cfg(feature = "minot-registry")]
     async fn open_local_forward_openssh(&self, remote_port: u16) -> Result<SshTunnel> {
         self.ensure_openssh_auth_supported()?;
@@ -516,8 +515,7 @@ impl SshRegistry {
             .local_addr()
             .context("failed to read the tunnel's local address")?
             .port();
-        // Released so ssh can take it. A race is possible in principle; the
-        // window is tiny and the failure is a clear bind error from ssh.
+        // Release the listener so SSH can take the port.
         drop(listener);
 
         let mut command = Command::new("ssh");
@@ -556,14 +554,14 @@ impl SshRegistry {
             if started.elapsed() >= REMOTE_FORWARD_READY_TIMEOUT {
                 let _ = child.start_kill();
                 return Err(anyhow!(
-                    "SSH connected to {}, but remote 127.0.0.1:{remote_port} did not become reachable within {}s; is `marina serve` running there?",
+                    "Remote 127.0.0.1:{remote_port} on {} stayed unreachable for {}s. Start `marina serve` there",
                     self.endpoint.display_host_port(),
                     REMOTE_FORWARD_READY_TIMEOUT.as_secs()
                 ));
             }
             if !announced_wait {
                 log::info!(
-                    "SSH connected to {}; waiting for `marina serve` on remote 127.0.0.1:{remote_port}",
+                    "SSH connected to {}. Waiting for `marina serve` on remote 127.0.0.1:{remote_port}",
                     self.endpoint.display_host_port()
                 );
                 announced_wait = true;
@@ -1013,7 +1011,7 @@ impl SshRegistry {
                 .with_context(|| format!("missing ssh auth env var '{}'", var))?;
             if !Path::new(&secret).exists() {
                 return Err(anyhow!(
-                    "OpenSSH transport requires auth env var '{}' to contain a key file path; password auth is only supported by the native SSH transport",
+                    "OpenSSH expects '{}' to contain a key file path. Select the native SSH transport for password authentication",
                     var
                 ));
             }
@@ -1207,7 +1205,7 @@ impl SshRegistry {
 }
 
 /// OpenSSH accepts a connection to its local listener before attempting the
-/// far-side connection. A destination that is down is closed immediately; a
+/// far-side connection. A destination that is down closes immediately. A
 /// live Zenoh listener leaves the idle connection open.
 #[cfg(feature = "minot-registry")]
 async fn local_forward_destination_is_open(local_port: u16) -> bool {
@@ -1537,7 +1535,7 @@ fn parse_transport(value: Option<&str>) -> Result<SshTransport> {
         "native" | "russh" => Ok(SshTransport::Native),
         "openssh" | "ssh" => Ok(SshTransport::OpenSsh),
         other => Err(anyhow!(
-            "unsupported ssh_transport '{}'; expected 'native' or 'openssh'",
+            "unsupported ssh_transport '{}'. Choose 'native' or 'openssh'",
             other
         )),
     }

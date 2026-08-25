@@ -3,8 +3,7 @@
 //! The server is a thin adapter, deliberately. It holds an ordinary
 //! [`RegistryDriver`] — a folder, an SSH registry, anything already configured —
 //! and answers requests by delegating to it. That is what makes a `minot://`
-//! registry behave exactly like the registry behind it rather than being a
-//! second implementation that drifts.
+//! registry follow the behavior of the registry behind it.
 //!
 //! # Binding
 //!
@@ -25,7 +24,7 @@ use mt_service::ServiceServer;
 use crate::registry::driver::RegistryDriver;
 use crate::registry::minot::protocol::{
     PROTOCOL_VERSION, Request, Response, WireBagInfo, WireBagRef, WireFile, WireManifestFile,
-    service_topic, version_mismatch,
+    WirePushMeta, service_topic, version_mismatch,
 };
 
 /// How a served registry is reached and what it is allowed to do.
@@ -40,14 +39,14 @@ pub struct ServeOptions {
     /// Where datasets are unpacked so their bytes can be served by range.
     ///
     /// Defaults to a `serve/` directory under the marina cache. Materialising
-    /// here rather than in the ordinary cache keeps a server's working set
+    /// here. This keeps the server's working set
     /// separate from whatever the same machine pulled for its own use.
     pub materialize_root: Option<std::path::PathBuf>,
     /// Largest range a client may ask for in one request, as a guard against a
     /// misbehaving or hostile client asking for a gigabyte.
     pub max_range_bytes: u32,
     /// Accept staged dataset uploads. Off by default because Minot itself does
-    /// not authenticate clients; SSH is the intended authorization boundary.
+    /// has no client authentication. SSH provides the authorization boundary.
     pub allow_write: bool,
 }
 
@@ -174,11 +173,10 @@ struct RequestHandler {
     /// Dataset keys currently restoring, so every poll returns immediately and
     /// only the first one starts work.
     materializing: tokio::sync::Mutex<HashSet<String>>,
-    /// A background failure is returned by the next poll instead of leaving a
-    /// client waiting forever.
+    /// The next poll receives any background materialization failure.
     materialize_errors: tokio::sync::Mutex<HashMap<String, String>>,
     /// Serialises staging mutations and commits. Upload traffic is already
-    /// sequential per client; this also prevents two clients racing one tag.
+    /// sequential per client. It also prevents two clients racing one tag.
     write_lock: tokio::sync::Mutex<()>,
 }
 
@@ -228,6 +226,28 @@ impl RequestHandler {
                 offset,
                 len,
             } => self.read_range(bag.into(), &path, offset, len).await,
+
+            Request::CheckWrite => {
+                self.ensure_writes_enabled()?;
+                Ok(Response::WriteAllowed)
+            }
+
+            Request::Remove { bag } => self.remove(bag.into()).await,
+
+            Request::BeginPush {
+                bag,
+                packed_bytes,
+                bundle_hash,
+            } => {
+                self.begin_push(bag.into(), packed_bytes, &bundle_hash)
+                    .await
+            }
+
+            Request::PushRange { bag, offset, data } => {
+                self.push_range(bag.into(), offset, data).await
+            }
+
+            Request::CommitPush { bag, meta } => self.commit_push(bag.into(), meta).await,
 
             Request::BeginWrite { bag } => self.begin_write(bag.into()).await,
 
@@ -289,8 +309,8 @@ impl RequestHandler {
 
         let staging_path = staging.path().to_path_buf();
         let incoming_for_task = incoming.clone();
-        // Unpacking is CPU- and disk-bound and entirely synchronous; keeping it
-        // off the async worker leaves the server able to answer other clients.
+        // Unpacking is synchronous CPU and disk work. A blocking task keeps the
+        // async worker available for other clients.
         tokio::task::spawn_blocking(move || {
             crate::io::pack::unpack_bag(&staging_path, &incoming_for_task)
         })
@@ -365,13 +385,13 @@ impl RequestHandler {
 
         // A sqlite3 bag needs a real file for rusqlite to open, so it cannot be
         // read by range. Say so plainly and let the client fall back to a pull
-        // rather than failing halfway through a read.
+        // before the client starts reading.
         let has_db3 = files.iter().any(|file| file.path.ends_with(".db3"));
         let (streamable, reason) = if has_db3 {
             (
                 false,
                 Some(
-                    "this dataset is a sqlite3 bag, which cannot be read by byte range;                      pull it instead"
+                    "sqlite3 bags require a local file. Pull this dataset before opening it"
                         .to_string(),
                 ),
             )
@@ -426,8 +446,209 @@ impl RequestHandler {
         if self.allow_write {
             Ok(())
         } else {
-            Err("this marina server is read-only; restart it with --allow-write".to_string())
+            Err("writes require `marina serve --allow-write`".to_string())
         }
+    }
+
+    async fn remove(&self, bag: crate::model::bag_ref::BagRef) -> Result<Response, String> {
+        self.ensure_writes_enabled()?;
+        let _guard = self.write_lock.lock().await;
+        self.driver
+            .remove(&bag)
+            .await
+            .map_err(|error| format!("could not remove '{bag}' from backing registry: {error}"))?;
+
+        // The unpacked serving copy is a cache, not an independent dataset.
+        // Keeping it after the backing object is deleted would make the same
+        // server continue to stream data that list/pull says no longer exists.
+        let materialized = self.dataset_dir(&bag);
+        if materialized.exists() {
+            std::fs::remove_dir_all(&materialized).map_err(|error| {
+                format!(
+                    "removed '{bag}' from the backing registry but could not clear stale serving cache {}: {error}",
+                    materialized.display()
+                )
+            })?;
+        }
+        self.materialize_errors
+            .lock()
+            .await
+            .remove(&bag.without_attachment().to_string());
+        Ok(Response::Removed)
+    }
+
+    fn packed_push_path(&self, bag: &crate::model::bag_ref::BagRef) -> std::path::PathBuf {
+        self.dataset_dir(bag).join(".push-incoming.bundle")
+    }
+
+    fn packed_push_identity_path(&self, bag: &crate::model::bag_ref::BagRef) -> std::path::PathBuf {
+        self.dataset_dir(bag).join(".push-incoming.identity")
+    }
+
+    async fn begin_push(
+        &self,
+        bag: crate::model::bag_ref::BagRef,
+        packed_bytes: u64,
+        bundle_hash: &str,
+    ) -> Result<Response, String> {
+        self.ensure_writes_enabled()?;
+        let _guard = self.write_lock.lock().await;
+        let path = self.packed_push_path(&bag);
+        let identity_path = self.packed_push_identity_path(&bag);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("could not prepare packed upload '{bag}': {error}"))?;
+        }
+        let identity = format!("{packed_bytes}\n{bundle_hash}\n");
+        let same_upload = std::fs::read_to_string(&identity_path)
+            .map(|existing| existing == identity)
+            .unwrap_or(false);
+        if !same_upload {
+            let _ = std::fs::remove_file(&path);
+            std::fs::write(&identity_path, identity)
+                .map_err(|error| format!("could not identify packed upload '{bag}': {error}"))?;
+        }
+        let next_offset = std::fs::metadata(&path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        if next_offset > packed_bytes {
+            std::fs::remove_file(&path)
+                .map_err(|error| format!("could not reset packed upload '{bag}': {error}"))?;
+            return Ok(Response::PushStatus { next_offset: 0 });
+        }
+        Ok(Response::PushStatus { next_offset })
+    }
+
+    async fn push_range(
+        &self,
+        bag: crate::model::bag_ref::BagRef,
+        offset: u64,
+        data: Vec<u8>,
+    ) -> Result<Response, String> {
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        self.ensure_writes_enabled()?;
+        if data.len() > self.max_range_bytes as usize {
+            return Err(format!(
+                "packed upload range of {} bytes exceeds this server's limit of {}",
+                data.len(),
+                self.max_range_bytes
+            ));
+        }
+        let _guard = self.write_lock.lock().await;
+        let path = self.packed_push_path(&bag);
+        if !self.packed_push_identity_path(&bag).is_file() {
+            return Err(format!("no packed upload was begun for '{bag}'"));
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|error| format!("could not open packed upload '{bag}': {error}"))?;
+        let current = file
+            .metadata()
+            .map_err(|error| format!("could not inspect packed upload '{bag}': {error}"))?
+            .len();
+        if offset < current {
+            let overlap = (current - offset).min(data.len() as u64) as usize;
+            let mut existing = vec![0u8; overlap];
+            file.seek(SeekFrom::Start(offset))
+                .and_then(|_| file.read_exact(&mut existing))
+                .map_err(|error| format!("could not verify repeated packed range: {error}"))?;
+            if existing != data[..overlap] {
+                return Err(format!(
+                    "packed upload for '{bag}' differs at byte {offset}"
+                ));
+            }
+            if overlap < data.len() {
+                file.seek(SeekFrom::End(0))
+                    .and_then(|_| file.write_all(&data[overlap..]))
+                    .and_then(|_| file.flush())
+                    .map_err(|error| format!("could not append packed upload: {error}"))?;
+            }
+            return Ok(Response::PushAck {
+                next_offset: current + (data.len() - overlap) as u64,
+            });
+        }
+        if offset > current {
+            return Ok(Response::PushAck {
+                next_offset: current,
+            });
+        }
+        file.seek(SeekFrom::End(0))
+            .and_then(|_| file.write_all(&data))
+            .and_then(|_| file.flush())
+            .map_err(|error| format!("could not append packed upload: {error}"))?;
+        Ok(Response::PushAck {
+            next_offset: current + data.len() as u64,
+        })
+    }
+
+    async fn commit_push(
+        &self,
+        bag: crate::model::bag_ref::BagRef,
+        wire_meta: WirePushMeta,
+    ) -> Result<Response, String> {
+        use sha2::{Digest, Sha256};
+        use std::io::Read;
+
+        self.ensure_writes_enabled()?;
+        let _guard = self.write_lock.lock().await;
+        let path = self.packed_push_path(&bag);
+        let meta: crate::registry::driver::PushMeta = wire_meta.into();
+        let actual_size = std::fs::metadata(&path)
+            .map_err(|error| format!("could not inspect completed packed upload '{bag}': {error}"))?
+            .len();
+        if actual_size != meta.packed_bytes {
+            return Err(format!(
+                "cannot commit packed '{bag}': received {actual_size} of {} bytes",
+                meta.packed_bytes
+            ));
+        }
+        let mut file = std::fs::File::open(&path)
+            .map_err(|error| format!("could not open completed packed upload '{bag}': {error}"))?;
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0u8; 1024 * 1024];
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .map_err(|error| format!("could not hash packed upload '{bag}': {error}"))?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        let actual_hash = hasher
+            .finalize()
+            .iter()
+            .take(6)
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        if actual_hash != meta.bundle_hash {
+            return Err(format!(
+                "cannot commit packed '{bag}': bundle hash is {actual_hash}, expected {}",
+                meta.bundle_hash
+            ));
+        }
+        self.driver
+            .push(&self.registry, &bag, &path, &meta)
+            .await
+            .map_err(|error| format!("could not publish packed '{bag}': {error}"))?;
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(self.packed_push_identity_path(&bag));
+        let ready = self.dataset_dir(&bag).join("ready");
+        if ready.exists() {
+            std::fs::remove_dir_all(&ready)
+                .map_err(|error| format!("could not invalidate old stream cache: {error}"))?;
+        }
+        self.materialize_errors
+            .lock()
+            .await
+            .remove(&bag.without_attachment().to_string());
+        Ok(Response::PushCommitted)
     }
 
     fn write_staging_dir(&self, bag: &crate::model::bag_ref::BagRef) -> std::path::PathBuf {
@@ -495,7 +716,7 @@ impl RequestHandler {
                 })?;
             if existing != data[..overlap] {
                 return Err(format!(
-                    "staged file '{path}' differs at offset {offset}; use a new Marina tag or clear the interrupted upload"
+                    "staged file '{path}' differs at offset {offset}. Use a new Marina tag or clear the interrupted upload"
                 ));
             }
             if overlap == data.len() {
@@ -714,9 +935,8 @@ impl RequestHandler {
 /// that escapes it.
 ///
 /// The path comes off the network, so `../../etc/passwd` has to be impossible
-/// rather than merely unlikely. Rejecting the components outright is clearer
-/// than canonicalising and comparing prefixes, and does not depend on the file
-/// existing.
+/// Rejecting unsafe path components keeps every request inside `root` without
+/// depending on the target file already existing.
 fn safe_join(root: &std::path::Path, relative: &str) -> Result<std::path::PathBuf, String> {
     use std::path::Component;
 

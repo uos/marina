@@ -21,7 +21,7 @@ fn available_space(path: &Path) -> Result<u64> {
 
 #[cfg(not(unix))]
 fn available_space(_path: &Path) -> Result<u64> {
-    // Not implemented on non-Unix; skip the check.
+    // This check applies on Unix.
     Ok(u64::MAX)
 }
 
@@ -180,7 +180,7 @@ fn ensure_unpack_space(archive_path: &Path, out_dir: &Path, archive_is_gzip: boo
         let mut archive = Archive::new(decoder);
         archive_required_unpacked_space(&mut archive).with_context(|| {
             format!(
-                "failed to inspect archive {}; it may be truncated or corrupt",
+                "failed to inspect archive {}. Check that the file is complete and valid",
                 archive_path.display()
             )
         })?
@@ -190,7 +190,7 @@ fn ensure_unpack_space(archive_path: &Path, out_dir: &Path, archive_is_gzip: boo
         let mut archive = Archive::new(tar_file);
         archive_required_unpacked_space(&mut archive).with_context(|| {
             format!(
-                "failed to inspect archive {}; it may be truncated or corrupt",
+                "failed to inspect archive {}. Check that the file is complete and valid",
                 archive_path.display()
             )
         })?
