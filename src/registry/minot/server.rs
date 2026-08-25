@@ -1018,6 +1018,31 @@ struct SweepSummary {
     bytes: u64,
 }
 
+/// Result of a manual streaming-cache cleanup.
+pub struct CacheCleanSummary {
+    pub entries: usize,
+    pub bytes: u64,
+}
+
+/// Remove expired unpacked streaming datasets and abandoned restore archives.
+pub fn clean_streaming_cache(max_age: Duration) -> Result<CacheCleanSummary> {
+    let materialize_root = crate::storage::config::cache_dir()
+        .context("could not locate the cache directory")?
+        .join("serve");
+    let plan = prepare_cache_sweep(
+        &materialize_root,
+        &std::env::temp_dir(),
+        max_age,
+        &HashMap::new(),
+    )
+    .context("could not prepare streaming cache cleanup")?;
+    let summary = remove_sweep_paths(plan).context("could not clean streaming cache")?;
+    Ok(CacheCleanSummary {
+        entries: summary.entries,
+        bytes: summary.bytes,
+    })
+}
+
 #[derive(Default)]
 struct SweepPlan {
     trees: Vec<std::path::PathBuf>,

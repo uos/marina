@@ -71,6 +71,14 @@ enum Commands {
     Version,
 }
 
+#[cfg(feature = "minot-registry")]
+#[derive(Args)]
+struct CacheCleanArgs {
+    /// Remove entries idle for at least this duration
+    #[arg(long, default_value = "96h", value_parser = humantime::parse_duration)]
+    max_age: std::time::Duration,
+}
+
 /// Expose a local registry so other machines can pull from it.
 ///
 /// Minot carries no authentication of its own, so this binds to loopback and
@@ -319,8 +327,18 @@ struct RemoveArgs {
 
 #[derive(Args)]
 struct CleanArgs {
+    #[cfg(feature = "minot-registry")]
+    #[command(subcommand)]
+    cmd: Option<CleanSubcommand>,
     #[arg(short = 'a', long = "all")]
     all: bool,
+}
+
+#[cfg(feature = "minot-registry")]
+#[derive(Subcommand)]
+enum CleanSubcommand {
+    /// Remove expired server streaming caches and abandoned restore archives
+    Cache(CacheCleanArgs),
 }
 
 #[derive(Args)]
@@ -1895,11 +1913,35 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
             }
         }
         Commands::Clean(args) => {
-            marina.clean(args.all)?;
-            if args.all {
-                println!("removed cache and registries");
+            #[cfg(feature = "minot-registry")]
+            if let Some(command) = args.cmd {
+                match command {
+                    CleanSubcommand::Cache(cache) => {
+                        let summary =
+                            crate::registry::minot::server::clean_streaming_cache(cache.max_age)?;
+                        println!(
+                            "removed {} streaming cache entries ({})",
+                            summary.entries,
+                            human_bytes(summary.bytes)
+                        );
+                    }
+                }
             } else {
-                println!("removed cached resources (registries kept)");
+                marina.clean(args.all)?;
+                if args.all {
+                    println!("removed cache and registries");
+                } else {
+                    println!("removed cached resources (registries kept)");
+                }
+            }
+            #[cfg(not(feature = "minot-registry"))]
+            {
+                marina.clean(args.all)?;
+                if args.all {
+                    println!("removed cache and registries");
+                } else {
+                    println!("removed cached resources (registries kept)");
+                }
             }
         }
         Commands::Import(args) => {
@@ -2424,6 +2466,18 @@ mod tests {
         assert_eq!(args.target, "alice@example.org:2222");
         assert_eq!(args.patterns, vec!["team/*", "demo:*"]);
         assert_eq!(args.proxy_jump.as_deref(), Some("jump@example.org"));
+    }
+
+    #[cfg(feature = "minot-registry")]
+    #[test]
+    fn streaming_cache_clean_accepts_a_manual_age() {
+        let cli = Cli::try_parse_from(["marina", "clean", "cache", "--max-age", "12h"])
+            .expect("streaming cache clean should parse");
+        let Commands::Clean(args) = cli.cmd else {
+            panic!("expected clean command");
+        };
+        let CleanSubcommand::Cache(args) = args.cmd.expect("expected cache subcommand");
+        assert_eq!(args.max_age, std::time::Duration::from_secs(12 * 60 * 60));
     }
 
     #[cfg(feature = "minot-registry")]

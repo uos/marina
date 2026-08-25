@@ -443,22 +443,61 @@ impl MinotRegistry {
                 let session = Arc::clone(&session);
                 let bag = wire_bag.clone();
                 async move {
-                    let response = session
-                        .client
-                        .request(
-                            Request::ReadRange {
-                                bag,
-                                path,
-                                offset,
-                                len,
-                            },
-                            Some(REQUEST_TIMEOUT),
-                        )
-                        .await
-                        .map_err(|error| anyhow!("{error}"))?;
-                    match response {
-                        Response::ReadRange { data } => Ok(data),
-                        other => Err(anyhow!("unexpected response to a range read: {other:?}")),
+                    let mut reconnecting = false;
+                    loop {
+                        let shutdown = session.node.shutdown_token();
+                        let response = tokio::select! {
+                            _ = shutdown.cancelled() => {
+                                return Err(anyhow!("range read stopped while the client was shutting down"));
+                            }
+                            response = session.client.request(
+                                Request::ReadRange {
+                                    bag: bag.clone(),
+                                    path: path.clone(),
+                                    offset,
+                                    len,
+                                },
+                                Some(REQUEST_TIMEOUT),
+                            ) => response,
+                        };
+
+                        match response {
+                            Ok(Response::ReadRange { data }) => {
+                                if reconnecting {
+                                    log::info!(
+                                        "connection restored while streaming '{}' at byte {offset}",
+                                        path
+                                    );
+                                }
+                                return Ok(data);
+                            }
+                            Ok(other) => {
+                                return Err(anyhow!(
+                                    "unexpected response to a range read: {other:?}"
+                                ));
+                            }
+                            Err(error) => {
+                                let error = anyhow!(error);
+                                if !is_transient_service_error(&error) {
+                                    return Err(error);
+                                }
+                                if !reconnecting {
+                                    log::warn!(
+                                        "connection interrupted while streaming '{}' at byte {offset}. Retrying: {error}",
+                                        path
+                                    );
+                                    reconnecting = true;
+                                }
+                            }
+                        }
+
+                        let shutdown = session.node.shutdown_token();
+                        tokio::select! {
+                            _ = shutdown.cancelled() => {
+                                return Err(anyhow!("range read stopped while the client was shutting down"));
+                            }
+                            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                        }
                     }
                 }
             },
@@ -1176,7 +1215,7 @@ mod tests {
     }
 
     #[test]
-    fn transport_failures_are_retried_while_restoring() {
+    fn transient_service_failures_are_retryable() {
         for message in [
             "Error sending request: connection closed",
             "Timeout reached while sending request",
