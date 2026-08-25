@@ -93,6 +93,10 @@ struct ServeArgs {
     /// server has no application-level authentication of its own.
     #[arg(long, default_value_t = false)]
     allow_write: bool,
+    /// Remove idle streaming caches and abandoned restore archives after this
+    /// duration.
+    #[arg(long, default_value = "96h", value_parser = humantime::parse_duration)]
+    cache_max_age: std::time::Duration,
 }
 
 #[derive(Args)]
@@ -2103,6 +2107,7 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
             let mut options = crate::registry::minot::server::ServeOptions::new(exposed_as.clone());
             options.local_only = !args.listen_all;
             options.allow_write = args.allow_write;
+            options.cache_max_age = args.cache_max_age;
 
             println!(
                 "serving registry '{}' ({}) as '{}'{}",

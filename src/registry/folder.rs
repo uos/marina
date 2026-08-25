@@ -165,8 +165,8 @@ impl RegistryDriver for FolderRegistry {
         let parent = out_packed_file
             .parent()
             .ok_or_else(|| anyhow!("invalid destination path"))?;
-        fs::create_dir_all(parent)?;
-        fs::copy(src, out_packed_file)?;
+        tokio::fs::create_dir_all(parent).await?;
+        tokio::fs::copy(src, out_packed_file).await?;
 
         let meta = self.read_meta(bag)?;
         Ok(RemoteDescriptor {

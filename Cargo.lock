@@ -2747,6 +2747,7 @@ dependencies = [
  "flate2",
  "futures",
  "glob",
+ "humantime",
  "indicatif",
  "libc",
  "log",

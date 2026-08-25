@@ -321,12 +321,33 @@ impl MinotRegistry {
     pub async fn stat(&self, bag: &BagRef) -> Result<StatResult> {
         let bag = bag.without_attachment();
         let mut last_status = std::time::Instant::now() - Duration::from_secs(30);
+        let mut reconnecting = false;
         let response = loop {
-            let response = self
-                .request(Request::Stat {
+            let response = match self
+                .request_without_deadline(Request::Stat {
                     bag: WireBagRef::from(&bag),
                 })
-                .await?;
+                .await
+            {
+                Ok(response) => {
+                    if reconnecting {
+                        log::info!("connection restored while waiting for '{bag}'");
+                        reconnecting = false;
+                    }
+                    response
+                }
+                Err(error) if is_transient_service_error(&error) => {
+                    if !reconnecting {
+                        log::warn!(
+                            "connection interrupted while waiting for '{bag}'. Reconnecting: {error}"
+                        );
+                        reconnecting = true;
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             match response {
                 Response::Materializing { message } => {
                     if last_status.elapsed() >= Duration::from_secs(5) {
@@ -464,6 +485,19 @@ impl MinotRegistry {
             .await
             .map_err(|error| anyhow!("{error}"))
     }
+}
+
+fn is_transient_service_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    [
+        "Error sending request:",
+        "Timeout reached while sending request",
+        "Timeout reached while waiting for response",
+        "Response dispatcher stopped",
+        "None response from ServiceServer",
+    ]
+    .iter()
+    .any(|prefix| message.starts_with(prefix))
 }
 
 /// A dataset on the far side, opened for reading without downloading it.
@@ -1139,5 +1173,25 @@ mod tests {
         for registry in [&local, &direct, &tunnelled] {
             assert_eq!(registry.remote_registry, "team");
         }
+    }
+
+    #[test]
+    fn transport_failures_are_retried_while_restoring() {
+        for message in [
+            "Error sending request: connection closed",
+            "Timeout reached while sending request",
+            "Timeout reached while waiting for response",
+            "Response dispatcher stopped",
+            "None response from ServiceServer",
+        ] {
+            assert!(is_transient_service_error(&anyhow!(message)));
+        }
+    }
+
+    #[test]
+    fn server_errors_are_returned_to_the_caller() {
+        assert!(!is_transient_service_error(&anyhow!(
+            "materialising 'run' failed: archive is corrupt"
+        )));
     }
 }

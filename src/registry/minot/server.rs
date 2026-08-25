@@ -15,6 +15,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use mt_flow::{BytesSource, FlowConfig, FlowSender};
@@ -48,6 +49,9 @@ pub struct ServeOptions {
     /// Accept staged dataset uploads. Off by default because Minot itself does
     /// has no client authentication. SSH provides the authorization boundary.
     pub allow_write: bool,
+    /// Maximum idle age of unpacked streaming datasets and abandoned staging
+    /// archives before the periodic sweep removes them.
+    pub cache_max_age: Duration,
 }
 
 impl ServeOptions {
@@ -59,6 +63,7 @@ impl ServeOptions {
             materialize_root: None,
             max_range_bytes: 8 * 1024 * 1024,
             allow_write: false,
+            cache_max_age: Duration::from_secs(96 * 60 * 60),
         }
     }
 }
@@ -142,10 +147,22 @@ pub async fn serve(driver: Arc<dyn RegistryDriver>, options: ServeOptions) -> Re
         materialize_root,
         max_range_bytes: options.max_range_bytes,
         allow_write: options.allow_write,
+        cache_max_age: options.cache_max_age,
         materialize_lock: tokio::sync::Mutex::new(()),
         materializing: tokio::sync::Mutex::new(HashSet::new()),
         materialize_errors: tokio::sync::Mutex::new(HashMap::new()),
+        last_access: tokio::sync::Mutex::new(HashMap::new()),
+        cache_sweep_lock: tokio::sync::RwLock::new(()),
         write_lock: tokio::sync::Mutex::new(()),
+    });
+
+    handler.sweep_cache().await;
+    let sweeper = Arc::clone(&handler);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(60 * 60)).await;
+            sweeper.sweep_cache().await;
+        }
     });
 
     ServiceServer::start(
@@ -168,6 +185,7 @@ struct RequestHandler {
     materialize_root: std::path::PathBuf,
     max_range_bytes: u32,
     allow_write: bool,
+    cache_max_age: Duration,
     /// Serialises the disk-heavy restore itself.
     materialize_lock: tokio::sync::Mutex<()>,
     /// Dataset keys currently restoring, so every poll returns immediately and
@@ -175,12 +193,57 @@ struct RequestHandler {
     materializing: tokio::sync::Mutex<HashSet<String>>,
     /// The next poll receives any background materialization failure.
     materialize_errors: tokio::sync::Mutex<HashMap<String, String>>,
+    /// Last request time for datasets used since this server started.
+    last_access: tokio::sync::Mutex<HashMap<String, SystemTime>>,
+    /// Keeps a sweep from removing a dataset while a request is using it.
+    cache_sweep_lock: tokio::sync::RwLock<()>,
     /// Serialises staging mutations and commits. Upload traffic is already
     /// sequential per client. It also prevents two clients racing one tag.
     write_lock: tokio::sync::Mutex<()>,
 }
 
 impl RequestHandler {
+    async fn record_access(&self, bag: &crate::model::bag_ref::BagRef) {
+        let key = bag.without_attachment().cache_key();
+        let now = SystemTime::now();
+        let persist = self
+            .last_access
+            .lock()
+            .await
+            .insert(key, now)
+            .is_none_or(|previous| {
+                now.duration_since(previous).unwrap_or_default() >= Duration::from_secs(60 * 60)
+            });
+        if persist {
+            let marker = self.dataset_dir(bag).join(".last-access");
+            if marker.parent().is_some_and(|parent| parent.is_dir()) {
+                let _ = tokio::fs::write(marker, []).await;
+            }
+        }
+    }
+
+    async fn sweep_cache(&self) {
+        let _guard = self.cache_sweep_lock.write().await;
+        let last_access = self.last_access.lock().await.clone();
+        let materialize_root = self.materialize_root.clone();
+        let temp_root = std::env::temp_dir();
+        let cache_max_age = self.cache_max_age;
+        let result = tokio::task::spawn_blocking(move || {
+            sweep_cache_paths(&materialize_root, &temp_root, cache_max_age, &last_access)
+        })
+        .await;
+        match result {
+            Ok(Ok(summary)) if summary.entries > 0 => log::info!(
+                "marina serve: removed {} expired streaming cache entries ({})",
+                summary.entries,
+                format_bytes(summary.bytes)
+            ),
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => log::warn!("marina serve: cache sweep failed: {error}"),
+            Err(error) => log::warn!("marina serve: cache sweep stopped: {error}"),
+        }
+    }
+
     async fn handle(self: &Arc<Self>, request: Request) -> Result<Response, String> {
         match request {
             Request::Hello { major, minor } => {
@@ -274,6 +337,7 @@ impl RequestHandler {
         &self,
         bag: &crate::model::bag_ref::BagRef,
     ) -> Result<std::path::PathBuf, String> {
+        let _cache_guard = self.cache_sweep_lock.read().await;
         let ready = self.dataset_dir(bag).join("ready");
         if ready.is_dir() {
             return Ok(ready);
@@ -292,10 +356,15 @@ impl RequestHandler {
             .suffix(".tar.gz")
             .tempfile()
             .map_err(|error| format!("could not stage '{bag}': {error}"))?;
-        self.driver
+        let descriptor = self
+            .driver
             .pull(bag, staging.path())
             .await
             .map_err(|error| format!("could not read '{bag}' from the served registry: {error}"))?;
+        log::info!(
+            "marina serve: restored {} packed bytes for '{bag}', unpacking",
+            descriptor.packed_bytes
+        );
 
         // Unpacked beside the destination and renamed, so an interrupted
         // materialisation never leaves a half-written tree that looks ready.
@@ -320,6 +389,8 @@ impl RequestHandler {
 
         std::fs::rename(&incoming, &ready)
             .map_err(|error| format!("could not install '{bag}': {error}"))?;
+        let _ = std::fs::write(parent.join(".last-access"), []);
+        log::info!("marina serve: '{bag}' is ready for range reads");
         Ok(ready)
     }
 
@@ -327,6 +398,8 @@ impl RequestHandler {
         self: &Arc<Self>,
         bag: crate::model::bag_ref::BagRef,
     ) -> Result<Response, String> {
+        self.record_access(&bag).await;
+        let _cache_guard = self.cache_sweep_lock.read().await;
         let ready = self.dataset_dir(&bag).join("ready");
         if !ready.is_dir() {
             let key = bag.without_attachment().to_string();
@@ -413,6 +486,7 @@ impl RequestHandler {
         offset: u64,
         len: u32,
     ) -> Result<Response, String> {
+        self.record_access(&bag).await;
         if len > self.max_range_bytes {
             return Err(format!(
                 "requested range of {len} bytes exceeds this server's limit of {}",
@@ -420,6 +494,7 @@ impl RequestHandler {
             ));
         }
         let ready = self.materialize(&bag).await?;
+        let _cache_guard = self.cache_sweep_lock.read().await;
         let target = safe_join(&ready, path)?;
 
         let data = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<u8>> {
@@ -931,10 +1006,118 @@ impl RequestHandler {
     }
 }
 
+#[derive(Default)]
+struct SweepSummary {
+    entries: usize,
+    bytes: u64,
+}
+
+fn sweep_cache_paths(
+    materialize_root: &std::path::Path,
+    temp_root: &std::path::Path,
+    max_age: Duration,
+    last_access: &HashMap<String, SystemTime>,
+) -> std::io::Result<SweepSummary> {
+    let now = SystemTime::now();
+    let mut summary = SweepSummary::default();
+
+    if materialize_root.is_dir() {
+        for entry in std::fs::read_dir(materialize_root)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if !file_type.is_dir() || file_type.is_symlink() {
+                continue;
+            }
+
+            let path = entry.path();
+            let is_upload = path.join(".write-incoming").exists()
+                || path.join(".push-incoming.bundle").exists()
+                || path.join(".push-incoming.identity").exists();
+            let is_stream_cache = path.join("ready").is_dir() || path.join(".incoming").is_dir();
+            if is_upload || !is_stream_cache {
+                continue;
+            }
+
+            let key = entry.file_name().to_string_lossy().into_owned();
+            let timestamp = last_access
+                .get(&key)
+                .copied()
+                .or_else(|| {
+                    std::fs::metadata(path.join(".last-access"))
+                        .ok()?
+                        .modified()
+                        .ok()
+                })
+                .or_else(|| entry.metadata().ok()?.modified().ok())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            if !is_expired(now, timestamp, max_age) {
+                continue;
+            }
+
+            summary.bytes += directory_size(&path);
+            std::fs::remove_dir_all(path)?;
+            summary.entries += 1;
+        }
+    }
+
+    if temp_root.is_dir() {
+        for entry in std::fs::read_dir(temp_root)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.starts_with("marina-materialize-") || !name.ends_with(".tar.gz") {
+                continue;
+            }
+            let metadata = entry.metadata()?;
+            if !metadata.file_type().is_file()
+                || !is_expired(
+                    now,
+                    metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                    max_age,
+                )
+            {
+                continue;
+            }
+            summary.bytes += metadata.len();
+            std::fs::remove_file(entry.path())?;
+            summary.entries += 1;
+        }
+    }
+
+    Ok(summary)
+}
+
+fn is_expired(now: SystemTime, timestamp: SystemTime, max_age: Duration) -> bool {
+    now.duration_since(timestamp).unwrap_or_default() >= max_age
+}
+
+fn directory_size(root: &std::path::Path) -> u64 {
+    walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| entry.metadata().ok())
+        .filter(|metadata| metadata.is_file())
+        .map(|metadata| metadata.len())
+        .sum()
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    const MIB: u64 = 1024 * 1024;
+    if bytes >= GIB {
+        format!("{:.1} GiB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
 /// Resolve a client-supplied relative path inside `root`, refusing anything
 /// that escapes it.
 ///
-/// The path comes off the network, so `../../etc/passwd` has to be impossible
+/// The path comes off the network, so `../../etc/passwd` has to be impossible.
 /// Rejecting unsafe path components keeps every request inside `root` without
 /// depending on the target file already existing.
 fn safe_join(root: &std::path::Path, relative: &str) -> Result<std::path::PathBuf, String> {
@@ -1041,5 +1224,57 @@ mod tests {
             !options.allow_write,
             "remote writes must be explicitly enabled"
         );
+        assert_eq!(options.cache_max_age, Duration::from_secs(96 * 60 * 60));
+    }
+
+    #[test]
+    fn cache_sweep_removes_expired_stream_data_and_keeps_uploads() {
+        let root = tempfile::tempdir().unwrap();
+        let materialized = root.path().join("serve");
+        let temp = root.path().join("tmp");
+        std::fs::create_dir_all(materialized.join("expired/ready")).unwrap();
+        std::fs::write(materialized.join("expired/ready/data.mcap"), b"bag").unwrap();
+        std::fs::create_dir_all(materialized.join("recent/ready")).unwrap();
+        std::fs::write(materialized.join("recent/ready/data.mcap"), b"bag").unwrap();
+        std::fs::create_dir_all(materialized.join("upload/.write-incoming")).unwrap();
+        std::fs::create_dir_all(&temp).unwrap();
+
+        let last_access = HashMap::from([
+            ("expired".to_string(), SystemTime::UNIX_EPOCH),
+            ("recent".to_string(), SystemTime::now()),
+            ("upload".to_string(), SystemTime::UNIX_EPOCH),
+        ]);
+        let summary = sweep_cache_paths(
+            &materialized,
+            &temp,
+            Duration::from_secs(60 * 60),
+            &last_access,
+        )
+        .unwrap();
+
+        assert_eq!(summary.entries, 1);
+        assert!(!materialized.join("expired").exists());
+        assert!(materialized.join("recent").exists());
+        assert!(materialized.join("upload").exists());
+    }
+
+    #[test]
+    fn cache_sweep_removes_abandoned_materialization_archives() {
+        let root = tempfile::tempdir().unwrap();
+        let materialized = root.path().join("serve");
+        let temp = root.path().join("tmp");
+        std::fs::create_dir_all(&materialized).unwrap();
+        std::fs::create_dir_all(&temp).unwrap();
+        let abandoned = temp.join("marina-materialize-abandoned.tar.gz");
+        let unrelated = temp.join("another-program.tar.gz");
+        std::fs::write(&abandoned, b"archive").unwrap();
+        std::fs::write(&unrelated, b"archive").unwrap();
+
+        let summary =
+            sweep_cache_paths(&materialized, &temp, Duration::ZERO, &HashMap::new()).unwrap();
+
+        assert_eq!(summary.entries, 1);
+        assert!(!abandoned.exists());
+        assert!(unrelated.exists());
     }
 }
