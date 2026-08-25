@@ -16,6 +16,7 @@ pub mod remote_file;
 pub mod server;
 
 use std::any::Any;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -330,7 +331,7 @@ impl MinotRegistry {
             match response {
                 Response::Materializing { message } => {
                     if last_status.elapsed() >= Duration::from_secs(5) {
-                        log::info!("{message}. Waiting");
+                        write_restore_progress(&format!("{message}. Waiting"));
                         last_status = std::time::Instant::now();
                     }
                     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -464,6 +465,20 @@ impl MinotRegistry {
             .await
             .map_err(|error| anyhow!("{error}"))
     }
+}
+
+fn write_restore_progress(message: &str) {
+    let mut record =
+        mt_log::Record::new(mt_log::LogLevel::Info, message).with_target("marina::registry::minot");
+    if let Ok(source) = std::env::var(mt_log::SOURCE_VAR) {
+        record = record.with_source(source);
+    }
+
+    let format = mt_log::Format::from_env();
+    let colour = std::io::stdout().is_terminal();
+    let mut stdout = std::io::stdout().lock();
+    let _ = writeln!(stdout, "{}", record.line(format, colour));
+    let _ = stdout.flush();
 }
 
 /// A dataset on the far side, opened for reading without downloading it.

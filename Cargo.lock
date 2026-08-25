@@ -2752,6 +2752,7 @@ dependencies = [
  "log",
  "mcap",
  "mt_flow",
+ "mt_log",
  "mt_pubsub",
  "mt_sea",
  "mt_service",
@@ -2991,6 +2992,8 @@ version = "0.9.0"
 dependencies = [
  "env_logger",
  "log",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
