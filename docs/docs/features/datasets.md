@@ -259,6 +259,20 @@ marina rm outdoor-run:v2 --remote --registry team-ssh --write-http-index
 
 ## Clean
 
+Remove server streaming caches and abandoned restore archives older than four
+days:
+
+~~~bash
+marina clean cache
+~~~
+
+Choose another idle age with `--max-age`, including `0s` to remove every
+streaming cache entry:
+
+~~~bash
+marina clean cache --max-age 24h
+~~~
+
 Remove all cached datasets from the local cache:
 
 ~~~bash

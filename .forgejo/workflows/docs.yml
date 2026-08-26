@@ -23,7 +23,9 @@ jobs:
         with:
           install_options: --no-daemon
       - name: build pages
-        run: nix run .#buildDocs
+        run: |
+          bash ./ensure-minot-source.bash
+          nix run .#buildDocs
       - uses: https://codeberg.org/git-pages/action@v2
         with:
           site: "https://${{ forge.repository_owner }}.codeberg.page/marina/"

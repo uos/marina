@@ -4,3 +4,4 @@ test
 .claude
 .codex
 docs/site
+.venv

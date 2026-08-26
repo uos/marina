@@ -2732,48 +2732,18 @@ dependencies = [
 
 [[package]]
 name = "marina"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "base64 0.23.1",
- "cdr",
- "clap",
- "clap_complete",
- "cloudini",
- "ctrlc",
- "dirs",
  "env_logger",
  "flate2",
- "futures",
- "glob",
- "humantime",
- "indicatif",
- "libc",
- "log",
- "mcap",
- "mt_flow",
- "mt_pubsub",
+ "mt_dataset",
  "mt_sea",
- "mt_service",
- "ratslang",
- "regex",
- "reqwest",
- "ring",
- "rkyv",
- "ros2-interfaces-jazzy-serde",
- "ros_pointcloud2",
- "rpassword",
  "rusqlite",
- "russh",
- "russh-sftp",
- "serde",
- "serde_json",
- "sha2",
  "tar",
  "tempfile",
  "tokio",
- "walkdir",
 ]
 
 [[package]]
@@ -2961,7 +2931,7 @@ dependencies = [
 
 [[package]]
 name = "mt_coord"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "fs2",
@@ -2974,8 +2944,56 @@ dependencies = [
 ]
 
 [[package]]
+name = "mt_dataset"
+version = "0.10.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.23.1",
+ "cdr",
+ "clap",
+ "clap_complete",
+ "cloudini",
+ "ctrlc",
+ "dirs",
+ "env_logger",
+ "flate2",
+ "futures",
+ "glob",
+ "humantime",
+ "indicatif",
+ "libc",
+ "log",
+ "mcap",
+ "mt_flow",
+ "mt_pubsub",
+ "mt_sea",
+ "mt_service",
+ "nalgebra",
+ "rand 0.10.2",
+ "ratslang",
+ "regex",
+ "reqwest",
+ "ring",
+ "rkyv",
+ "ros2-interfaces-jazzy-serde",
+ "ros_pointcloud2",
+ "rpassword",
+ "rusqlite",
+ "russh",
+ "russh-sftp",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+ "tokio",
+ "walkdir",
+]
+
+[[package]]
 name = "mt_flow"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "log",
@@ -2988,7 +3006,7 @@ dependencies = [
 
 [[package]]
 name = "mt_log"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "env_logger",
  "log",
@@ -2996,7 +3014,7 @@ dependencies = [
 
 [[package]]
 name = "mt_net"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "rkyv",
@@ -3006,7 +3024,7 @@ dependencies = [
 
 [[package]]
 name = "mt_pubsub"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3024,7 +3042,7 @@ dependencies = [
 
 [[package]]
 name = "mt_scope"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -3037,7 +3055,7 @@ dependencies = [
 
 [[package]]
 name = "mt_sea"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3054,7 +3072,7 @@ dependencies = [
 
 [[package]]
 name = "mt_service"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "log",

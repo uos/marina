@@ -1,131 +1,70 @@
-//! Marina is a dataset manager for robotics built to organize, share, and discover datasets and bags across teams and storage backends.
+//! Marina's stable public facade.
 //!
-//! ## Add the dependency
-//!
-//! ```toml
-//! [dependencies]
-//! marina = "0.3"
-//! tokio = { version = "1", features = ["rt", "macros"] }
-//! ```
-//!
-//! Marina's async methods require a **tokio** runtime. A single-threaded runtime
-//! (`#[tokio::main(flavor = "current_thread")]`) is sufficient.
-//!
-//! ## Resolve a dataset
-//!
-//! [`Marina::resolve_target`] checks whether a dataset is already cached, available locally,
-//! or only reachable via a remote registry.
-//!
-//! ```no_run
-//! use marina::{Marina, ResolveResult};
-//!
-//! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
-//!     let marina = Marina::load()?;
-//!
-//!     match marina.resolve_target("outdoor-run:v2", None).await? {
-//!         ResolveResult::LocalPath(p) | ResolveResult::Cached(p) => {
-//!             println!("ready at {}", p.display());
-//!         }
-//!         ResolveResult::RemoteAvailable { bag, registry, .. } => {
-//!             println!("remote: {bag} in {registry}");
-//!         }
-//!         ResolveResult::Ambiguous { candidates } => {
-//!             println!("found in {} registries", candidates.len());
-//!         }
-//!     }
-//!     Ok(())
-//! }
-//! ```
-//!
-//! Pass a registry name as the second argument to restrict the search:
-//!
-//! ```no_run
-//! # use marina::Marina;
-//! # #[tokio::main] async fn main() -> anyhow::Result<()> {
-//! # let marina = Marina::load()?;
-//! marina.resolve_target("outdoor-run:v2", Some("team-ssh")).await?;
-//! # Ok(()) }
-//! ```
-//!
-//! ## Pull a dataset
-//!
-//! [`Marina::pull_exact`] downloads a dataset if it is not already cached and returns the local path:
-//!
-//! ```no_run
-//! use marina::{Marina, BagRef};
-//!
-//! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
-//!     let mut marina = Marina::load()?;
-//!     let bag: BagRef = "outdoor-run:v2".parse()?;
-//!     let path = marina.pull_exact(&bag, None).await?;
-//!     println!("cached at {}", path.display());
-//!     Ok(())
-//! }
-//! ```
-//!
-//! ## Pull with progress reporting
-//!
-//! Implement [`ProgressSink`] to receive phase events during download and decompression:
-//!
-//! ```no_run
-//! use marina::{Marina, BagRef, ProgressEvent, ProgressReporter, ProgressSink};
-//!
-//! struct MyProgress;
-//!
-//! impl ProgressSink for MyProgress {
-//!     fn emit(&mut self, event: ProgressEvent) {
-//!         println!("[{}] {}", event.phase, event.message);
-//!     }
-//! }
-//!
-//! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
-//!     let mut marina = Marina::load()?;
-//!     let bag: BagRef = "outdoor-run:v2".parse()?;
-//!
-//!     let mut sink = MyProgress;
-//!     let mut reporter = ProgressReporter::new(&mut sink);
-//!     let path = marina.pull_exact_with_progress(&bag, None, &mut reporter).await?;
-//!     println!("done: {}", path.display());
-//!     Ok(())
-//! }
-//! ```
-//!
-//! [`WriterProgress`] is a built-in sink that writes human-readable output to any [`std::io::Write`]:
-//!
-//! ```no_run
-//! use marina::{Marina, BagRef, ProgressReporter, WriterProgress};
-//!
-//! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
-//!     let mut marina = Marina::load()?;
-//!     let bag: BagRef = "outdoor-run:v2".parse()?;
-//!
-//!     let mut stdout = std::io::stdout();
-//!     let mut sink = WriterProgress::new(&mut stdout);
-//!     let mut reporter = ProgressReporter::new(&mut sink);
-//!     marina.pull_exact_with_progress(&bag, None, &mut reporter).await?;
-//!     Ok(())
-//! }
-//! ```
+//! The implementation lives in `mt_dataset` so Minot and Marina can share the
+//! dataset stack without either application depending on the other.
 
-pub mod cleanup;
-pub mod cli;
-pub mod core;
-pub mod ffi;
-pub mod io;
-pub mod model;
-pub mod progress;
-pub mod registry;
-pub mod storage;
+pub use mt_dataset::*;
 
-pub use core::{
-    AccessMode, CacheMirrorOptions, CacheMirrorStats, CachedBagInfo, CachedSizeStats,
-    DatasetAccess, Marina, PullOptions, PushOptions, RemoteBagHit, RemovedRegistry, ResolveResult,
-};
-/// Parsed bag reference like `namespace/name:tag1:tag2[attachment.txt]`.
-pub use model::bag_ref::BagRef;
-/// Progress primitives to receive phase-based feedback from push/pull operations.
-pub use progress::{ProgressEvent, ProgressReporter, ProgressSink, WriterProgress};
+// Re-exporting Rust items does not by itself expose their C symbols from this
+// crate's cdylib, so keep Marina's existing C ABI as a thin forwarding layer.
+#[cfg(not(test))]
+mod ffi_exports {
+    use std::ffi::{c_char, c_void};
+
+    use mt_dataset::ffi::{MarinaProgressCallback, MarinaResolveDetailed};
+
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn marina_resolve_detailed(
+        target: *const c_char,
+        registry: *const c_char,
+    ) -> MarinaResolveDetailed {
+        unsafe { mt_dataset::ffi::marina_resolve_detailed(target, registry) }
+    }
+
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn marina_free_resolve_detailed(result: *mut MarinaResolveDetailed) {
+        unsafe { mt_dataset::ffi::marina_free_resolve_detailed(result) }
+    }
+
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn marina_resolve(
+        target: *const c_char,
+        registry: *const c_char,
+    ) -> *mut c_char {
+        unsafe { mt_dataset::ffi::marina_resolve(target, registry) }
+    }
+
+    #[unsafe(no_mangle)]
+    extern "C" fn marina_pull(bag_ref: *const c_char, registry: *const c_char) -> *mut c_char {
+        mt_dataset::ffi::marina_pull(bag_ref, registry)
+    }
+
+    #[unsafe(no_mangle)]
+    extern "C" fn marina_pull_with_progress(
+        bag_ref: *const c_char,
+        registry: *const c_char,
+        progress_mode: i32,
+    ) -> *mut c_char {
+        mt_dataset::ffi::marina_pull_with_progress(bag_ref, registry, progress_mode)
+    }
+
+    #[unsafe(no_mangle)]
+    extern "C" fn marina_pull_with_callback(
+        bag_ref: *const c_char,
+        registry: *const c_char,
+        callback: MarinaProgressCallback,
+        user_data: *mut c_void,
+    ) -> *mut c_char {
+        mt_dataset::ffi::marina_pull_with_callback(bag_ref, registry, callback, user_data)
+    }
+
+    #[unsafe(no_mangle)]
+    extern "C" fn marina_last_error_message() -> *mut c_char {
+        mt_dataset::ffi::marina_last_error_message()
+    }
+
+    #[unsafe(no_mangle)]
+    unsafe extern "C" fn marina_free_string(ptr: *mut c_char) {
+        unsafe { mt_dataset::ffi::marina_free_string(ptr) }
+    }
+}
