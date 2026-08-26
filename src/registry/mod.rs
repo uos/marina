@@ -7,3 +7,4 @@ pub mod gdrive_auth;
 pub mod http;
 pub mod ssh;
 pub mod stub;
+mod transfer_progress;
