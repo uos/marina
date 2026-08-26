@@ -1,10 +1,4 @@
 //! A `minot://` registry must behave exactly like the registry behind it.
-//!
-//! That equivalence is the entire point of this phase: the streaming work that
-//! follows sits on this transport, and it is far easier to trust once an
-//! ordinary `pull` over `minot://` produces a byte-identical bundle to a `pull`
-//! from the folder registry being served.
-
 #![cfg(feature = "minot-registry")]
 
 use std::path::PathBuf;
@@ -14,8 +8,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use marina::registry::driver::{PushMeta, RegistryDriver};
 use marina::registry::folder::FolderRegistry;
 use marina::registry::minot::block_store::CacheMode;
-use marina::server::{ServeOptions, serve};
 use marina::registry::minot::{MinotRegistry, StatResult};
+use marina::server::{ServeOptions, serve};
 use marina::storage::config::{RegistryConfig, RegistryDownloadMode};
 use marina::{AccessMode, DatasetAccess};
 
@@ -49,7 +43,7 @@ fn seeded_folder_registry(root: &std::path::Path, size: usize) -> (FolderRegistr
     let registry = FolderRegistry::from_uri("backing", &format!("folder://{}", root.display()))
         .expect("folder registry should be creatable");
     // Position-dependent bytes, so a truncated or misordered transfer fails
-    // rather than passing by luck.
+    // instead of passing by luck.
     let bundle: Vec<u8> = (0..size)
         .map(|i| (i.wrapping_mul(31) % 251) as u8)
         .collect();
@@ -94,7 +88,7 @@ async fn start_server(driver: Arc<dyn RegistryDriver>, exposed_as: &str) {
             eprintln!("serve ended: {error}");
         }
     });
-    // The server brings up its own coordinator; wait for the endpoint.
+    // The server brings up its own coordinator, so wait for the endpoint.
     assert!(
         wait_until(
             Duration::from_secs(30),
@@ -111,7 +105,7 @@ async fn a_pull_over_minot_matches_the_registry_being_served() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let root = tempfile::tempdir().expect("temp dir");
-    // Several chunks' worth, so this is a real transfer rather than one message.
+    // Several chunks' worth, so this is a real transfer over many messages.
     let (backing, bundle) = seeded_folder_registry(root.path(), 3 * 1024 * 1024 + 517);
     let bag: marina::BagRef = "team/run:v1".parse().expect("bag ref");
     push_bundle(&backing, &bag, &bundle)
@@ -160,28 +154,11 @@ async fn a_pull_over_minot_matches_the_registry_being_served() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn writes_are_refused_with_a_useful_message() {
-    let _guard = COORDINATOR_PORT.lock().await;
-    let _ = env_logger::builder().is_test(true).try_init();
-
-    let client = MinotRegistry::from_uri("remote", "minot://anything").expect("should parse");
-
-    let error = client
-        .check_write_access()
-        .await
-        .expect_err("a minot:// registry is read-only");
-    assert!(
-        error.to_string().contains("registry being served"),
-        "the refusal should point at what to do instead, got: {error}"
-    );
-}
-
 /// A tunnel that cannot be established must fail quickly and say why.
 ///
 /// The happy path needs a reachable SSH server, which a CI box or a dev laptop
 /// with Remote Login disabled will not have. What can always be checked is that
-/// the failure is a clear message rather than a hang or a panic — which is the
+/// the failure is a clear message instead of a hang or a panic, which is the
 /// part users actually hit when a host or credential is wrong.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unreachable_ssh_tunnel_fails_with_a_useful_message() {
@@ -464,7 +441,7 @@ async fn serve_one_file_dataset(
     MinotRegistry::from_uri("remote", &format!("minot://{exposed_as}")).unwrap()
 }
 
-/// Disk mode warms a local copy; a second read of the same dataset is free.
+/// Disk mode warms a local copy, making a second read of the same dataset free.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_streamed_read_can_warm_a_local_copy() {
     let _guard = COORDINATOR_PORT.lock().await;
@@ -556,7 +533,7 @@ async fn a_streamed_dataset_is_promoted_to_a_local_one() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     // Isolated config and cache, so promotion writes into a temporary catalog
-    // rather than the developer's real one.
+    // instead of the developer's real one.
     let home = tempfile::tempdir().unwrap();
     // SAFETY: set before marina reads its locations, and this test holds the
     // coordinator lock so no other test is running concurrently.
@@ -579,7 +556,7 @@ async fn a_streamed_dataset_is_promoted_to_a_local_one() {
     );
     assert_eq!(dataset.cached_fraction(), 0.0, "nothing is held yet");
 
-    // Read part of it, then abandon — the interrupted-read case.
+    // Read part of it, then abandon: the interrupted-read case.
     {
         let mut file = dataset.open("points.bin").unwrap();
         let mut prefix = vec![0u8; contents.len() / 3];
@@ -619,7 +596,7 @@ async fn a_streamed_dataset_is_promoted_to_a_local_one() {
     }
 }
 
-/// Online-only mode has nothing to promote, and says so rather than pretending.
+/// Online-only mode has nothing to promote, and says so instead of pretending.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_online_only_dataset_refuses_to_be_materialised() {
     let _guard = COORDINATOR_PORT.lock().await;

@@ -246,9 +246,19 @@ impl RequestHandler {
         let materialize_root = self.materialize_root.clone();
         let temp_root = std::env::temp_dir();
         let cache_max_age = self.cache_max_age;
-        let plan = {
-            let _guard = self.cache_sweep_lock.write().await;
-            prepare_cache_sweep(&materialize_root, &temp_root, cache_max_age, &last_access)
+        // Never waits for the write side. `RwLock` here prefers writers, so a
+        // sweep that queued would block every reader behind it until it got in,
+        // and readers are the range reads a client is streaming. Housekeeping
+        // is not worth that: a skipped round costs an hour of a dataset staying
+        // cached, and anything expired now is still expired next time.
+        let plan = match self.cache_sweep_lock.try_write() {
+            Ok(_guard) => {
+                prepare_cache_sweep(&materialize_root, &temp_root, cache_max_age, &last_access)
+            }
+            Err(_) => {
+                log::debug!("marina serve: cache sweep skipped, a restore is in progress");
+                return;
+            }
         };
         let result = match plan {
             Ok(plan) => tokio::task::spawn_blocking(move || remove_sweep_paths(plan)).await,
@@ -362,17 +372,31 @@ impl RequestHandler {
         &self,
         bag: &mt_dataset::model::bag_ref::BagRef,
     ) -> Result<std::path::PathBuf, String> {
-        let _cache_guard = self.cache_sweep_lock.read().await;
         let ready = self.dataset_dir(bag).join("ready");
-        if ready.is_dir() {
-            return Ok(ready);
+        // The sweep guard is taken for the checks and for the install, never
+        // across the restore itself. Held for the whole restore it is held for
+        // as long as the dataset takes to fetch and unpack, which on a large
+        // one is minutes, and a sweep waiting for the write side then queues
+        // every later reader behind it. That looked exactly like a hang, on the
+        // hour, for as long as the restore ran.
+        //
+        // Nothing is exposed while the restore runs: it builds `.incoming` and
+        // only `rename`s it into place at the end, under the guard.
+        {
+            let _cache_guard = self.cache_sweep_lock.read().await;
+            if ready.is_dir() {
+                return Ok(ready);
+            }
         }
 
         let _guard = self.materialize_lock.lock().await;
         // Checked again under the lock: another request may have done it while
         // this one waited.
-        if ready.is_dir() {
-            return Ok(ready);
+        {
+            let _cache_guard = self.cache_sweep_lock.read().await;
+            if ready.is_dir() {
+                return Ok(ready);
+            }
         }
 
         log::info!("marina serve: materialising '{bag}' for range reads");
@@ -427,6 +451,9 @@ impl RequestHandler {
         .map_err(|error| format!("unpacking '{bag}' panicked: {error}"))?
         .map_err(|error| format!("could not unpack '{bag}': {error}"))?;
 
+        // Retaken only now, so the install cannot race a sweep renaming this
+        // dataset out from under it.
+        let _cache_guard = self.cache_sweep_lock.read().await;
         std::fs::rename(&incoming, &ready)
             .map_err(|error| format!("could not install '{bag}': {error}"))?;
         let _ = std::fs::write(parent.join(".last-access"), []);
