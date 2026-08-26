@@ -34,7 +34,7 @@ use mt_dataset::registry::minot::protocol::{
 /// (`DEFAULT_INFLIGHT_BLOCKS`) never queue behind each other, with room for the
 /// occasional control request alongside them, and low enough that one client
 /// cannot swamp the runtime.
-const MAX_CONCURRENT_REQUESTS: usize = 8;
+const MAX_CONCURRENT_REQUESTS: usize = 1;
 
 /// How a served registry is reached and what it is allowed to do.
 pub struct ServeOptions {
@@ -422,9 +422,13 @@ impl RequestHandler {
                     .suffix(".tar.gz")
                     .tempfile()
                     .map_err(|error| format!("could not stage '{bag}': {error}"))?;
-                let descriptor = self.driver.pull(bag, staging.path()).await.map_err(|error| {
-                    format!("could not read '{bag}' from the served registry: {error}")
-                })?;
+                let descriptor = self
+                    .driver
+                    .pull(bag, staging.path())
+                    .await
+                    .map_err(|error| {
+                        format!("could not read '{bag}' from the served registry: {error}")
+                    })?;
                 (staging.path().to_path_buf(), descriptor.packed_bytes)
             }
         };
@@ -623,7 +627,10 @@ impl RequestHandler {
         self.dataset_dir(bag).join(".push-incoming.bundle")
     }
 
-    fn packed_push_identity_path(&self, bag: &mt_dataset::model::bag_ref::BagRef) -> std::path::PathBuf {
+    fn packed_push_identity_path(
+        &self,
+        bag: &mt_dataset::model::bag_ref::BagRef,
+    ) -> std::path::PathBuf {
         self.dataset_dir(bag).join(".push-incoming.identity")
     }
 
@@ -797,7 +804,10 @@ impl RequestHandler {
         self.dataset_dir(bag).join(".write-incoming")
     }
 
-    async fn begin_write(&self, bag: mt_dataset::model::bag_ref::BagRef) -> Result<Response, String> {
+    async fn begin_write(
+        &self,
+        bag: mt_dataset::model::bag_ref::BagRef,
+    ) -> Result<Response, String> {
         self.ensure_writes_enabled()?;
         let _guard = self.write_lock.lock().await;
         let staging = self.write_staging_dir(&bag);
@@ -1018,7 +1028,10 @@ impl RequestHandler {
     /// The bundle is materialised into a temporary file first, because the
     /// backing driver's contract is "download to this path" and because the
     /// client is told the exact size up front so it can verify what it got.
-    async fn begin_pull(&self, bag: mt_dataset::model::bag_ref::BagRef) -> Result<Response, String> {
+    async fn begin_pull(
+        &self,
+        bag: mt_dataset::model::bag_ref::BagRef,
+    ) -> Result<Response, String> {
         let staging = tempfile::Builder::new()
             .prefix("marina-serve-")
             .suffix(".tar.gz")
