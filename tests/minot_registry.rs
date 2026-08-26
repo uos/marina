@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use marina::registry::driver::{PushMeta, RegistryDriver};
 use marina::registry::folder::FolderRegistry;
 use marina::registry::minot::block_store::CacheMode;
-use marina::registry::minot::server::{ServeOptions, serve};
+use marina::server::{ServeOptions, serve};
 use marina::registry::minot::{MinotRegistry, StatResult};
 use marina::storage::config::{RegistryConfig, RegistryDownloadMode};
 use marina::{AccessMode, DatasetAccess};
