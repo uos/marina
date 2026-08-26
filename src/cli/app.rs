@@ -536,7 +536,7 @@ fn complete_datasets(current: &std::ffi::OsStr) -> Vec<CompletionCandidate> {
         return vec![];
     };
 
-    // Local cached bags — disk only, no network.
+    // Local cached bags: disk only, no network.
     let mut candidates: Vec<CompletionCandidate> = marina
         .list_cached_bags()
         .into_iter()

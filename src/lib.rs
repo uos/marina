@@ -1,4 +1,4 @@
-//! Marina — a dataset manager for robotics.
+//! Marina: a dataset manager for robotics.
 //!
 //! The dataset kernel (config, cache, registry drivers, pull, and streaming)
 //! lives in [`mt_dataset`] so Minot and Marina can share it without either

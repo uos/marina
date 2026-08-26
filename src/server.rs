@@ -1,7 +1,7 @@
-//! `marina serve` — expose a local registry over a Minot network.
+//! `marina serve`: expose a local registry over a Minot network.
 //!
-//! The server is a thin adapter, deliberately. It holds an ordinary
-//! [`RegistryDriver`] — a folder, an SSH registry, anything already configured —
+//! The server is a thin adapter. It holds an ordinary
+//! [`RegistryDriver`] (a folder, an SSH registry, anything already configured)
 //! and answers requests by delegating to it. That is what makes a `minot://`
 //! registry follow the behavior of the registry behind it.
 //!
@@ -28,12 +28,20 @@ use mt_dataset::registry::minot::protocol::{
     WirePushMeta, service_topic, version_mismatch,
 };
 
+/// How many of one client's requests are answered at a time.
+///
+/// Enough that a streaming client's in-flight range reads
+/// (`DEFAULT_INFLIGHT_BLOCKS`) never queue behind each other, with room for the
+/// occasional control request alongside them, and low enough that one client
+/// cannot swamp the runtime.
+const MAX_CONCURRENT_REQUESTS: usize = 8;
+
 /// How a served registry is reached and what it is allowed to do.
 pub struct ServeOptions {
     /// Name clients use to address this registry. Also namespaces the topics.
     pub registry: String,
     /// Restrict Minot to this machine. True unless you have arranged transport
-    /// security yourself — see the module docs.
+    /// security yourself. See the module docs.
     pub local_only: bool,
     /// Chunking and window sizing for bundle transfers.
     pub flow: FlowConfig,
@@ -165,12 +173,23 @@ pub async fn serve(driver: Arc<dyn RegistryDriver>, options: ServeOptions) -> Re
         }
     });
 
-    ServiceServer::start(
+    // Concurrent, so one slow request does not hold up everything a client has
+    // queued behind it. Range reads are quick and would not care, but a cold
+    // `materialize` is a whole dataset restored and unpacked. Answering one
+    // request at a time means a client asking for anything else during that,
+    // even a `Stat`, gets nothing back until it finishes.
+    //
+    // Safe for the ordering this protocol needs: a client issues its staging,
+    // write, and commit requests one at a time and awaits each, so no two
+    // mutating requests are ever in flight together, and `write_lock` still
+    // keeps two *different* clients off one tag.
+    ServiceServer::start_concurrent(
         server,
         Arc::new(move |request| {
             let handler = Arc::clone(&handler);
             async move { handler.handle(request).await }
         }),
+        MAX_CONCURRENT_REQUESTS,
     )
     .await;
 
@@ -357,20 +376,35 @@ impl RequestHandler {
         }
 
         log::info!("marina serve: materialising '{bag}' for range reads");
-        let staging = tempfile::Builder::new()
-            .prefix("marina-materialize-")
-            .suffix(".tar.gz")
-            .tempfile()
-            .map_err(|error| format!("could not stage '{bag}': {error}"))?;
-        let descriptor = self
-            .driver
-            .pull(bag, staging.path())
-            .await
-            .map_err(|error| format!("could not read '{bag}' from the served registry: {error}"))?;
-        log::info!(
-            "marina serve: restored {} packed bytes for '{bag}', unpacking",
-            descriptor.packed_bytes
-        );
+        // A registry that keeps its bundle on this machine is read where it
+        // lies. Pulling it first would copy every byte into staging before any
+        // of the real work starts, and for a folder registry that copy is the
+        // single most expensive thing in this function.
+        //
+        // `staging` is bound for the whole scope on the transfer path: dropping
+        // a `NamedTempFile` deletes it, so it has to outlive the unpack. On the
+        // local path there is nothing to clean up, and the registry's own file
+        // must never be treated as ours to remove.
+        let staging;
+        let (bundle_path, packed_bytes) = match self.driver.local_bundle(bag) {
+            Some(path) => {
+                let bytes = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+                log::info!("marina serve: reading '{bag}' in place, no copy needed");
+                (path, bytes)
+            }
+            None => {
+                staging = tempfile::Builder::new()
+                    .prefix("marina-materialize-")
+                    .suffix(".tar.gz")
+                    .tempfile()
+                    .map_err(|error| format!("could not stage '{bag}': {error}"))?;
+                let descriptor = self.driver.pull(bag, staging.path()).await.map_err(|error| {
+                    format!("could not read '{bag}' from the served registry: {error}")
+                })?;
+                (staging.path().to_path_buf(), descriptor.packed_bytes)
+            }
+        };
+        log::info!("marina serve: restored {packed_bytes} packed bytes for '{bag}', unpacking");
 
         // Unpacked beside the destination and renamed, so an interrupted
         // materialisation never leaves a half-written tree that looks ready.
@@ -382,7 +416,7 @@ impl RequestHandler {
         std::fs::create_dir_all(&incoming)
             .map_err(|error| format!("could not prepare '{bag}': {error}"))?;
 
-        let staging_path = staging.path().to_path_buf();
+        let staging_path = bundle_path;
         let incoming_for_task = incoming.clone();
         // Unpacking is synchronous CPU and disk work. A blocking task keeps the
         // async worker available for other clients.
@@ -539,8 +573,8 @@ impl RequestHandler {
             .await
             .map_err(|error| format!("could not remove '{bag}' from backing registry: {error}"))?;
 
-        // The unpacked serving copy is a cache, not an independent dataset.
-        // Keeping it after the backing object is deleted would make the same
+        // The unpacked serving copy is only a cache of the backing object.
+        // Keeping it after that object is deleted would make the same
         // server continue to stream data that list/pull says no longer exists.
         let materialized = self.dataset_dir(&bag);
         if materialized.exists() {
