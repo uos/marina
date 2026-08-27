@@ -20,7 +20,7 @@ name = "marina"
 path = "src/main.rs"
 
 [features]
-default = ["osnabotics-default-registry", "db3"]
+default = ["osnabotics-default-registry", "db3", "gdrive"]
 osnabotics-default-registry = ["mt_dataset/osnabotics-default-registry"]
 db3 = ["mt_dataset/db3"]
 gdrive = ["mt_dataset/gdrive"]
@@ -61,13 +61,6 @@ flate2 = "1.1"
 env_logger = "0.11"
 rusqlite = { version = "0.40", features = ["bundled"] }
 tar = "0.4"
-
-[patch.crates-io]
-mt_dataset = { path = "../minot/mt_dataset" }
-mt_sea = { path = "../minot/mt_sea" }
-mt_flow = { path = "../minot/mt_flow" }
-mt_pubsub = { path = "../minot/mt_pubsub" }
-mt_service = { path = "../minot/mt_service" }
 
 [lints.clippy]
 collapsible_if = "allow"
@@ -122,3 +115,10 @@ bin-dir = "{ name }-{ version }/{ bin }{ binary-ext }"
 
 [package.metadata.multivers.x86_64]
 cpus = ["x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4", "raptorlake"]
+
+# [patch.crates-io]
+# mt_dataset = { path = "../minot/mt_dataset" }
+# mt_sea = { path = "../minot/mt_sea" }
+# mt_flow = { path = "../minot/mt_flow" }
+# mt_pubsub = { path = "../minot/mt_pubsub" }
+# mt_service = { path = "../minot/mt_service" }

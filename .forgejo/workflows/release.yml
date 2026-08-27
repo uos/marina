@@ -76,7 +76,7 @@ jobs:
           mkdir -p "dist/${ARCH}"
 
           # ------- RAW
-          cargo build --release
+          cargo build --release --features minot-registry
           cp target/release/marina dist/${ARCH}/
 
           # ------- completions (needed by deb assets)
@@ -119,7 +119,7 @@ jobs:
           ulimit -n 65536
           mkdir -p "dist/${ARCH}"
 
-          cargo build --target $TARGET --release --bin marina
+          cargo build --target $TARGET --release --bin marina --features minot-registry
           mv target/$TARGET/release/marina dist/${ARCH}/
 
       - name: Upload
@@ -222,7 +222,7 @@ jobs:
           mkdir -p "dist/${ARCH}"
 
           export RUSTFLAGS="-C target-feature=+crt-static"
-          cargo build --bin marina --release --target $TARGET
+          cargo build --bin marina --release --target $TARGET --features minot-registry
           mv target/$TARGET/release/marina dist/${ARCH}/
 
       - name: Upload
@@ -288,11 +288,11 @@ jobs:
 
           if [[ "$TARGET" == *apple-darwin* ]]; then
             # Native macOS runner: use Apple's linker, not cargo-zigbuild.
-            maturin build --manifest-path Cargo.toml --release --target-dir wheels
-            maturin build --manifest-path bindings/python/Cargo.toml --release --target-dir wheels
+            maturin build --manifest-path Cargo.toml --release --target-dir wheels --features minot-registry
+            maturin build --manifest-path bindings/python/Cargo.toml --release --target-dir wheels --features minot-registry
           else
-            maturin build --zig --manifest-path Cargo.toml --release --target-dir wheels --target "$TARGET"
-            maturin build --zig --manifest-path bindings/python/Cargo.toml --release --target-dir wheels --target "$TARGET"
+            maturin build --zig --manifest-path Cargo.toml --release --target-dir wheels --target "$TARGET" --features minot-registry
+            maturin build --zig --manifest-path bindings/python/Cargo.toml --release --target-dir wheels --target "$TARGET" --features minot-registry
           fi
 
       - name: Upload wheels
@@ -745,13 +745,13 @@ jobs:
           git config --global user.email "$(git log -1 --pretty=format:'%ae')"
           git config --global user.name "$(git log -1 --pretty=format:'%an')"
 
-          git clone git@github.com:uos/homebrew-marina.git homebrew-marina
-          mkdir -p homebrew-marina/Formula
-          cp /tmp/marina.rb homebrew-marina/Formula/marina.rb
-          cd homebrew-marina
+          git clone --depth 1 git@github.com:uos/homebrew-tools.git tap
+          mkdir -p tap/Formula
+          cp /tmp/marina.rb tap/Formula/marina.rb
+          cd tap
           git add Formula/marina.rb
-          git commit -m "marina ${VERSION}"
-          git push origin
+          git commit -m "marina ${VERSION}" || echo "No changes"
+          git push origin main
           shred -u ~/.ssh/tap_key || rm -f ~/.ssh/tap_key
 
   publish-crates:

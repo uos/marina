@@ -2946,6 +2946,8 @@ dependencies = [
 [[package]]
 name = "mt_coord"
 version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e2ca4e6b950a7af6239034a0d482ceab1dd54d2f16a0629716e38719e0589129"
 dependencies = [
  "anyhow",
  "fs2",
@@ -2960,6 +2962,8 @@ dependencies = [
 [[package]]
 name = "mt_dataset"
 version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1e7c2b348445bee0b2825a59a0e628268101c9ce8e75a5443cc3bce6358ed25"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3003,6 +3007,8 @@ dependencies = [
 [[package]]
 name = "mt_flow"
 version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7d96ec6805caaf6c4d45f8c16de6beadf0da985edfd3b9bb89a4939e1a48a67"
 dependencies = [
  "anyhow",
  "log",
@@ -3016,6 +3022,8 @@ dependencies = [
 [[package]]
 name = "mt_log"
 version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8685237e85598269d8c580cce01e95d7ce0e2c8109d444ce90792a10bbf5171b"
 dependencies = [
  "env_logger",
  "log",
@@ -3024,6 +3032,8 @@ dependencies = [
 [[package]]
 name = "mt_net"
 version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b8b9bd1e6bb6e2b611a8d8de694ecaa64bef5bbc8502336c326077fcae9d3c9"
 dependencies = [
  "anyhow",
  "rkyv",
@@ -3034,6 +3044,8 @@ dependencies = [
 [[package]]
 name = "mt_pubsub"
 version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b136af8cfac1abb7b71057c5c47a249b4b976ae0022915b679ae380686dd0145"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3052,6 +3064,8 @@ dependencies = [
 [[package]]
 name = "mt_scope"
 version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "343ef24ad750fa913b04b4378e6534e67e65d4372ce12092d18aa7e26cc228c6"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -3065,6 +3079,8 @@ dependencies = [
 [[package]]
 name = "mt_sea"
 version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec905076c83a876bc691ae323c2c56cfa0dd786be33d180db2a4b401b9e879bf"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3082,6 +3098,8 @@ dependencies = [
 [[package]]
 name = "mt_service"
 version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4cc75e46c11ee35ecc362d9dfc3e901f6800145ba600545ddfcdb67a7d7920a"
 dependencies = [
  "anyhow",
  "log",

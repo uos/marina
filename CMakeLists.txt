@@ -8,7 +8,7 @@ set(CARGO_TARGET_DIR "${CMAKE_CURRENT_BINARY_DIR}/cargo-target")
 
 add_custom_command(
   OUTPUT "${CARGO_TARGET_DIR}/release/marina"
-  COMMAND cargo build --release --target-dir "${CARGO_TARGET_DIR}"
+  COMMAND cargo build --release --features minot-registry --target-dir "${CARGO_TARGET_DIR}"
   WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
   COMMENT "Building marina with cargo"
 )
