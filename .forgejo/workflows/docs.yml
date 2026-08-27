@@ -24,7 +24,6 @@ jobs:
           install_options: --no-daemon
       - name: build pages
         run: |
-          bash ./ensure-minot-source.bash
           nix run .#buildDocs
       - uses: https://codeberg.org/git-pages/action@v2
         with:
