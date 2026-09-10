@@ -6,6 +6,7 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::engine::{ArgValueCompleter, CompletionCandidate};
 use log::warn;
 
+use crate::format::{format_bag_info, format_pushed_at, human_bytes};
 use mt_dataset::core::{CacheMirrorOptions, Marina, PullOptions, PushOptions, ResolveResult};
 use mt_dataset::io::mcap_transform::{McapChunkCompression, PointCloudCompressionMode};
 use mt_dataset::io::pack::ArchiveCompression;
@@ -35,7 +36,7 @@ struct Cli {
     #[arg(short = 'y', long = "yes", global = true)]
     yes: bool,
     #[command(subcommand)]
-    cmd: Commands,
+    cmd: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -119,7 +120,7 @@ struct MirrorCacheArgs {
     /// SSH jump host in user@host[:port] form
     #[arg(long)]
     proxy_jump: Option<String>,
-    /// SSH transport used by the self-contained fallback: native or openssh
+    /// SSH transport used by the self-contained fallback: openssh (default) or native
     #[arg(long)]
     ssh_transport: Option<String>,
     /// Remote Marina executable name or path
@@ -203,7 +204,7 @@ struct AddRegistryArgs {
     /// SSH jump host in user@host[:port] form. SSH registries also accept MARINA_SSH_PROXY_JUMP.
     #[arg(long)]
     proxy_jump: Option<String>,
-    /// SSH transport: native or openssh. SSH registries also accept MARINA_SSH_TRANSPORT.
+    /// SSH transport: openssh (default) or native. SSH registries also accept MARINA_SSH_TRANSPORT.
     #[arg(long)]
     ssh_transport: Option<String>,
 }
@@ -646,6 +647,23 @@ fn pick_registry(prompt: &str, items: &[(String, String)], yes: bool) -> Result<
     Ok(items[idx - 1].0.clone())
 }
 
+/// SSH registries that do not name a transport use OpenSSH.
+///
+/// The dataset kernel falls back to its own native client, but the system `ssh`
+/// binary reads the user's `~/.ssh/config` — host aliases, keys, agents, jump
+/// hosts — which is what a tool talking to lab machines is expected to do. A
+/// per-registry `ssh_transport` and an explicit `MARINA_SSH_TRANSPORT` both
+/// still win, so `native` stays one setting away.
+fn apply_default_ssh_transport() {
+    if std::env::var_os("MARINA_SSH_TRANSPORT").is_some() {
+        return;
+    }
+    // SAFETY: this runs at the top of the dispatch, before any registry driver,
+    // job thread, or cleanup handler exists, so nothing else can be reading the
+    // environment concurrently.
+    unsafe { std::env::set_var("MARINA_SSH_TRANSPORT", "openssh") };
+}
+
 fn is_interactive_shell() -> bool {
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
@@ -671,19 +689,17 @@ fn pick_pull_candidate(
         return Ok(None);
     }
     eprintln!("{}:", prompt);
-    let rows: Vec<[String; 9]> = items
+    let rows: Vec<[String; 8]> = items
         .iter()
         .enumerate()
         .map(|(i, (registry, bag, info))| {
-            let (hash, orig, packed, clouds, mcap, pushed) =
-                format_bag_info(info.as_ref(), time_display);
+            let (hash, size, clouds, mcap, pushed) = format_bag_info(info.as_ref(), time_display);
             [
                 (i + 1).to_string(),
                 bag.to_string(),
                 registry.clone(),
                 hash,
-                orig,
-                packed,
+                size,
                 clouds,
                 mcap,
                 pushed,
@@ -692,7 +708,7 @@ fn pick_pull_candidate(
         .collect();
 
     let headers = [
-        "IDX", "DATASET", "REGISTRY", "HASH", "ORIGINAL", "PACKED", "CLOUDS", "ARCHIVE", "PUSHED",
+        "IDX", "DATASET", "REGISTRY", "HASH", "SIZE", "CLOUDS", "ARCHIVE", "PUSHED",
     ];
     let mut widths = headers.map(|h| h.len());
     for row in &rows {
@@ -700,7 +716,7 @@ fn pick_pull_candidate(
             widths[i] = widths[i].max(cell.len());
         }
     }
-    let fmt_row = |cols: &[&str; 9]| {
+    let fmt_row = |cols: &[&str; 8]| {
         let mut s = String::new();
         for (i, col) in cols.iter().enumerate() {
             if i > 0 {
@@ -764,14 +780,13 @@ fn print_remote_detail_table(
         namespace: Option<String>,
         base_name: String,
         display_name: String,
-        rest_cols: [String; 7],
+        rest_cols: [String; 6],
     }
 
     let rows: Vec<Row> = all
         .into_iter()
         .map(|(registry, bag, info)| {
-            let (hash, orig, packed, clouds, mcap, pushed) =
-                format_bag_info(info.as_ref(), time_display);
+            let (hash, size, clouds, mcap, pushed) = format_bag_info(info.as_ref(), time_display);
             let full = bag.to_string();
             let display_name = match &bag.namespace {
                 Some(ns) => full
@@ -784,13 +799,13 @@ fn print_remote_detail_table(
                 namespace: bag.namespace.clone(),
                 base_name: bag.name.clone(),
                 display_name,
-                rest_cols: [registry, hash, orig, packed, clouds, mcap, pushed],
+                rest_cols: [registry, hash, size, clouds, mcap, pushed],
             }
         })
         .collect();
 
     let headers = [
-        "DATASET", "REGISTRY", "HASH", "ORIGINAL", "PACKED", "CLOUDS", "ARCHIVE", "PUSHED",
+        "DATASET", "REGISTRY", "HASH", "SIZE", "CLOUDS", "ARCHIVE", "PUSHED",
     ];
     let mut widths = headers.map(|h| h.len());
     for row in &rows {
@@ -806,10 +821,15 @@ fn print_remote_detail_table(
         }
     }
 
+    // Sizes read better flush right, under a right-aligned header.
+    const SIZE_COLUMN: usize = 3;
+
     // Print header row.
     let mut header_line = format!("{:<width$}", headers[0], width = widths[0]);
     for (i, h) in headers.iter().enumerate().skip(1) {
-        if i + 1 < headers.len() {
+        if i == SIZE_COLUMN {
+            header_line.push_str(&format!("  {:>width$}", h, width = widths[i]));
+        } else if i + 1 < headers.len() {
             header_line.push_str(&format!("  {:<width$}", h, width = widths[i]));
         } else {
             header_line.push_str(&format!("  {}", h));
@@ -917,7 +937,9 @@ fn print_remote_detail_table(
 
         let mut line = dataset_col;
         for (i, cell) in row.rest_cols.iter().enumerate() {
-            if i + 1 < row.rest_cols.len() {
+            if i + 1 == SIZE_COLUMN {
+                line.push_str(&format!("  {:>width$}", cell, width = widths[i + 1]));
+            } else if i + 1 < row.rest_cols.len() {
                 line.push_str(&format!("  {:<width$}", cell, width = widths[i + 1]));
             } else {
                 line.push_str(&format!("  {}", cell));
@@ -1023,13 +1045,28 @@ async fn pull_and_print(
 }
 
 async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
+    apply_default_ssh_transport();
     mt_dataset::cleanup::init();
     let prog = std::env::var("MARINA_PROG_NAME").unwrap_or_else(|_| "marina".to_string());
     let yes = cli.yes || raw_yes;
     let compression = config::load_compression_config()?;
+
+    // No subcommand: explore interactively when we own a terminal, otherwise
+    // behave like any other CLI and print the usage.
+    let Some(command) = cli.cmd else {
+        if is_interactive_shell() {
+            return crate::tui::run().await;
+        }
+        // `name` wants a 'static string and this path exits immediately.
+        let name: &'static str = Box::leak(prog.clone().into_boxed_str());
+        Cli::command().name(name).print_help()?;
+        println!();
+        std::process::exit(2);
+    };
+
     let mut marina = Marina::load()?;
 
-    match cli.cmd {
+    match command {
         Commands::Registry(cmd) => match cmd.cmd {
             RegistrySub::Add(args) => {
                 let kind = args
@@ -1917,8 +1954,7 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
             if let Some(command) = args.cmd {
                 match command {
                     CleanSubcommand::Cache(cache) => {
-                        let summary =
-                            crate::server::clean_streaming_cache(cache.max_age)?;
+                        let summary = crate::server::clean_streaming_cache(cache.max_age)?;
                         println!(
                             "removed {} streaming cache entries ({})",
                             summary.entries,
@@ -2298,111 +2334,6 @@ fn print_size_summary(title: &str, original_bytes: u64, packed_bytes: u64) {
     );
 }
 
-fn human_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut value = bytes as f64;
-    let mut unit = 0usize;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{} {}", bytes, UNITS[unit])
-    } else {
-        format!("{:.2} {}", value, UNITS[unit])
-    }
-}
-
-fn format_pushed_at(pushed_at: Option<u64>, display: TimeDisplay) -> String {
-    let Some(ts) = pushed_at else {
-        return "-".into();
-    };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    if display == TimeDisplay::Absolute {
-        // Format as YYYY-MM-DD using only the timestamp
-        let secs_per_day = 86400u64;
-        let days_since_epoch = ts / secs_per_day;
-        // Compute Gregorian date from days since 1970-01-01
-        let mut y = 1970u32;
-        let mut d = days_since_epoch as u32;
-        loop {
-            let days_in_year = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
-                366
-            } else {
-                365
-            };
-            if d < days_in_year {
-                break;
-            }
-            d -= days_in_year;
-            y += 1;
-        }
-        let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-        let month_days = [
-            31u32,
-            if leap { 29 } else { 28 },
-            31,
-            30,
-            31,
-            30,
-            31,
-            31,
-            30,
-            31,
-            30,
-            31,
-        ];
-        let mut m = 1u32;
-        for md in &month_days {
-            if d < *md {
-                break;
-            }
-            d -= md;
-            m += 1;
-        }
-        return format!("{:04}-{:02}-{:02}", y, m, d + 1);
-    }
-
-    let elapsed = now.saturating_sub(ts);
-    match elapsed {
-        0..=59 => format!("{}s ago", elapsed),
-        60..=3599 => format!("{}m ago", elapsed / 60),
-        3600..=86399 => format!("{}h ago", elapsed / 3600),
-        86400..=604799 => format!("{}d ago", elapsed / 86400),
-        604800..=2591999 => format!("{}w ago", elapsed / 604800),
-        2592000..=31535999 => format!("{}mo ago", elapsed / 2592000),
-        _ => format!("{}y ago", elapsed / 31536000),
-    }
-}
-
-fn format_bag_info(
-    info: Option<&BagInfo>,
-    time_display: TimeDisplay,
-) -> (String, String, String, String, String, String) {
-    match info {
-        None => (
-            "-".into(),
-            "-".into(),
-            "-".into(),
-            "-".into(),
-            "-".into(),
-            "-".into(),
-        ),
-        Some(i) => (
-            i.bundle_hash.clone().unwrap_or_else(|| "-".into()),
-            human_bytes(i.original_bytes),
-            human_bytes(i.packed_bytes),
-            i.pointcloud.clone().unwrap_or_else(|| "-".into()),
-            i.mcap_compression.clone().unwrap_or_else(|| "-".into()),
-            format_pushed_at(i.pushed_at, time_display),
-        ),
-    }
-}
-
 fn local_registry_data_path(uri: &str) -> PathBuf {
     if let Some(rest) = uri.strip_prefix("folder://") {
         PathBuf::from(rest)
@@ -2422,11 +2353,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ssh_transport_defaults_to_openssh_but_yields_to_the_environment() {
+        // SAFETY: single-threaded test, and the variable is restored below.
+        let previous = std::env::var("MARINA_SSH_TRANSPORT").ok();
+
+        unsafe { std::env::remove_var("MARINA_SSH_TRANSPORT") };
+        apply_default_ssh_transport();
+        assert_eq!(
+            std::env::var("MARINA_SSH_TRANSPORT").as_deref(),
+            Ok("openssh")
+        );
+
+        unsafe { std::env::set_var("MARINA_SSH_TRANSPORT", "native") };
+        apply_default_ssh_transport();
+        assert_eq!(
+            std::env::var("MARINA_SSH_TRANSPORT").as_deref(),
+            Ok("native"),
+            "an explicit choice is not overwritten"
+        );
+
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("MARINA_SSH_TRANSPORT", value),
+                None => std::env::remove_var("MARINA_SSH_TRANSPORT"),
+            }
+        }
+    }
+
+    #[test]
+    fn bare_invocation_parses_without_a_subcommand() {
+        let cli = Cli::try_parse_from(["marina"]).expect("bare marina should parse");
+
+        assert!(
+            cli.cmd.is_none(),
+            "no subcommand means the interactive explorer"
+        );
+    }
+
+    #[test]
     fn push_source_argument_is_optional() {
         let cli = Cli::try_parse_from(["marina", "push", "demo:v1"])
             .expect("push without SOURCE should parse");
 
-        let Commands::Push(args) = cli.cmd else {
+        let Some(Commands::Push(args)) = cli.cmd else {
             panic!("expected push command");
         };
 
@@ -2439,7 +2408,7 @@ mod tests {
         let cli = Cli::try_parse_from(["marina", "push", "demo:v1", "/tmp/demo"])
             .expect("push with SOURCE should parse");
 
-        let Commands::Push(args) = cli.cmd else {
+        let Some(Commands::Push(args)) = cli.cmd else {
             panic!("expected push command");
         };
 
@@ -2460,7 +2429,7 @@ mod tests {
         ])
         .expect("cache mirror should parse");
 
-        let Commands::Mirror(args) = cli.cmd else {
+        let Some(Commands::Mirror(args)) = cli.cmd else {
             panic!("expected mirror command");
         };
         assert_eq!(args.target, "alice@example.org:2222");
@@ -2473,7 +2442,7 @@ mod tests {
     fn streaming_cache_clean_accepts_a_manual_age() {
         let cli = Cli::try_parse_from(["marina", "clean", "cache", "--max-age", "12h"])
             .expect("streaming cache clean should parse");
-        let Commands::Clean(args) = cli.cmd else {
+        let Some(Commands::Clean(args)) = cli.cmd else {
             panic!("expected clean command");
         };
         let CleanSubcommand::Cache(args) = args.cmd.expect("expected cache subcommand");
@@ -2485,7 +2454,7 @@ mod tests {
     fn import_can_start_a_live_registry_upload() {
         let cli = Cli::try_parse_from(["marina", "import", "team/run:v1", "--registry", "robot"])
             .unwrap();
-        let Commands::Import(args) = cli.cmd else {
+        let Some(Commands::Import(args)) = cli.cmd else {
             panic!("expected import command");
         };
         assert_eq!(args.target.to_string(), "team/run:v1");
@@ -2497,7 +2466,7 @@ mod tests {
     #[test]
     fn finalize_accepts_the_same_marina_reference() {
         let cli = Cli::try_parse_from(["marina", "finalize", "team/run:v1"]).unwrap();
-        let Commands::Finalize(args) = cli.cmd else {
+        let Some(Commands::Finalize(args)) = cli.cmd else {
             panic!("expected finalize command");
         };
         assert_eq!(args.target.to_string(), "team/run:v1");

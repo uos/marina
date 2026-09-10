@@ -271,7 +271,7 @@ impl RequestHandler {
             Ok(Ok(summary)) if summary.entries > 0 => log::info!(
                 "marina serve: removed {} expired streaming cache entries ({})",
                 summary.entries,
-                format_bytes(summary.bytes)
+                crate::format::human_bytes(summary.bytes)
             ),
             Ok(Ok(_)) => {}
             Ok(Err(error)) => log::warn!("marina serve: cache sweep failed: {error}"),
@@ -1255,18 +1255,6 @@ fn directory_size(root: &std::path::Path) -> u64 {
         .filter(|metadata| metadata.is_file())
         .map(|metadata| metadata.len())
         .sum()
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const GIB: u64 = 1024 * 1024 * 1024;
-    const MIB: u64 = 1024 * 1024;
-    if bytes >= GIB {
-        format!("{:.1} GiB", bytes as f64 / GIB as f64)
-    } else if bytes >= MIB {
-        format!("{:.1} MiB", bytes as f64 / MIB as f64)
-    } else {
-        format!("{bytes} bytes")
-    }
 }
 
 /// Resolve a client-supplied relative path inside `root`, refusing anything

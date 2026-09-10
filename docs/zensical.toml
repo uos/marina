@@ -26,6 +26,7 @@ nav = [
     "features/shell/completions.md",
   ]},
   {"Usage" = [
+    "features/tui.md",
     "features/registries.md",
     "features/datasets.md",
     "features/compression.md",

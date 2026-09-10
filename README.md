@@ -36,6 +36,9 @@ ros2 bag push my-run:v1 /path/to/bag/ --registry team_ssh
 Marina supports Linux and MacOS environments without additional requirements. Just [install](https://stelzo.codeberg.page/marina/installation/packages.html) and run.
 
 ```bash
+# Explore datasets and registries interactively.
+marina
+
 # Pull a dataset from any configured registry.
 marina pull dlg_feldtage_24:cut
 

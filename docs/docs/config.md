@@ -58,7 +58,7 @@ Each block inside `registries { }` defines a storage backend. The block name is 
 | `kind` | no | Explicit backend type, inferred from the URI scheme when omitted |
 | `auth_env` | no | Name of the environment variable holding credentials at runtime (SSH key path/password or GDrive service-account JSON) |
 | `proxy_jump` | no | SSH jump host in `user@host[:port]` form. SSH registries can also read `MARINA_SSH_PROXY_JUMP` |
-| `ssh_transport` | no | SSH implementation: `native` (default) or `openssh`. SSH registries can also read `MARINA_SSH_TRANSPORT` |
+| `ssh_transport` | no | SSH implementation: `openssh` (default) shells out to the system `ssh`, so `~/.ssh/config` applies; `native` uses Marina's built-in client. SSH registries can also read `MARINA_SSH_TRANSPORT` |
 
 ### URI Schemes
 

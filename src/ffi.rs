@@ -1,7 +1,9 @@
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char, c_void};
 
-use mt_dataset::{Marina, ProgressEvent, ProgressReporter, ProgressSink, ResolveResult, WriterProgress};
+use mt_dataset::{
+    Marina, ProgressEvent, ProgressReporter, ProgressSink, ResolveResult, WriterProgress,
+};
 
 pub const MARINA_RESOLVE_ERROR: i32 = -1;
 pub const MARINA_RESOLVE_LOCAL: i32 = 0;

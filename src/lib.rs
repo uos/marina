@@ -10,6 +10,8 @@ pub use mt_dataset::*;
 
 pub mod cli;
 pub mod ffi;
+pub mod format;
+pub mod tui;
 
 #[cfg(feature = "minot-registry")]
 pub mod server;
