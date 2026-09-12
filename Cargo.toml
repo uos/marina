@@ -6,7 +6,7 @@ include = ["**/*.rs", "**/*.md", "**/Cargo.toml", "**/LICENSE*", "default.rl"]
 keywords = ["robotics"]
 license = "MIT OR Apache-2.0"
 repository = "https://codeberg.org/stelzo/marina"
-authors = ["Christopher Sieh <stelzo@steado.de>"]
+authors = ["stelzo <stelzo@steado.de>"]
 description = "A dataset manager for robotics to organize, share, and discover datasets and metadata across storage backends."
 rust-version = "1.89.0"
 
@@ -127,9 +127,9 @@ bin-dir = "{ name }-{ version }/{ bin }{ binary-ext }"
 [package.metadata.multivers.x86_64]
 cpus = ["x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4", "raptorlake"]
 
-# [patch.crates-io]
-# mt_dataset = { path = "../minot/mt_dataset" }
-# mt_sea = { path = "../minot/mt_sea" }
-# mt_flow = { path = "../minot/mt_flow" }
-# mt_pubsub = { path = "../minot/mt_pubsub" }
-# mt_service = { path = "../minot/mt_service" }
+[patch.crates-io]
+mt_dataset = { path = "../minot/mt_dataset" }
+mt_sea = { path = "../minot/mt_sea" }
+mt_flow = { path = "../minot/mt_flow" }
+mt_pubsub = { path = "../minot/mt_pubsub" }
+mt_service = { path = "../minot/mt_service" }
