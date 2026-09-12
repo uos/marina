@@ -8,13 +8,13 @@
 
 site_name = "Marina"
 site_description = "The missing ROS 2 bag and dataset registry."
-site_author = "Christopher Sieh"
+site_author = "stelzo"
 
 repo_url = "https://github.com/uos/marina"
 repo_name = "uos/marina"
 
 copyright = """
-Copyright &copy; 2026 Christopher Sieh
+Copyright &copy; 2026 stelzo
 """
 
 nav = [
