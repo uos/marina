@@ -65,6 +65,7 @@ enum Commands {
     CompleteRefresh,
     #[command(hide = true)]
     CacheReceive(CacheReceiveCmd),
+    /// Install shell completions, or print them for a specific shell.
     Completions(CompletionsArgs),
     /// Serve a configured registry over a Minot network
     #[cfg(feature = "minot-registry")]
@@ -381,7 +382,8 @@ struct InspectArgs {
 
 #[derive(Args)]
 struct CompletionsArgs {
-    shell: clap_complete::Shell,
+    /// Print a completion script for this shell instead of installing one.
+    shell: Option<clap_complete::Shell>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -2152,15 +2154,19 @@ async fn run_parsed(cli: Cli, raw_yes: bool) -> Result<()> {
             }
         }
         Commands::Completions(args) => {
-            // Safety: single-threaded at this point, no other env readers active
-            unsafe { std::env::set_var("COMPLETE", args.shell.to_string()) };
-            let prog_name: &'static str = match std::env::var("MARINA_PROG_NAME") {
-                Ok(s) => Box::leak(s.into_boxed_str()),
-                Err(_) => "marina",
-            };
-            clap_complete::CompleteEnv::with_factory(|| Cli::command().name(prog_name))
-                .completer(prog_name)
-                .complete();
+            if let Some(shell) = args.shell {
+                // Safety: single-threaded at this point, no other env readers active
+                unsafe { std::env::set_var("COMPLETE", shell.to_string()) };
+                let prog_name: &'static str = match std::env::var("MARINA_PROG_NAME") {
+                    Ok(s) => Box::leak(s.into_boxed_str()),
+                    Err(_) => "marina",
+                };
+                clap_complete::CompleteEnv::with_factory(|| Cli::command().name(prog_name))
+                    .completer(prog_name)
+                    .complete();
+            } else {
+                crate::completions::install("marina")?;
+            }
         }
         #[cfg(feature = "minot-registry")]
         Commands::Serve(args) => {

@@ -10,34 +10,34 @@ site_name = "Marina"
 site_description = "The missing ROS 2 bag and dataset registry."
 site_author = "stelzo"
 
-repo_url = "https://github.com/uos/marina"
-repo_name = "uos/marina"
+repo_url = "https://codeberg.org/stelzo/marina"
+repo_name = "stelzo/marina"
 
 copyright = """
 Copyright &copy; 2026 stelzo
 """
 
 nav = [
-  {"Home" = "index.md"},
-  {"Installation" = [
+  { "Home" = "index.md" },
+  { "Installation" = [
     "installation/ros.md",
     "installation/packages.md",
     "installation/archives.md",
     "features/shell/completions.md",
-  ]},
-  {"Usage" = [
+  ] },
+  { "Usage" = [
     "features/tui.md",
     "features/registries.md",
     "features/datasets.md",
     "features/compression.md",
     "features/ci.md",
-  ]},
-  {"Configuration" = "config.md"},
-  {"Libraries" = [
+  ] },
+  { "Configuration" = "config.md" },
+  { "Libraries" = [
     "libraries/python.md",
     "libraries/c.md",
-    {"Rust" = "https://docs.rs/marina"},
-  ]},
+    { "Rust" = "https://docs.rs/marina" },
+  ] },
 ]
 
 [project.theme]
@@ -48,25 +48,25 @@ nav = [
 language = "en"
 
 features = [
-    "announce.dismiss",
-    "content.code.annotate",
-    "content.code.copy",
-    "content.code.select",
-    "content.footnote.tooltips",
-    "content.tabs.link",
-    "content.tooltips",
-    "navigation.expand",
-    "navigation.footer",
-    "navigation.indexes",
-    "navigation.instant",
-    "navigation.instant.prefetch",
-    "navigation.path",
-    "navigation.sections",
-    "navigation.tabs",
-    "navigation.top",
-    "navigation.tracking",
-    "search.highlight",
-    "toc.integrate",
+  "announce.dismiss",
+  "content.code.annotate",
+  "content.code.copy",
+  "content.code.select",
+  "content.footnote.tooltips",
+  "content.tabs.link",
+  "content.tooltips",
+  "navigation.expand",
+  "navigation.footer",
+  "navigation.indexes",
+  "navigation.instant",
+  "navigation.instant.prefetch",
+  "navigation.path",
+  "navigation.sections",
+  "navigation.tabs",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+  "toc.integrate",
 ]
 
 [[project.theme.palette]]

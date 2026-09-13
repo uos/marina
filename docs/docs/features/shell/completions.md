@@ -8,8 +8,15 @@ Once installed, pressing <kbd>Tab</kbd> expands subcommands, flags, and dataset 
 
 ## Setup
 
+To detect the current shell and install self-refreshing completions for the current user, run:
 
-When installed from source, manual binary installation or a non-supporting install method, you can setup completions using the downloaded binary as follows.
+~~~bash
+marina completions
+~~~
+
+Restart the shell afterward. This supports Bash, Zsh, Fish, Elvish, and PowerShell.
+
+For packaging, a system-wide installation, or an unsupported installer, pass the shell explicitly to print a completion script:
 
 !!! warning "No Completions for ROS 2"
 
@@ -88,4 +95,3 @@ You can also trigger a manual refresh at any time:
 ~~~bash
 marina complete-refresh &
 ~~~
-

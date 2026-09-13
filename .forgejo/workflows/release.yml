@@ -757,6 +757,7 @@ jobs:
   publish-crates:
     needs:
       - release
+      - publish-ppa
     runs-on: ubuntu-dev-resolute
     steps:
       - uses: actions/checkout@v4

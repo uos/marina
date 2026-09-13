@@ -9,6 +9,7 @@
 pub use mt_dataset::*;
 
 pub mod cli;
+mod completions;
 pub mod ffi;
 pub mod format;
 pub mod tui;
