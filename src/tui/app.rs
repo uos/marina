@@ -380,6 +380,9 @@ pub struct App {
     pub settings_selected: usize,
     pub modal: Option<Modal>,
     pub tick: usize,
+    /// Kept alive for as long as the app runs: on X11/Wayland the clipboard
+    /// contents vanish as soon as the owning `Clipboard` handle is dropped.
+    clipboard: Option<arboard::Clipboard>,
 }
 
 impl App {
@@ -419,6 +422,7 @@ impl App {
             settings_selected: 0,
             modal: None,
             tick: 0,
+            clipboard: None,
         };
         app.rebuild_rows();
         app.refresh_all_registries();
@@ -553,9 +557,10 @@ impl App {
                 self.rebuild_rows();
             }
             JobOutcome::Resolved { target, path } => {
-                self.deferred_stdout = Some(path.display().to_string());
-                self.status = format!("{target} -> {}", path.display());
-                self.should_quit = true;
+                self.status = match self.copy_to_clipboard(&path.display().to_string()) {
+                    Ok(()) => format!("{target} -> {} (copied to clipboard)", path.display()),
+                    Err(err) => format!("failed to copy {} to clipboard: {err}", path.display()),
+                };
             }
             JobOutcome::Message { text, refresh } => {
                 self.status = text;
@@ -946,7 +951,8 @@ impl App {
                 );
             }
             KeyCode::Char('s') => self.search_remote(),
-            KeyCode::Enter => self.resolve_selected(),
+            KeyCode::Enter => self.copy_selected_identifier(),
+            KeyCode::Char('o') => self.resolve_selected(),
             KeyCode::Char('p') => self.pull_form(),
             KeyCode::Char('P') => self.push_form(),
             KeyCode::Char('I') => self.import_form(),
@@ -1142,6 +1148,32 @@ impl App {
         self.files_key = Some(key);
     }
 
+    fn copy_to_clipboard(&mut self, text: &str) -> anyhow::Result<()> {
+        if self.clipboard.is_none() {
+            self.clipboard = Some(arboard::Clipboard::new()?);
+        }
+        self.clipboard
+            .as_mut()
+            .expect("just initialized")
+            .set_text(text)?;
+        Ok(())
+    }
+
+    /// Copies the selected dataset's full identifier, e.g. for pasting into
+    /// `marina pull <target>` elsewhere.
+    fn copy_selected_identifier(&mut self) {
+        let Some(row) = self.selected_row() else {
+            return;
+        };
+        let target = row.key.clone();
+        self.status = match self.copy_to_clipboard(&target) {
+            Ok(()) => format!("copied {target} to clipboard"),
+            Err(err) => format!("failed to copy {target} to clipboard: {err}"),
+        };
+    }
+
+    /// Resolves the selected dataset to its local path and copies that path
+    /// to the clipboard once the job completes, without quitting the TUI.
     fn resolve_selected(&mut self) {
         let Some(row) = self.selected_row() else {
             return;

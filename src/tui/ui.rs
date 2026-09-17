@@ -638,14 +638,20 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         Span::raw(truncate(first_line(&app.status), area.width as usize / 2))
     };
 
+    let hint = if app.screen == Screen::Datasets && app.focus == Focus::Main {
+        "⏎ copy · ? help · / filter · r refresh · q quit"
+    } else {
+        "? help · / filter · r refresh · q quit"
+    };
+
     let columns = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(10), Constraint::Length(46)])
+        .constraints([Constraint::Min(10), Constraint::Length(54)])
         .split(area);
     frame.render_widget(Paragraph::new(Line::from(left)), columns[0]);
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            "? help · / filter · r refresh · q quit",
+            hint,
             Style::default().fg(Color::DarkGray),
         )))
         .alignment(Alignment::Right),
@@ -860,7 +866,7 @@ fn help_lines() -> Vec<Line<'static>> {
         "datasets  L = in the local cache · R = in a registry (which one is in REGISTRY)",
         "          ↑/↓ move · / filter · l cycle all/local/remote · s search registries",
         "          d hide duplicate registries · ^f/^b page · ^d/^u half page · g/G ends",
-        "          ⏎ resolve and print the path on exit",
+        "          ⏎ copy the dataset's identifier · o resolve it and copy its local path",
         "          p pull · P push · I import · e export · x remove · M mirror cache over ssh",
         "          C clean the cache",
         "",
@@ -872,9 +878,6 @@ fn help_lines() -> Vec<Line<'static>> {
         "jobs      the dock under the detail pane lists only what is running;",
         "          ⏎ opens its log, x detaches it",
         "          J lists every job this session ran, with its log",
-        "",
-        "Every registry call runs in the background: a slow SSH or Drive registry",
-        "only spins on its own row, the rest of the interface stays live.",
     ]
     .into_iter()
     .map(Line::from)

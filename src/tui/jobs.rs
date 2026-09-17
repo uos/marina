@@ -478,7 +478,10 @@ async fn execute(id: JobId, kind: JobKind, tx: &UnboundedSender<JobEvent>) -> Re
             })
         }
         JobKind::RegistryAuth { name } => registry_auth(&marina, &name, id, tx).await,
-        JobKind::Resolve { target, registry } => {
+        JobKind::Resolve {
+            target,
+            registry,
+        } => {
             let resolved = marina.resolve_target(&target, registry.as_deref()).await?;
             match resolved {
                 ResolveResult::LocalPath(path) | ResolveResult::Cached(path) => {
