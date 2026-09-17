@@ -4,7 +4,8 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
 use ratatui::widgets::TableState;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -354,6 +355,9 @@ pub struct App {
     pub table_state: TableState,
     /// Rows the dataset table last had room for, so a page key moves a screen.
     pub viewport_rows: usize,
+    /// The dataset table's on-screen rect, set every frame in `ui::draw_datasets`
+    /// so a mouse click can be mapped back to a row in `visible`.
+    pub dataset_table_area: Rect,
     pub filter: String,
     pub filter_editing: bool,
     pub scope: Scope,
@@ -402,6 +406,7 @@ impl App {
             visible: Vec::new(),
             table_state: TableState::default(),
             viewport_rows: 10,
+            dataset_table_area: Rect::default(),
             filter: String::new(),
             filter_editing: false,
             scope: Scope::default(),
@@ -731,12 +736,21 @@ impl App {
                 .then_with(|| a.base_name.cmp(&b.base_name))
                 .then_with(|| a.key.cmp(&b.key))
         });
+        // Captured against the *old* `self.rows`/`self.visible`, before they
+        // are replaced below — `apply_filter_keeping` must not re-derive this
+        // itself, since by then `self.rows` already holds the rebuilt list
+        // and the old selection index would resolve to a different dataset.
+        let previous = self.selected_row().map(|row| row.key.clone());
         self.rows = rows;
-        self.apply_filter();
+        self.apply_filter_keeping(previous);
     }
 
     pub fn apply_filter(&mut self) {
         let previous = self.selected_row().map(|row| row.key.clone());
+        self.apply_filter_keeping(previous);
+    }
+
+    fn apply_filter_keeping(&mut self, previous: Option<String>) {
         let pattern = self.filter.trim().to_lowercase();
         let matching: Vec<usize> = self
             .rows
@@ -836,6 +850,46 @@ impl App {
     }
 
     // -------------------------------------------------------------- input
+
+    /// Wheel scrolling and click-to-select on the dataset explorer. Anything
+    /// else (a modal open, the filter being edited, another screen, or a
+    /// click outside the dataset table itself) is ignored.
+    pub fn on_mouse(&mut self, mouse: MouseEvent) {
+        if self.modal.is_some() || self.filter_editing || self.screen != Screen::Datasets {
+            return;
+        }
+        match mouse.kind {
+            MouseEventKind::ScrollDown => self.move_selection(1),
+            MouseEventKind::ScrollUp => self.move_selection(-1),
+            MouseEventKind::Down(MouseButton::Left) => self.click_dataset_row(mouse.column, mouse.row),
+            _ => {}
+        }
+    }
+
+    /// Selects and copies the dataset under `(column, row)`, if any lands on
+    /// one; a click on a heading, a spacer, or outside the table is a no-op.
+    fn click_dataset_row(&mut self, column: u16, row: u16) {
+        let area = self.dataset_table_area;
+        let inside = column >= area.x
+            && column < area.x + area.width
+            && row >= area.y
+            && row < area.y + area.height;
+        if !inside {
+            return;
+        }
+        // One row of border, one of header, above the table body.
+        let body_top = area.y + 2;
+        if row < body_top {
+            return;
+        }
+        let clicked = self.table_state.offset() + (row - body_top) as usize;
+        let Some(VisibleRow::Dataset { .. }) = self.visible.get(clicked) else {
+            return;
+        };
+        self.table_state.select(Some(clicked));
+        self.focus = Focus::Main;
+        self.copy_selected_identifier();
+    }
 
     pub fn on_key(&mut self, key: KeyEvent) {
         if self.modal.is_some() {
@@ -1148,7 +1202,14 @@ impl App {
         self.files_key = Some(key);
     }
 
+    /// Under tmux, `arboard` usually can't reach a real X11/Wayland clipboard
+    /// (no display, or a stale one left over from an earlier attach), so we
+    /// copy via an OSC 52 escape sequence instead, which the outer terminal
+    /// emulator handles directly regardless of tmux or SSH.
     fn copy_to_clipboard(&mut self, text: &str) -> anyhow::Result<()> {
+        if std::env::var_os("TMUX").is_some() {
+            return osc52_copy(text);
+        }
         if self.clipboard.is_none() {
             self.clipboard = Some(arboard::Clipboard::new()?);
         }
@@ -1796,6 +1857,26 @@ fn supersedes(previous: &str, next: &str) -> bool {
             .join(" ")
     };
     head(previous) == head(next)
+}
+
+/// Copies `text` to the system clipboard via tmux's own `set-buffer -w`,
+/// which forwards it to the attached terminal using an OSC 52 escape
+/// sequence. This works over SSH and does not depend on tmux (or the remote
+/// host) having a working X11/Wayland display.
+///
+/// We shell out to tmux rather than crafting the DCS passthrough sequence
+/// ourselves: tmux already knows how to reach the attached client's terminal
+/// correctly (respecting `set-clipboard`), and a hand-rolled escape sequence
+/// written directly to our own stdout is not reliably delivered while
+/// ratatui/crossterm own the terminal.
+fn osc52_copy(text: &str) -> anyhow::Result<()> {
+    use std::process::Command;
+
+    let status = Command::new("tmux")
+        .args(["set-buffer", "-w", text])
+        .status()?;
+    anyhow::ensure!(status.success(), "tmux set-buffer -w failed: {status}");
+    Ok(())
 }
 
 /// Files under a cached dataset, largest first, capped so a bag with thousands

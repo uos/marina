@@ -6,7 +6,7 @@ mod terminal;
 mod ui;
 
 use anyhow::Result;
-use crossterm::event::{Event, KeyEventKind};
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -39,11 +39,15 @@ pub async fn run() -> Result<()> {
 
     let mut screen = Terminal::new(CrosstermBackend::new(writer))?;
     enable_raw_mode()?;
-    crossterm::execute!(screen.backend_mut(), EnterAlternateScreen)?;
+    crossterm::execute!(screen.backend_mut(), EnterAlternateScreen, EnableMouseCapture)?;
 
     let result = event_loop(&mut screen, app, rx).await;
 
-    let _ = crossterm::execute!(screen.backend_mut(), LeaveAlternateScreen);
+    let _ = crossterm::execute!(
+        screen.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    );
     let _ = screen.show_cursor();
     let _ = disable_raw_mode();
     // Hands stdout back before anything is printed on it.
@@ -63,7 +67,7 @@ fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let mut writer = terminal::emergency_writer();
-        let _ = crossterm::execute!(writer, LeaveAlternateScreen);
+        let _ = crossterm::execute!(writer, DisableMouseCapture, LeaveAlternateScreen);
         let _ = disable_raw_mode();
         previous(info);
     }));
@@ -110,6 +114,7 @@ async fn event_loop(
         tokio::select! {
             event = events.recv() => match event {
                 Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => app.on_key(key),
+                Some(Ok(Event::Mouse(mouse))) => app.on_mouse(mouse),
                 Some(Ok(_)) => {}
                 Some(Err(error)) => return Err(error.into()),
                 None => break,

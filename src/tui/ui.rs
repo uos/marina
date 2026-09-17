@@ -227,6 +227,7 @@ fn draw_datasets(frame: &mut Frame, area: Rect, app: &mut App) {
 
     // Rows minus the border and the header, so page keys move a real screen.
     app.viewport_rows = area.height.saturating_sub(3) as usize;
+    app.dataset_table_area = area;
     frame.render_stateful_widget(table, area, &mut app.table_state);
 }
 
