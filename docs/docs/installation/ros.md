@@ -4,7 +4,7 @@ Marina integrates seamlessly with the ROS 2 toolchain by extending the `ros2 bag
 
 ## Binaries
 
-Pre-built ROS packages are available through the [UOS Robotics PPA](https://codeberg.org/uos-robotics/ppa/src/branch/pages/README.md).
+Pre-built ROS packages are available through the [steado PPA](https://ppa.steado.tech/).
 
 After setting up the PPA, install the package for your ROS distribution:
 

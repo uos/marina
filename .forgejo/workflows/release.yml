@@ -442,7 +442,7 @@ jobs:
 
           ### Artifacts
           - **tar.gz** archives for Linux (noble, jammy, resolute, musl) and macOS (amd64, arm64); target-triple archives for \`cargo-binstall\`
-          - **.deb** packages published to [PPA](https://codeberg.org/uos-robotics/ppa)
+          - **.deb** packages published to [PPA](https://ppa.steado.tech)
           - **Python wheels** on PyPI and custom index" \
             ${ASSET_FLAGS}; then
 
@@ -481,7 +481,7 @@ jobs:
 
           ./update_mirror.bash
 
-          apt-get update -y && apt-get install -y ssh
+          apt-get update -y && apt-get install -y ssh rsync
 
           # ── Collect .deb files by series ──────────────────────
           mkdir -p staging/noble staging/jammy staging/resolute
@@ -513,94 +513,26 @@ jobs:
             echo "${v}: $(ls staging-whl/${v}/*.whl 2>/dev/null | wc -l) wheels"
           done
 
-          # ── Helper: build PEP 503 simple index ────────────────
-          build_pep503_index() {
-            local base_dir=$1  # e.g. whl/cpu
-
-            # Organise wheels into per-package subdirectories
-            for whl in "$base_dir"/*.whl; do
-              [ -f "$whl" ] || continue
-              # normalised package name: lowercase, [-_.] → -
-              local pkg
-              pkg=$(basename "$whl" | sed 's/-[0-9].*//' | tr '[:upper:]_.' '[:lower:]--' | sed 's/--*/-/g')
-              mkdir -p "$base_dir/$pkg"
-              mv "$whl" "$base_dir/$pkg/"
-            done
-
-            # Per-package index.html
-            for pkg_dir in "$base_dir"/*/; do
-              [ -d "$pkg_dir" ] || continue
-              {
-                echo '<!DOCTYPE html><html><body>'
-                for whl in "$pkg_dir"/*.whl; do
-                  [ -f "$whl" ] || continue
-                  local fname hash
-                  fname=$(basename "$whl")
-                  hash=$(sha256sum "$whl" | awk '{print $1}')
-                  echo "<a href=\"${fname}#sha256=${hash}\">${fname}</a><br/>"
-                done
-                echo '</body></html>'
-              } > "$pkg_dir/index.html"
-            done
-
-            # Root index.html (lists packages)
-            {
-              echo '<!DOCTYPE html><html><body>'
-              for pkg_dir in "$base_dir"/*/; do
-                [ -d "$pkg_dir" ] || continue
-                local pkg_name
-                pkg_name=$(basename "$pkg_dir")
-                echo "<a href=\"${pkg_name}/\">${pkg_name}</a><br/>"
-              done
-              echo '</body></html>'
-            } > "$base_dir/index.html"
-          }
-
-          # ── Push to PPA git repo ──────────────────────────────
-          mkdir -p ~/.ssh
-          printf '%s\n' "$PPA_DEPLOY_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan codeberg.org >> ~/.ssh/known_hosts 2>/dev/null
-          export GIT_SSH_COMMAND='ssh -i ~/.ssh/deploy_key -o UserKnownHostsFile=~/.ssh/known_hosts -o StrictHostKeyChecking=yes'
-
-          git clone --depth 1 --filter=blob:none --sparse ssh://git@codeberg.org/uos-robotics/ppa.git ppa
-          cd ppa
-          git sparse-checkout init --cone
-          git sparse-checkout set \
-            ubuntu/pool/main/resolute \
-            ubuntu/pool/main/noble \
-            ubuntu/pool/main/jammy \
-            whl/cpu \
-            bin
-
-          # Copy debs
+          # ── Upload layout expected by the PPA server ──────────
+          mkdir -p upload/bin upload/whl/cpu
           for series in resolute noble jammy; do
-            mkdir -p "ubuntu/pool/main/${series}"
-            cp ../staging/${series}/*.deb "ubuntu/pool/main/${series}/" 2>/dev/null || true
+            mkdir -p "upload/ubuntu/pool/main/${series}"
+            cp staging/${series}/*.deb "upload/ubuntu/pool/main/${series}/" 2>/dev/null || true
           done
+          cp staging-whl/cpu/*.whl upload/whl/cpu/ 2>/dev/null || true
+          find "dl/release-tarballs" -name 'marina-*-macos-*.tar.gz' -exec cp {} upload/bin/ \; 2>/dev/null || true
+          find "dl/release-tarballs" -name 'marina-*-linux-musl-*.tar.gz' -exec cp {} upload/bin/ \; 2>/dev/null || true
 
-          # Copy wheels and build PEP 503 indices
-          for variant in cpu; do
-            mkdir -p "whl/${variant}"
-            cp ../staging-whl/${variant}/*.whl "whl/${variant}/" 2>/dev/null || true
-            build_pep503_index "whl/${variant}"
-          done
-
-          # Copy macOS and musl tarballs
-          mkdir -p bin
-          find "../dl/release-tarballs" -name 'marina-*-macos-*.tar.gz' -exec cp {} bin/ \; 2>/dev/null || true
-          find "../dl/release-tarballs" -name 'marina-*-linux-musl-*.tar.gz' -exec cp {} bin/ \; 2>/dev/null || true
-
-          # Commit and push
-          git add ubuntu/ whl/ bin/
-          git config --global user.email "$(git log -1 --pretty=format:'%ae')"
-          git config --global user.name "$(git log -1 --pretty=format:'%an')"
-          git commit -m "ci: add debs and wheels from ${FORGEJO_REPOSITORY}@${FORGEJO_SHA}" || echo "No changes to commit"
-          git push origin pages
-
-          # Cleanup
-          shred -u ~/.ssh/deploy_key || rm -f ~/.ssh/deploy_key
-          cd ..
+          # ── Upload to ppa.steado.tech and publish ─────────────
+          # The server prunes old versions, builds the wheel indexes and signs the apt metadata.
+          mkdir -p ~/.ssh
+          printf '%s\n' "$PPA_DEPLOY_KEY" > ~/.ssh/ppa_key
+          chmod 600 ~/.ssh/ppa_key
+          echo "[ppa.steado.tech]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBvqpiJdvk+zuDXcjOgNdA3p98+6L7MAnhOEOLrw4phX" > ~/.ssh/ppa_known_hosts
+          PPA_SSH="ssh -i $HOME/.ssh/ppa_key -p 2222 -o IdentitiesOnly=yes -o UserKnownHostsFile=$HOME/.ssh/ppa_known_hosts -o StrictHostKeyChecking=yes"
+          rsync -rt --chmod=F644,D755 -e "$PPA_SSH" upload/ ppa@ppa.steado.tech:
+          $PPA_SSH ppa@ppa.steado.tech publish
+          shred -u ~/.ssh/ppa_key || rm -f ~/.ssh/ppa_key
 
           echo ""
           echo "=== PPA published ==="

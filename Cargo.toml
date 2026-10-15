@@ -125,19 +125,19 @@ pkg-fmt = "tgz"
 bin-dir = "{ name }-{ version }/{ bin }{ binary-ext }"
 
 [package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
-pkg-url = "https://uos-robotics.codeberg.page/ppa/bin/marina-{ version }-linux-musl-amd64.tar.gz"
+pkg-url = "https://ppa.steado.tech/bin/marina-{ version }-linux-musl-amd64.tar.gz"
 
 [package.metadata.binstall.overrides.x86_64-unknown-linux-musl]
-pkg-url = "https://uos-robotics.codeberg.page/ppa/bin/marina-{ version }-linux-musl-amd64.tar.gz"
+pkg-url = "https://ppa.steado.tech/bin/marina-{ version }-linux-musl-amd64.tar.gz"
 
 [package.metadata.binstall.overrides.aarch64-unknown-linux-gnu]
-pkg-url = "https://uos-robotics.codeberg.page/ppa/bin/marina-{ version }-linux-musl-arm64.tar.gz"
+pkg-url = "https://ppa.steado.tech/bin/marina-{ version }-linux-musl-arm64.tar.gz"
 
 [package.metadata.binstall.overrides.aarch64-unknown-linux-musl]
-pkg-url = "https://uos-robotics.codeberg.page/ppa/bin/marina-{ version }-linux-musl-arm64.tar.gz"
+pkg-url = "https://ppa.steado.tech/bin/marina-{ version }-linux-musl-arm64.tar.gz"
 
 [package.metadata.binstall.overrides.aarch64-apple-darwin]
-pkg-url = "https://uos-robotics.codeberg.page/ppa/bin/marina-{ version }-macos-arm64.tar.gz"
+pkg-url = "https://ppa.steado.tech/bin/marina-{ version }-macos-arm64.tar.gz"
 
 [package.metadata.multivers.x86_64]
 cpus = ["x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4", "raptorlake"]

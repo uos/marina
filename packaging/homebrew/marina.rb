@@ -4,12 +4,12 @@
 class Marina < Formula
   desc "A dataset manager for robotics to organize, share, and discover datasets and metadata across storage backends."
   homepage "https://codeberg.org/stelzo/marina"
-  version "0.5.2"
+  version "0.5.3"
   license any_of: ["MIT", "Apache-2.0"]
 
   on_macos do
     on_arm do
-      url "https://uos-robotics.codeberg.page/ppa/bin/marina-#{version}-macos-arm64.tar.gz"
+      url "https://ppa.steado.tech/bin/marina-#{version}-macos-arm64.tar.gz"
       sha256 "ARM_SHA256_PLACEHOLDER"
     end
   end

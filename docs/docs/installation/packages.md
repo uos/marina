@@ -23,12 +23,19 @@ pip install marina-py
 
 ## Ubuntu (PPA)
 
-Supported Distributions
+After setting up the [steado PPA](https://ppa.steado.tech/), install Marina with apt:
 
-- **Ubuntu Noble** (24.04): `amd64`, `arm64`
-- **Ubuntu Jammy** (22.04): `amd64`, `arm64`
+??? note "Set up the PPA"
 
-After setting up the [UOS Robotics PPA](https://codeberg.org/uos-robotics/ppa/src/branch/pages/README.md), install Marina with apt:
+    Run this once on Ubuntu 22.04, 24.04 or 26.04.
+
+    ~~~sh
+    curl -fsSL "https://ppa.steado.tech/ubuntu/key.gpg" | gpg --dearmor \
+      | sudo tee /usr/share/keyrings/steado-archive-keyring.gpg >/dev/null
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/steado-archive-keyring.gpg] https://ppa.steado.tech/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" \
+      | sudo tee /etc/apt/sources.list.d/steado.list
+    sudo apt update
+    ~~~
 
 ~~~bash
 sudo apt install marina

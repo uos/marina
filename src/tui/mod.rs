@@ -43,6 +43,10 @@ pub async fn run() -> Result<()> {
 
     let result = event_loop(&mut screen, app, rx).await;
 
+    // Jobs run on detached threads that exiting kills without running their
+    // destructors, so the partial files of unfinished jobs are removed here.
+    mt_dataset::cleanup::remove_registered();
+
     let _ = crossterm::execute!(
         screen.backend_mut(),
         DisableMouseCapture,
