@@ -45,11 +45,11 @@ futures = "0.3.34"
 glob = "0.3"
 humantime = "2.3"
 log = "0.4.34"
-mt_dataset = { version = "0.12.1", default-features = false }
-mt_flow = { version = "0.12.1", default-features = false, optional = true }
-mt_pubsub = { version = "0.12.1", default-features = false, optional = true }
-mt_sea = { version = "0.12.1", default-features = false, optional = true }
-mt_service = { version = "0.12.1", default-features = false, optional = true }
+mt_dataset = { version = "0.13.1", default-features = false }
+mt_flow = { version = "0.13.1", default-features = false, optional = true }
+mt_pubsub = { version = "0.13.1", default-features = false, optional = true }
+mt_sea = { version = "0.13.1", default-features = false, optional = true }
+mt_service = { version = "0.13.1", default-features = false, optional = true }
 ratatui = "0.30"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -142,9 +142,9 @@ pkg-url = "https://ppa.steado.tech/bin/marina-{ version }-macos-arm64.tar.gz"
 [package.metadata.multivers.x86_64]
 cpus = ["x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4", "raptorlake"]
 
-# [patch.crates-io]
-# mt_dataset = { path = "../minot/mt_dataset" }
-# mt_sea = { path = "../minot/mt_sea" }
-# mt_flow = { path = "../minot/mt_flow" }
-# mt_pubsub = { path = "../minot/mt_pubsub" }
-# mt_service = { path = "../minot/mt_service" }
+[patch.crates-io]
+mt_dataset = { git = "https://git.steado.tech/minot", rev = "6d83f554fa334ce1ac73f5edcb6be625fc784ba6" }
+mt_sea = { git = "https://git.steado.tech/minot", rev = "6d83f554fa334ce1ac73f5edcb6be625fc784ba6" }
+mt_flow = { git = "https://git.steado.tech/minot", rev = "6d83f554fa334ce1ac73f5edcb6be625fc784ba6" }
+mt_pubsub = { git = "https://git.steado.tech/minot", rev = "6d83f554fa334ce1ac73f5edcb6be625fc784ba6" }
+mt_service = { git = "https://git.steado.tech/minot", rev = "6d83f554fa334ce1ac73f5edcb6be625fc784ba6" }

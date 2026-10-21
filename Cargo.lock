@@ -1418,6 +1418,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dirs"
+version = "7.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d57d423b3c82e89b9a24ca3091fee61f456a26edbd28d26c65906f4bc1dcd8f"
+dependencies = [
+ "dirs-sys",
+]
+
+[[package]]
 name = "dirs-sys"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3049,7 +3058,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "crossterm",
- "dirs",
+ "dirs 6.0.0",
  "env_logger",
  "flate2",
  "futures",
@@ -3253,9 +3262,8 @@ dependencies = [
 
 [[package]]
 name = "mt_coord"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3309e28d0dde39f322a27f271caff905d0b729669c2603c6d87d7f989dd5f4f0"
+version = "0.13.1"
+source = "git+https://git.steado.tech/minot?rev=6d83f554fa334ce1ac73f5edcb6be625fc784ba6#6d83f554fa334ce1ac73f5edcb6be625fc784ba6"
 dependencies = [
  "anyhow",
  "fs2",
@@ -3269,9 +3277,8 @@ dependencies = [
 
 [[package]]
 name = "mt_dataset"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b817d0163b49d96fb66f7d5f18b1484e3ae0d048d7d25ece56583c85f54ee7b0"
+version = "0.13.1"
+source = "git+https://git.steado.tech/minot?rev=6d83f554fa334ce1ac73f5edcb6be625fc784ba6#6d83f554fa334ce1ac73f5edcb6be625fc784ba6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3279,7 +3286,7 @@ dependencies = [
  "cdr",
  "cloudini",
  "ctrlc",
- "dirs",
+ "dirs 7.0.0",
  "flate2",
  "futures",
  "glob",
@@ -3314,9 +3321,8 @@ dependencies = [
 
 [[package]]
 name = "mt_flow"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1975e279f1cfd465164eb83bb361ba826a9ec23dfbc29cccf7c3dc18c1466bbc"
+version = "0.13.1"
+source = "git+https://git.steado.tech/minot?rev=6d83f554fa334ce1ac73f5edcb6be625fc784ba6#6d83f554fa334ce1ac73f5edcb6be625fc784ba6"
 dependencies = [
  "anyhow",
  "log",
@@ -3329,9 +3335,8 @@ dependencies = [
 
 [[package]]
 name = "mt_log"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d56c5e421db8f0a07c2d5b0597c72d2bc367228628c05652796da95ee837fb9"
+version = "0.13.1"
+source = "git+https://git.steado.tech/minot?rev=6d83f554fa334ce1ac73f5edcb6be625fc784ba6#6d83f554fa334ce1ac73f5edcb6be625fc784ba6"
 dependencies = [
  "env_logger",
  "log",
@@ -3339,9 +3344,8 @@ dependencies = [
 
 [[package]]
 name = "mt_net"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a96857fb86ea4b230f938edf4a3e794449f37b9114a2712624fc05054ed26e4"
+version = "0.13.1"
+source = "git+https://git.steado.tech/minot?rev=6d83f554fa334ce1ac73f5edcb6be625fc784ba6#6d83f554fa334ce1ac73f5edcb6be625fc784ba6"
 dependencies = [
  "anyhow",
  "rkyv",
@@ -3351,9 +3355,8 @@ dependencies = [
 
 [[package]]
 name = "mt_pubsub"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bcbb1d449153684be08b156718bf3b8b63f3509b3901dc2eccfc19ebba5ba228"
+version = "0.13.1"
+source = "git+https://git.steado.tech/minot?rev=6d83f554fa334ce1ac73f5edcb6be625fc784ba6#6d83f554fa334ce1ac73f5edcb6be625fc784ba6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3365,15 +3368,16 @@ dependencies = [
  "nalgebra",
  "rkyv",
  "ros2-interfaces-jazzy-rkyv",
+ "serde_json",
  "tokio",
  "tokio-util",
+ "zenoh",
 ]
 
 [[package]]
 name = "mt_scope"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f405e5aba7397466aa9216eb226ae7247c95f5877cbb8fa02ed384aac6969c2"
+version = "0.13.1"
+source = "git+https://git.steado.tech/minot?rev=6d83f554fa334ce1ac73f5edcb6be625fc784ba6#6d83f554fa334ce1ac73f5edcb6be625fc784ba6"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -3386,12 +3390,13 @@ dependencies = [
 
 [[package]]
 name = "mt_sea"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1312ec7cb1bc89ca740a1664d2e6609ee3a792b7aa52fea82a4cfa4a282cbecb"
+version = "0.13.1"
+source = "git+https://git.steado.tech/minot?rev=6d83f554fa334ce1ac73f5edcb6be625fc784ba6#6d83f554fa334ce1ac73f5edcb6be625fc784ba6"
 dependencies = [
  "anyhow",
  "async-trait",
+ "fs2",
+ "libc",
  "log",
  "mt_log",
  "mt_net",
@@ -3405,9 +3410,8 @@ dependencies = [
 
 [[package]]
 name = "mt_service"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8828e69eeaea2c07748251c2a22a9ad62938eaca0b42d407871df33fbb55c40c"
+version = "0.13.1"
+source = "git+https://git.steado.tech/minot?rev=6d83f554fa334ce1ac73f5edcb6be625fc784ba6#6d83f554fa334ce1ac73f5edcb6be625fc784ba6"
 dependencies = [
  "anyhow",
  "log",
@@ -5216,9 +5220,9 @@ dependencies = [
 
 [[package]]
 name = "russh-sftp"
-version = "2.4.0"
+version = "3.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9de67aace74530a29086db0671fa200c470a58eb380081f28ad512ffb0c5356b"
+checksum = "9bb17f72aba4314656b359ffba72c68dcbd70ed9e97497898b75498fe7198042"
 dependencies = [
  "bitflags 2.13.2",
  "bytes",
@@ -5807,7 +5811,7 @@ version = "3.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32824fab5e16e6c4d86dc1ba84489390419a39f97699852b66480bb87d297ed8"
 dependencies = [
- "dirs",
+ "dirs 6.0.0",
 ]
 
 [[package]]
