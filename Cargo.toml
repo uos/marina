@@ -143,8 +143,8 @@ pkg-url = "https://ppa.steado.tech/bin/marina-{ version }-macos-arm64.tar.gz"
 cpus = ["x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4", "raptorlake"]
 
 [patch.crates-io]
-mt_dataset = { git = "https://git.steado.tech/minot", rev = "7fbc495176397fb8b88c51ef96055f9de119cdaa" }
-mt_sea = { git = "https://git.steado.tech/minot", rev = "7fbc495176397fb8b88c51ef96055f9de119cdaa" }
-mt_flow = { git = "https://git.steado.tech/minot", rev = "7fbc495176397fb8b88c51ef96055f9de119cdaa" }
-mt_pubsub = { git = "https://git.steado.tech/minot", rev = "7fbc495176397fb8b88c51ef96055f9de119cdaa" }
-mt_service = { git = "https://git.steado.tech/minot", rev = "7fbc495176397fb8b88c51ef96055f9de119cdaa" }
+mt_dataset = { git = "https://git.steado.tech/minot", rev = "7c2da614164b9219bb019d812a1dca123228f7c3" }
+mt_sea = { git = "https://git.steado.tech/minot", rev = "7c2da614164b9219bb019d812a1dca123228f7c3" }
+mt_flow = { git = "https://git.steado.tech/minot", rev = "7c2da614164b9219bb019d812a1dca123228f7c3" }
+mt_pubsub = { git = "https://git.steado.tech/minot", rev = "7c2da614164b9219bb019d812a1dca123228f7c3" }
+mt_service = { git = "https://git.steado.tech/minot", rev = "7c2da614164b9219bb019d812a1dca123228f7c3" }
