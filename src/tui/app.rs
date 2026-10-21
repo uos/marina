@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
@@ -28,6 +28,9 @@ const MAX_ACTIVE_TRANSFERS: usize = 4;
 /// Progress lines kept per job. A pack or unpack reports every chunk, so the
 /// log is a tail, not a transcript.
 const MAX_JOB_LOG_LINES: usize = 200;
+
+/// How long a new status message is shown in place of the active filter.
+const STATUS_FRESH: Duration = Duration::from_secs(4);
 
 pub const SPINNER: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
 
@@ -264,14 +267,28 @@ impl Field {
 
 #[derive(Debug, Clone)]
 pub enum FormAction {
-    Pull { target: String },
-    Push { bag: BagRef },
+    /// `registries` holds the candidates; a registry field is only shown when
+    /// there is more than one to pick from.
+    Pull {
+        target: String,
+        registries: Vec<String>,
+    },
+    Push {
+        bag: BagRef,
+        registries: Vec<String>,
+    },
     Import,
-    Export { bag: BagRef },
+    Export {
+        bag: BagRef,
+    },
     MirrorCache,
-    MirrorRegistry { source: String },
+    MirrorRegistry {
+        source: String,
+    },
     RegistryAdd,
-    RemoveRemote { bag: BagRef },
+    RemoveRemote {
+        bag: BagRef,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -302,6 +319,38 @@ impl Form {
     fn choice_at(&self, index: usize) -> usize {
         self.fields.get(index).map(|f| f.choice).unwrap_or(0)
     }
+
+    /// Position of the field labelled `label`, for forms whose fields depend
+    /// on what there is to choose from.
+    fn index_of(&self, label: &str) -> usize {
+        self.fields
+            .iter()
+            .position(|f| f.label == label)
+            .unwrap_or(usize::MAX)
+    }
+
+    /// The registry picked from `registries`: the only one when there is no
+    /// choice to make, otherwise the `registry` field.
+    fn registry_from(&self, registries: &[String]) -> Option<String> {
+        match registries {
+            [] => None,
+            [only] => Some(only.clone()),
+            _ => registries
+                .get(self.choice_at(self.index_of("registry")))
+                .cloned(),
+        }
+    }
+}
+
+/// A `registry` choice field, or nothing when there is at most one candidate.
+fn registry_field(registries: &[String], selected: usize) -> Option<Field> {
+    (registries.len() > 1).then(|| {
+        Field::choice(
+            "registry",
+            &registries.iter().map(|r| r.as_str()).collect::<Vec<_>>(),
+            selected,
+        )
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -347,6 +396,8 @@ pub struct App {
     pub focus: Focus,
     pub should_quit: bool,
     pub status: String,
+    /// When `status` was last set; a fresh message shows over the filter.
+    pub status_since: Option<Instant>,
     /// Printed to stdout after the terminal is restored, so `cd $(marina)` works.
     pub deferred_stdout: Option<String>,
 
@@ -401,6 +452,7 @@ impl App {
             focus: Focus::Main,
             should_quit: false,
             status: "loading registries".to_string(),
+            status_since: None,
             deferred_stdout: None,
             rows: Vec::new(),
             visible: Vec::new(),
@@ -530,7 +582,7 @@ impl App {
                     .is_some_and(|job| job.status == JobStatus::Detached);
                 self.finish_job(id, JobStatus::Failed);
                 if !detached {
-                    self.status = error;
+                    self.set_status(error);
                 }
             }
         }
@@ -562,13 +614,14 @@ impl App {
                 self.rebuild_rows();
             }
             JobOutcome::Resolved { target, path } => {
-                self.status = match self.copy_to_clipboard(&path.display().to_string()) {
+                let status = match self.copy_to_clipboard(&path.display().to_string()) {
                     Ok(()) => format!("{target} -> {} (copied to clipboard)", path.display()),
                     Err(err) => format!("failed to copy {} to clipboard: {err}", path.display()),
                 };
+                self.set_status(status);
             }
             JobOutcome::Message { text, refresh } => {
-                self.status = text;
+                self.set_status(text);
                 self.apply_refresh(refresh);
             }
         }
@@ -612,13 +665,13 @@ impl App {
             .map(|cfg| cfg.name.clone())
             .collect();
         if names.is_empty() {
-            self.status = "no registries configured — press 2 then a to add one".to_string();
+            self.set_status("no registries configured — press 2 then a to add one".to_string());
             return;
         }
         for name in names {
             self.spawn_job(JobKind::ListRemote { registry: name });
         }
-        self.status = "refreshing registries".to_string();
+        self.set_status("refreshing registries".to_string());
     }
 
     /// True while any job is running for this target, driving the row spinners.
@@ -657,7 +710,8 @@ impl App {
         if job.status == JobStatus::Running {
             job.status = JobStatus::Detached;
             job.last_line = "detached (the transfer keeps running in the background)".to_string();
-            self.status = format!("detached {}", job.kind.label());
+            let status = format!("detached {}", job.kind.label());
+            self.set_status(status);
         } else {
             // Already detached: stop listing it entirely.
             self.jobs.remove(&id);
@@ -679,7 +733,7 @@ impl App {
         let live = self.active_jobs();
         self.job_order.retain(|id| live.contains(id));
         self.jobs.retain(|id, _| live.contains(id));
-        self.status = "cleared finished jobs".to_string();
+        self.set_status("cleared finished jobs".to_string());
     }
 
     // ---------------------------------------------------------------- rows
@@ -842,6 +896,17 @@ impl App {
             .map(|cfg| (*cfg).clone())
     }
 
+    pub fn set_status(&mut self, text: impl Into<String>) {
+        self.status = text.into();
+        self.status_since = Some(Instant::now());
+    }
+
+    /// Set within [`STATUS_FRESH`], so it still outranks the filter line.
+    pub fn status_is_fresh(&self) -> bool {
+        self.status_since
+            .is_some_and(|since| since.elapsed() < STATUS_FRESH)
+    }
+
     pub fn on_tick(&mut self) {
         self.tick = self.tick.wrapping_add(1);
         // Cheap when the selection has not moved, and it catches a pull that
@@ -986,23 +1051,23 @@ impl App {
             KeyCode::Char('l') => {
                 self.scope = self.scope.next();
                 self.apply_filter();
-                self.status = match self.scope {
+                self.set_status(match self.scope {
                     Scope::All => "listing the cache and every registry".to_string(),
                     Scope::Local => "listing the local cache only".to_string(),
                     Scope::Remote => "listing registries only".to_string(),
-                };
+                });
             }
             KeyCode::Char('d') => {
                 self.hide_duplicates = !self.hide_duplicates;
                 self.rebuild_rows();
-                self.status = format!(
+                self.set_status(format!(
                     "duplicate registries {}",
                     if self.hide_duplicates {
                         "hidden"
                     } else {
                         "shown"
                     }
-                );
+                ));
             }
             KeyCode::Char('s') => self.search_remote(),
             KeyCode::Enter => self.copy_selected_identifier(),
@@ -1137,12 +1202,12 @@ impl App {
         });
         match result {
             Ok(()) => {
-                self.status = "settings saved".to_string();
+                self.set_status("settings saved".to_string());
                 if let Ok(marina) = Marina::load() {
                     self.marina = marina;
                 }
             }
-            Err(error) => self.status = format!("could not save settings: {error:#}"),
+            Err(error) => self.set_status(format!("could not save settings: {error:#}")),
         }
     }
 
@@ -1152,7 +1217,7 @@ impl App {
         };
         self.settings.default_registry = Some(cfg.name.clone());
         self.save_settings();
-        self.status = format!("default registry: {}", cfg.name);
+        self.set_status(format!("default registry: {}", cfg.name));
     }
 
     // ------------------------------------------------------------- actions
@@ -1175,7 +1240,7 @@ impl App {
                 pattern: pattern.clone(),
             });
         }
-        self.status = format!("searching registries for {pattern}");
+        self.set_status(format!("searching registries for {pattern}"));
     }
 
     /// Reads the selected dataset's files from disk when the selection moves.
@@ -1227,10 +1292,11 @@ impl App {
             return;
         };
         let target = row.key.clone();
-        self.status = match self.copy_to_clipboard(&target) {
+        let status = match self.copy_to_clipboard(&target) {
             Ok(()) => format!("copied {target} to clipboard"),
             Err(err) => format!("failed to copy {target} to clipboard: {err}"),
         };
+        self.set_status(status);
     }
 
     /// Resolves the selected dataset to its local path and copies that path
@@ -1294,20 +1360,17 @@ impl App {
             return;
         };
         let target = row.key.clone();
-        let registry = row.primary_registry().map(|name| name.to_string());
+        let registries: Vec<String> = row.remotes.iter().map(|(name, _)| name.clone()).collect();
+        // The registry's packing fixes what arrives, and the unpacked mcap
+        // compression is a local preference from the config, so neither is asked.
         let form = Form {
             title: format!("Pull {target}"),
-            fields: vec![
-                Field::text("registry", registry.clone().unwrap_or_default()),
-                Field::choice(
-                    "unpacked mcap compression",
-                    &["zstd", "lz4", "none"],
-                    mcap_choice_index(self.compression.unpacked_mcap_compression),
-                ),
-                Field::toggle("force", false),
-            ],
+            fields: registry_field(&registries, 0)
+                .into_iter()
+                .chain([Field::toggle("force", false)])
+                .collect(),
             selected: 0,
-            action: FormAction::Pull { target },
+            action: FormAction::Pull { target, registries },
         };
         self.modal = Some(Modal::Form(form));
     }
@@ -1322,43 +1385,52 @@ impl App {
             .as_ref()
             .map(|dir| dir.display().to_string())
             .unwrap_or_default();
-        let default_registry = self
+        let registries: Vec<String> = self
+            .marina
+            .list_registry_configs()
+            .iter()
+            .map(|cfg| cfg.name.clone())
+            .collect();
+        let preferred = self
             .settings
             .default_registry
-            .clone()
-            .or_else(|| row.primary_registry().map(|name| name.to_string()))
-            .unwrap_or_default();
+            .as_deref()
+            .or_else(|| row.primary_registry());
+        let selected = preferred
+            .and_then(|name| registries.iter().position(|r| r == name))
+            .unwrap_or(0);
         let form = Form {
             title: format!("Push {bag}"),
-            fields: vec![
-                Field::text("source", source),
-                Field::text("registry", default_registry),
-                Field::choice(
-                    "pointcloud mode",
-                    &["lossy", "lossless", "off"],
-                    pointcloud_choice_index(self.compression.pointcloud_mode),
-                ),
-                Field::text(
-                    "pointcloud accuracy mm",
-                    format!("{}", self.compression.pointcloud_accuracy_mm),
-                ),
-                Field::choice(
-                    "packed mcap compression",
-                    &["zstd", "lz4", "none"],
-                    mcap_choice_index(self.compression.packed_mcap_compression),
-                ),
-                Field::choice(
-                    "packed archive compression",
-                    &["none", "gzip"],
-                    archive_choice_index(self.compression.packed_archive_compression),
-                ),
-                Field::toggle("write http index", false),
-                Field::toggle("copy to cache (keep source)", false),
-                Field::toggle("skip db3 vacuum", false),
-                Field::toggle("dry run", false),
-            ],
+            fields: std::iter::once(Field::text("source", source))
+                .chain(registry_field(&registries, selected))
+                .chain([
+                    Field::choice(
+                        "pointcloud mode",
+                        &["lossy", "lossless", "off"],
+                        pointcloud_choice_index(self.compression.pointcloud_mode),
+                    ),
+                    Field::text(
+                        "pointcloud accuracy mm",
+                        format!("{}", self.compression.pointcloud_accuracy_mm),
+                    ),
+                    Field::choice(
+                        "packed mcap compression",
+                        &["zstd", "lz4", "none"],
+                        mcap_choice_index(self.compression.packed_mcap_compression),
+                    ),
+                    Field::choice(
+                        "packed archive compression",
+                        &["none", "gzip"],
+                        archive_choice_index(self.compression.packed_archive_compression),
+                    ),
+                    Field::toggle("write http index", false),
+                    Field::toggle("copy to cache (keep source)", false),
+                    Field::toggle("skip db3 vacuum", false),
+                    Field::toggle("dry run", false),
+                ])
+                .collect(),
             selected: 0,
-            action: FormAction::Push { bag },
+            action: FormAction::Push { bag, registries },
         };
         self.modal = Some(Modal::Form(form));
     }
@@ -1417,7 +1489,7 @@ impl App {
             .filter(|name| *name != source)
             .collect();
         if targets.is_empty() {
-            self.status = "mirroring needs a second registry".to_string();
+            self.set_status("mirroring needs a second registry".to_string());
             return;
         }
         let form = Form {
@@ -1609,11 +1681,13 @@ impl App {
 
     fn submit_form(&mut self, form: Form) {
         match form.action.clone() {
-            FormAction::Pull { target } => {
-                let registry = form.optional_at(0);
+            FormAction::Pull { target, registries } => {
+                let registry = form.registry_from(&registries);
                 let options = PullOptions {
-                    unpacked_mcap_compression: mcap_from_choice(form.choice_at(1)),
-                    force: form.toggle_at(2),
+                    unpacked_mcap_compression: mcap_to_core(
+                        self.compression.unpacked_mcap_compression,
+                    ),
+                    force: form.toggle_at(form.index_of("force")),
                 };
                 self.spawn_job(JobKind::Pull {
                     target,
@@ -1621,30 +1695,34 @@ impl App {
                     options,
                 });
             }
-            FormAction::Push { bag } => {
-                let source = form.text_at(0);
+            FormAction::Push { bag, registries } => {
+                let source = form.text_at(form.index_of("source"));
                 if source.is_empty() {
-                    self.status = "push needs a source path".to_string();
+                    self.set_status("push needs a source path".to_string());
                     return;
                 }
                 let accuracy: f64 = form
-                    .text_at(3)
+                    .text_at(form.index_of("pointcloud accuracy mm"))
                     .parse()
                     .unwrap_or(self.compression.pointcloud_accuracy_mm);
+                let choice = |label| form.choice_at(form.index_of(label));
+                let toggle = |label| form.toggle_at(form.index_of(label));
                 let options = PushOptions {
-                    pointcloud_mode: pointcloud_from_choice(form.choice_at(2)),
+                    pointcloud_mode: pointcloud_from_choice(choice("pointcloud mode")),
                     pointcloud_precision_m: accuracy / 1000.0,
-                    packed_mcap_compression: mcap_from_choice(form.choice_at(4)),
-                    packed_archive_compression: archive_from_choice(form.choice_at(5)),
-                    write_http_index: form.toggle_at(6),
-                    db3_vacuum: !form.toggle_at(8),
-                    dry_run: form.toggle_at(9),
-                    move_source_to_cache: !form.toggle_at(7),
+                    packed_mcap_compression: mcap_from_choice(choice("packed mcap compression")),
+                    packed_archive_compression: archive_from_choice(choice(
+                        "packed archive compression",
+                    )),
+                    write_http_index: toggle("write http index"),
+                    db3_vacuum: !toggle("skip db3 vacuum"),
+                    dry_run: toggle("dry run"),
+                    move_source_to_cache: !toggle("copy to cache (keep source)"),
                 };
                 self.spawn_job(JobKind::Push {
                     bag,
                     source: PathBuf::from(source),
-                    registry: form.optional_at(1),
+                    registry: form.registry_from(&registries),
                     options: Box::new(options),
                 });
             }
@@ -1658,13 +1736,13 @@ impl App {
                             move_to_cache: form.toggle_at(2),
                         });
                     }
-                    Err(error) => self.status = format!("invalid dataset reference: {error}"),
+                    Err(error) => self.set_status(format!("invalid dataset reference: {error}")),
                 }
             }
             FormAction::Export { bag } => {
                 let output = form.text_at(0);
                 if output.is_empty() {
-                    self.status = "export needs an output path".to_string();
+                    self.set_status("export needs an output path".to_string());
                     return;
                 }
                 self.spawn_job(JobKind::Export {
@@ -1675,7 +1753,7 @@ impl App {
             FormAction::MirrorCache => {
                 let target = form.text_at(0);
                 if target.is_empty() {
-                    self.status = "mirror needs an SSH target".to_string();
+                    self.set_status("mirror needs an SSH target".to_string());
                     return;
                 }
                 let options = CacheMirrorOptions {
@@ -1706,7 +1784,7 @@ impl App {
                 let name = form.text_at(0);
                 let uri = form.text_at(1);
                 if name.is_empty() || uri.is_empty() {
-                    self.status = "a registry needs a name and a uri".to_string();
+                    self.set_status("a registry needs a name and a uri".to_string());
                     return;
                 }
                 let kind = form

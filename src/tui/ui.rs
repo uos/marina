@@ -633,7 +633,9 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
             format!("filter: {}_", app.filter),
             Style::default().fg(ACCENT),
         )
-    } else if !app.filter.is_empty() {
+    } else if !app.filter.is_empty() && !app.status_is_fresh() {
+        // A fresh message (a copy, an error) outranks the filter for a while
+        // so the user sees the keypress did something.
         Span::raw(format!("filter: {}", app.filter))
     } else {
         Span::raw(truncate(first_line(&app.status), area.width as usize / 2))
