@@ -2,7 +2,7 @@
 
 **Marina** is a dataset manager for robotics built to organize, share, and discover bags and datasets across teams and storage backends.
 
-See the [Web Documentation](https://stelzo.codeberg.page/marina/) or `ssh marina@steado.tech` for more detailed information and setup.
+See the [Web Documentation](https://marina.steado.tech/) or `ssh marina@steado.tech` for more detailed information and setup.
 
 ## ROS 2 CLI
 
@@ -33,7 +33,7 @@ ros2 bag push my-run:v1 /path/to/bag/ --registry team_ssh
 
 ## Standalone
 
-Marina supports Linux and MacOS environments without additional requirements. Just [install](https://stelzo.codeberg.page/marina/installation/packages.html) and run.
+Marina supports Linux and MacOS environments without additional requirements. Just [install](https://marina.steado.tech/installation/packages.html) and run.
 
 ```bash
 # Explore datasets and registries interactively.
