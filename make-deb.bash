@@ -6,7 +6,13 @@
 sudo apt update -y && sudo apt-get install --no-install-recommends -y debhelper sed grep
 
 # deps from the package.xml
-sudo apt-get install --no-install-recommends -y cargo libclang-dev python3-catkin-pkg-modules libssl-dev
+sudo apt-get install --no-install-recommends -y cargo libclang-dev python3-catkin-pkg-modules libssl-dev python3-setuptools
+
+# ament_cmake_python builds the ros2 bag extension with the first python3 on
+# PATH. Use the system one the package installs into, not a tool venv such as
+# the one the Lyrical image puts first, which has no setuptools.
+PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v '/\.venv/bin$' | paste -sd: -)
+export PATH
 
 cargo_ver=$(grep -Po '^\s*version\s*=\s*"\K[^"]+' Cargo.toml)
 xml_ver=$(grep -Po '<\s*version\s*>\K[^<]+' package.xml)
