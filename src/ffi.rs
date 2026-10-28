@@ -127,6 +127,7 @@ fn do_pull_with_progress(
     callback: MarinaProgressCallback,
     user_data: *mut c_void,
 ) -> *mut c_char {
+    crate::use_release_schema();
     let mut marina = match Marina::load() {
         Ok(v) => v,
         Err(e) => {
@@ -199,6 +200,7 @@ pub unsafe extern "C" fn marina_resolve_detailed(
         Err(e) => return detailed_error(e),
     };
 
+    crate::use_release_schema();
     let marina = match Marina::load() {
         Ok(v) => v,
         Err(e) => return detailed_error(format!("failed to load marina: {e}")),

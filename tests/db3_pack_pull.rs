@@ -139,6 +139,7 @@ fn pack_and_unpack_db3_roundtrip() -> Result<()> {
 }
 
 #[test]
+#[ignore = "needs the dlg_cut_db3 bag"]
 fn compress_and_decompress_db3_pointcloud_lossless() -> Result<()> {
     let tmp = tempfile::tempdir()?;
     let test_db3 = tmp.path().join("test.db3");
@@ -180,6 +181,7 @@ fn compress_and_decompress_db3_pointcloud_lossless() -> Result<()> {
 }
 
 #[test]
+#[ignore = "needs the dlg_cut_db3 bag"]
 fn compress_and_decompress_db3_pointcloud_lossy() -> Result<()> {
     let tmp = tempfile::tempdir()?;
     let test_db3 = tmp.path().join("test.db3");
@@ -241,6 +243,7 @@ fn compress_db3_noop_on_no_pointcloud_topics() -> Result<()> {
 }
 
 #[test]
+#[ignore = "needs the dlg_cut_db3 bag"]
 fn compress_and_decompress_db3_message_count_matches() -> Result<()> {
     let tmp = tempfile::tempdir()?;
     let test_db3 = tmp.path().join("test.db3");
@@ -273,6 +276,7 @@ fn compress_and_decompress_db3_message_count_matches() -> Result<()> {
 }
 
 #[test]
+#[ignore = "needs the dlg_cut_db3 bag"]
 fn compress_and_decompress_real_fixture_lossless() -> Result<()> {
     let src = fixture_db3();
     let tmp = tempfile::tempdir()?;
@@ -313,6 +317,7 @@ fn compress_and_decompress_real_fixture_lossless() -> Result<()> {
 }
 
 #[test]
+#[ignore = "needs the dlg_cut_db3 bag"]
 fn compress_and_decompress_real_fixture_lossy() -> Result<()> {
     let src = fixture_db3();
     let tmp = tempfile::tempdir()?;

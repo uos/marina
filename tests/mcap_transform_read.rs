@@ -8,6 +8,7 @@ use marina::io::mcap_transform::{
 use marina::progress::ProgressReporter;
 
 #[test]
+#[ignore = "needs the dlg_cut bag"]
 fn reads_and_rewrites_dlg_cut_mcap_via_chunked_indexed_reader() -> Result<()> {
     let input = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("dlg_cut/dlg_cut_0.mcap");
     assert!(input.exists(), "test fixture missing: {}", input.display());

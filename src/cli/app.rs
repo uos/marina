@@ -617,6 +617,7 @@ pub async fn run() -> Result<()> {
 }
 
 pub async fn run_with_args(args: Vec<String>) -> Result<()> {
+    crate::use_release_schema();
     let raw_yes = args.iter().any(|arg| arg == "-y" || arg == "--yes");
     let cli = Cli::parse_from(args);
     run_parsed(cli, raw_yes).await

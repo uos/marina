@@ -1,4 +1,5 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/SchemaStore/schemastore/refs/heads/master/src/schemas/json/github-workflow.json
+# Docs Workflow for Marina. The schema is used until there is one for Forgejo.
 
 name: Docs
 
@@ -6,7 +7,9 @@ on:
   push:
     paths:
       - docs/**
+      - .forgejo/workflows/docs.yml
     branches:
+      - master
       - main
   workflow_dispatch:
 
@@ -14,17 +17,8 @@ jobs:
   deploy:
     runs-on: ubuntu-dev-resolute
     steps:
-      - name: checkout code
-        uses: actions/checkout@v4
-      - name: Install sudo
-        run: apt-get update && apt-get install -y sudo
-      - name: install nix
-        uses: https://github.com/cachix/install-nix-action@v31
-        with:
-          install_options: --no-daemon
-      - name: build pages
-        run: |
-          nix run .#buildDocs
+      - uses: actions/checkout@v4
+      - run: cd docs && uvx --from zensical==0.0.71 zensical build --clean --strict
       - name: Deploy to marina.steado.tech
         env:
           DOCS_DEPLOY_KEY: ${{ secrets.DOCS_DEPLOY_KEY }}

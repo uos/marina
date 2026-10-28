@@ -23,6 +23,13 @@ jobs:
           ulimit -n 65536
           VERSION=$(toml get --raw Cargo.toml package.version)
           echo "Workspace version: $VERSION"
+          # Generated configurations point at this release's schema,
+          # <repository>/releases/download/v<version>/default.rl, so the tag
+          # has to be exactly v<version>.
+          if [ "${{ github.ref_type }}" = "tag" ] && [ "${{ github.ref_name }}" != "v${VERSION}" ]; then
+            echo "Tag ${{ github.ref_name }} does not match the version v${VERSION}"
+            exit 1
+          fi
 
           cargo check --all-features
           cargo clippy --all-targets --no-deps -- -D warnings
@@ -393,9 +400,35 @@ jobs:
           name: release-tarballs
           path: release/
 
+  # The tag must be at least the version the API changes since the last
+  # release require. release waits for this, so a wrong version stops the
+  # release before anything is published.
+  semver-check:
+    runs-on: ubuntu-dev-resolute
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Dependencies
+        run: apt-get update && apt-get install -y pkg-config cmake libclang-dev clang openssl libssl-dev libsqlite3-dev
+      - name: Rust toolchain
+        run: |
+          rustup self update
+          rustup toolchain uninstall stable
+          rustup toolchain install stable
+          rustup default stable
+      - name: Install cargo-semver-checks
+        run: |
+          curl -fsSL https://github.com/obi1kenobi/cargo-semver-checks/releases/download/v0.51.0/cargo-semver-checks-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xz -C "$(dirname "$(command -v cargo)")"
+      - name: Check the version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: python3 scripts/semver_check.py "${{ github.ref_name }}"
+
   release:
     needs:
       - tarball
+      - semver-check
     runs-on: ubuntu-dev-resolute
     if: startsWith(github.ref, 'refs/tags/')
     steps:
@@ -419,8 +452,12 @@ jobs:
           tea login add --name codeberg --url "${FORGEJO_SERVER_URL}" --token "${GITHUB_TOKEN}"
           tea release delete --repo "${FORGEJO_REPOSITORY}" --confirm "${FORGEJO_REF_NAME}" || true
 
-          # Build --asset flags for every tarball
-          ASSET_FLAGS=""
+          # The schema every generated configuration points at with
+          # `# @schema`; the binaries carry its URL.
+          cp default.rl release/default.rl
+
+          # Build --asset flags for every tarball, and the schema
+          ASSET_FLAGS="--asset release/default.rl"
           for f in release/*.tar.gz; do
             [ -f "$f" ] || continue
             ASSET_FLAGS="${ASSET_FLAGS} --asset ${f}"
@@ -447,7 +484,7 @@ jobs:
             ${ASSET_FLAGS}; then
 
             echo "Release may already exist, trying to add assets individually..."
-            for f in release/*.tar.gz; do
+            for f in release/*.tar.gz release/default.rl; do
               [ -f "$f" ] || continue
               echo "  uploading $(basename "$f")..."
               tea release create \
@@ -460,6 +497,13 @@ jobs:
           fi
 
           echo "Release ${TAG} published."
+
+          # The URL compiled into the binaries has to serve this release's schema.
+          REPOSITORY=$(toml get --raw Cargo.toml package.repository)
+          SCHEMA_URL="${REPOSITORY}/releases/download/${TAG}/default.rl"
+          curl -fsSL --retry 3 "${SCHEMA_URL}" -o schema-check.rl
+          cmp schema-check.rl release/default.rl
+          echo "Schema served at ${SCHEMA_URL}"
 
   publish-ppa:
     needs:
@@ -698,6 +742,12 @@ jobs:
           ./update_mirror.bash
 
           apt-get update && apt-get install -y pkg-config cmake libclang-dev clang openssl libssl-dev libsqlite3-dev
+      - name: Rust toolchain
+        run: |
+          rustup self update
+          rustup toolchain uninstall stable
+          rustup toolchain install stable
+          rustup default stable
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

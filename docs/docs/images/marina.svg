@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">Marina — roof and wave</title>
+  <desc id="desc">One flowing line rising into a sheltering roof, dipping into a wave and rising again.</desc>
+  <defs>
+    <linearGradient id="marina-flow" x1="20" y1="50" x2="110" y2="80" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#56bacb"/>
+      <stop offset="1" stop-color="#327ba7"/>
+    </linearGradient>
+  </defs>
+  <path d="M16 86C32 80 47 51 60 36q4-5 8 0c14 16 24 49 40 44q6-2 9-8" stroke="url(#marina-flow)" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

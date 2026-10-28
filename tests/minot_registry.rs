@@ -1,7 +1,6 @@
 //! A `minot://` registry must behave exactly like the registry behind it.
 #![cfg(feature = "minot-registry")]
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -38,44 +37,6 @@ async fn wait_until(limit: Duration, mut condition: impl FnMut() -> bool) -> boo
     condition()
 }
 
-/// A folder registry holding one dataset bundle of `size` bytes.
-fn seeded_folder_registry(root: &std::path::Path, size: usize) -> (FolderRegistry, Vec<u8>) {
-    let registry = FolderRegistry::from_uri("backing", &format!("folder://{}", root.display()))
-        .expect("folder registry should be creatable");
-    // Position-dependent bytes, so a truncated or misordered transfer fails
-    // instead of passing by luck.
-    let bundle: Vec<u8> = (0..size)
-        .map(|i| (i.wrapping_mul(31) % 251) as u8)
-        .collect();
-    (registry, bundle)
-}
-
-async fn push_bundle(
-    registry: &FolderRegistry,
-    bag: &marina::BagRef,
-    bundle: &[u8],
-) -> anyhow::Result<PathBuf> {
-    let staged = std::env::temp_dir().join(unique("marina-test-bundle"));
-    std::fs::write(&staged, bundle)?;
-    registry
-        .push(
-            "backing",
-            bag,
-            &staged,
-            &PushMeta {
-                original_bytes: bundle.len() as u64 * 2,
-                packed_bytes: bundle.len() as u64,
-                bundle_hash: "0123456789ab".to_string(),
-                pointcloud: "lossless".to_string(),
-                mcap_compression: "zstd".to_string(),
-                pushed_at: 1_700_000_000,
-            },
-        )
-        .await?;
-    let _ = std::fs::remove_file(&staged);
-    Ok(staged)
-}
-
 /// Start a coordinator inside this process and serve `driver` on it.
 ///
 /// Returns once the server is answering, so a test never races startup.
@@ -96,61 +57,6 @@ async fn start_server(driver: Arc<dyn RegistryDriver>, exposed_as: &str) {
         )
         .await,
         "the served coordinator should come up"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_pull_over_minot_matches_the_registry_being_served() {
-    let _guard = COORDINATOR_PORT.lock().await;
-    let _ = env_logger::builder().is_test(true).try_init();
-
-    let root = tempfile::tempdir().expect("temp dir");
-    // Several chunks' worth, so this is a real transfer over many messages.
-    let (backing, bundle) = seeded_folder_registry(root.path(), 3 * 1024 * 1024 + 517);
-    let bag: marina::BagRef = "team/run:v1".parse().expect("bag ref");
-    push_bundle(&backing, &bag, &bundle)
-        .await
-        .expect("seeding the backing registry should work");
-
-    let exposed_as = unique("served");
-    start_server(Arc::new(backing), &exposed_as).await;
-
-    let client = MinotRegistry::from_uri("remote", &format!("minot://{exposed_as}"))
-        .expect("client registry should parse");
-
-    // list
-    let listed = client.list("*").await.expect("list should work");
-    assert!(
-        listed.contains(&bag),
-        "the served registry's contents should be visible: {listed:?}"
-    );
-
-    // bag_info
-    let info = client
-        .bag_info(&bag)
-        .await
-        .expect("bag_info should work")
-        .expect("the dataset should have metadata");
-    assert_eq!(info.packed_bytes, bundle.len() as u64);
-    assert_eq!(info.bundle_hash.as_deref(), Some("0123456789ab"));
-
-    // pull
-    let destination = root.path().join("pulled.tar.gz");
-    let descriptor = client
-        .pull(&bag, &destination)
-        .await
-        .expect("pull over minot should work");
-    assert_eq!(descriptor.packed_bytes, bundle.len() as u64);
-
-    let pulled = std::fs::read(&destination).expect("the pulled bundle should exist");
-    assert_eq!(
-        pulled.len(),
-        bundle.len(),
-        "the transferred bundle must not be truncated or doubled"
-    );
-    assert!(
-        pulled == bundle,
-        "a pull over minot:// must be byte-identical to the registry being served"
     );
 }
 

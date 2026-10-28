@@ -1,3 +1,5 @@
+<img src="assets/marina.svg" alt="Marina logo" width="160" align="right">
+
 # marina
 
 **Marina** is a dataset manager for robotics built to organize, share, and discover bags and datasets across teams and storage backends.

@@ -4,13 +4,14 @@ The `marina` shared library exposes a C API through `marina.h`. It can be used f
 
 ## Get the header and library
 
-The header is at `bindings/c/marina.h` in the source tree. The shared library (`libmarina.so` / `libmarina.dylib`) is the `cdylib` build artefact of the `marina` crate.
-
-Build the library:
+The packages ship the command-line tool only, so the library is built from source. The shared library (`libmarina.so` / `libmarina.dylib`) is the `cdylib` build artefact of the `marina` crate, and the header is `bindings/c/marina.h` in the same source:
 
 ~~~bash
+git clone https://codeberg.org/stelzo/marina.git
+cd marina
 cargo build --release
 # outputs: target/release/libmarina.so (Linux) or libmarina.dylib (macOS)
+# header:  bindings/c/marina.h
 ~~~
 
 ## Resolve a dataset

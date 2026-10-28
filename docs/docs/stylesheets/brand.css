@@ -1,0 +1,12 @@
+/* Marina colours, from the blue wave of the logo. seakit.css does the rest. */
+[data-md-color-scheme="default"] {
+  --sk-brand: #2a6a92;
+  --sk-brand-strong: #1f5170;
+  --sk-brand-soft: #6cc3d2;
+}
+
+[data-md-color-scheme="slate"] {
+  --sk-brand: #6cc3d2;
+  --sk-brand-strong: #327ba7;
+  --sk-brand-soft: #6cc3d2;
+}
