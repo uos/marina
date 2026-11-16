@@ -11,7 +11,7 @@ The directory defaults to `~/.config/marina` but can be overridden with `MARINA_
 The file is created automatically on first run. You can also create or edit it manually.
 The format is [ratslang](https://codeberg.org/stelzo/ratslang), which supports physical units directly.
 
-## Full Example
+## Full example
 
 ~~~awk
 settings {
@@ -48,7 +48,7 @@ registries {
 }
 ~~~
 
-## Registry Blocks
+## Registry blocks
 
 Each block inside `registries { }` defines a storage backend. The block name is the registry identifier. Use underscores because names are displayed as written.
 
@@ -60,7 +60,7 @@ Each block inside `registries { }` defines a storage backend. The block name is 
 | `proxy_jump` | no | SSH jump host in `user@host[:port]` form. SSH registries can also read `MARINA_SSH_PROXY_JUMP` |
 | `ssh_transport` | no | SSH implementation: `openssh` (default) shells out to the system `ssh`, so `~/.ssh/config` applies; `native` uses Marina's built-in client. SSH registries can also read `MARINA_SSH_TRANSPORT` |
 
-### URI Schemes
+### URI schemes
 
 | Scheme | Backend | Example |
 |---|---|---|
@@ -76,7 +76,7 @@ marina registry add team_ssh ssh://user@host:/path
 marina registry rm team_ssh
 ~~~
 
-## Compression Fields
+## Compression fields
 
 All compression settings are optional. Omitting a field uses the built-in default.
 
@@ -88,7 +88,7 @@ All compression settings are optional. Omitting a field uses the built-in defaul
 | `packed_archive_compression` | `none` | Outer archive compression: `none`, `gzip` |
 | `unpacked_mcap_compression` | `lz4` | MCAP chunk compression for the local cache copy: `none`, `zstd`, `lz4` |
 
-## Settings Fields
+## Settings fields
 
 Global behaviour settings live under the `settings` block.
 
@@ -99,7 +99,7 @@ Global behaviour settings live under the `settings` block.
 | `completion_cache_ttl` | `10min` | How long the shell-completion remote index is considered fresh before a background refresh is triggered (any time unit, e.g. `30min`, `1h`) |
 | `registry_timeout` | `10s` | How long to wait for a registry to respond before giving up (any time unit) |
 
-## Environment Variables
+## Environment variables
 
 | Variable | Description |
 |---|---|
@@ -111,7 +111,7 @@ Global behaviour settings live under the `settings` block.
 | `MARINA_GDRIVE_CLIENT_SECRET` | OAuth client secret for Google Drive auth (alternative to `--client-secret` flag) |
 | `MARINA_PROG_NAME` | Override the program name used in CLI help output (used by ROS verb wrapper) |
 
-## Cache Location
+## Cache location
 
 Downloaded datasets are stored in:
 

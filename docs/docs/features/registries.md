@@ -2,17 +2,17 @@
 
 A registry is a named storage location where Marina keeps datasets. You can have as many registries as you like. Marina searches all of them when you run `pull` or `search`.
 
-## Default Registry
+## Default registry
 
 Marina is packaged with a pre-configured public registry from the german non-profit organization [Osnabotics e.V.](https://www.osnabotics.org). The registry already provides some datasets for SLAM. You can disable the default registry at compile time or remove it from the config at `~/.config/marina/marina.rl` . If you'd like to add your dataset to the Osnabotics registry, make sure to use MCAP storage if using ROS 2 and reach out to us via Email [marina@osnabotics.org](mailto:marina@osnabotics.org) with a publicly accessible Google Drive folder ID and a short description.
 
-## List Registries
+## List registries
 
 ~~~bash
 marina registry ls
 ~~~
 
-## Add a Registry
+## Add a registry
 
 ~~~bash
 marina registry add <name> <uri>
@@ -95,7 +95,7 @@ HTTP registries provide pull and search. Publish through a corresponding SSH reg
 marina registry add web_main https://datasets.example.org/marina
 ~~~
 
-### Local Folder
+### Local folder
 
 Any local or network-mounted directory works:
 
@@ -109,7 +109,7 @@ marina registry add nas folder:///mnt/nas/marina
 
 Access control is handled by the underlying filesystem permissions.
 
-## Remove a Registry
+## Remove a registry
 
 ~~~bash
 marina registry rm <name>
@@ -125,7 +125,7 @@ marina registry rm <name> --delete-data
 
     `--delete-data` permanently removes all datasets stored in that registry. This cannot be undone.
 
-## Mirror a Registry
+## Mirror a registry
 
 Copy all datasets from one registry to another:
 
@@ -148,7 +148,7 @@ marina registry mirror <source> <target> 'helipr/bridge01:*' 'helipr/bridge02:*'
 
 Useful for backing up a remote registry to local storage or migrating between backends.
 
-## Auth Status
+## Auth status
 
 Check whether a Google Drive registry is currently authenticated:
 

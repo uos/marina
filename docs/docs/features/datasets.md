@@ -115,7 +115,7 @@ marina push outdoor-run:v2 /path/to/outdoor-run/ --registry team-ssh
 
 Compression settings can be overridden per push. See the [Compression](./compression.md) page for details.
 
-### Additional Push Options
+### Additional push options
 
 | Flag | Description |
 |---|---|

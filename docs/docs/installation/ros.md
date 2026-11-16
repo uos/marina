@@ -43,7 +43,7 @@ source install/local_setup.bash
 
     Building from source generates incremental Rust compilation artifacts. We recommend using the binary package from the PPA wherever possible.
 
-## CLI Renaming
+## CLI renaming
 
 Once installed and sourced, all Marina commands are available under `ros2 bag`. 
 

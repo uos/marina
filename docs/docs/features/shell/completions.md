@@ -1,4 +1,4 @@
-# Shell Completions
+# Shell completions
 
 Once installed, pressing <kbd>Tab</kbd> expands subcommands, flags, and dataset names from both your local cache and all configured remote registries.
 
@@ -80,7 +80,7 @@ For packaging, a system-wide installation, or an unsupported installer, pass the
 
     Fish picks up completions automatically.
 
-## Dataset Name Completion
+## Dataset name completion
 
 Marina completes dataset names for `pull`, `push`, `resolve`, `export`, and `rm`.
 

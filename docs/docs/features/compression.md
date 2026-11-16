@@ -2,7 +2,7 @@
 
 Marina applies several layers of compression when pushing datasets to registries. The defaults are chosen to maximise space savings while keeping pull times fast and data quality high.
 
-## PointCloud2 Compression
+## PointCloud2 compression
 
 For ROS 2 `sensor_msgs/PointCloud2` messages, Marina embeds the [cloudini](https://github.com/facontidavide/cloudini) library, a specialised point cloud codec that achieves dramatically better compression ratios than general-purpose compressors.
 
@@ -14,7 +14,7 @@ Marina uses **lossy compression with 1 mm accuracy** by default. At this setting
 | `lossy` | Coordinate rounding to `pointcloud_accuracy` (default: `1mm`) |
 | `lossless` | Lossless cloudini encoding with larger files than lossy mode |
 
-## MCAP Chunk Compression
+## MCAP chunk compression
 
 MCAP files store messages in compressed chunks. Marina recompresses these chunks when packing a dataset.
 
@@ -30,7 +30,7 @@ Available codecs: `none`, `lz4`, `zstd`.
 - **LZ4**: fast decompression, good for local cache where pull speed matters.
 - **Zstd**: higher compression ratio, good for remote storage where bandwidth matters.
 
-## Archive Compression
+## Archive compression
 
 The outer archive wrapping the MCAP files can be compressed as well for when folders contain much more than bags:
 
@@ -40,7 +40,7 @@ The outer archive wrapping the MCAP files can be compressed as well for when fol
 
 Available modes: `none`, `gzip`.
 
-## Configuration File
+## Configuration file
 
 Compression defaults live in `~/.config/marina/marina.rl` under the `compression` block.
 The format is [ratslang](https://codeberg.org/stelzo/ratslang) — physical units are written directly (e.g. `1mm`, `0.5mm`).
@@ -57,7 +57,7 @@ compression {
 
 All fields are optional. Omitting a field uses the built-in default shown above.
 
-## Per-Command Overrides
+## Per-command overrides
 
 Compression settings provided on the command line override the config for that invocation only. They do not modify the config file.
 
@@ -82,6 +82,6 @@ marina push outdoor-run:v2 ./bag/ \
 marina pull outdoor-run:v2 --unpacked-mcap-compression none
 ~~~
 
-## Plain Folder Support
+## Plain folder support
 
 For datasets that are not MCAP bagfiles (plain folders, non-ROS data), PointCloud2 compression is not applied. Archive and MCAP-level settings have no effect on non-MCAP content, and the data is stored as-is inside the archive.

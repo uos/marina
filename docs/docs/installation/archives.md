@@ -1,10 +1,10 @@
-# Raw Archives
+# Raw archives
 
 Precompiled binaries for common platforms are published with every Marina release.
 They are available on [Codeberg Releases](https://codeberg.org/stelzo/marina/releases).
 
 
-## Debian Package
+## Debian package
 
 Since Marina only uses base system libraries, you can easily install new deb packages on other Debian-based distros.
 
@@ -40,7 +40,7 @@ Download a `.deb` and install it directly:
     sudo dpkg -i marina.deb
     ```
 
-## Manual Binary Install
+## Manual binary install
 
 Static musl builds have no system library dependencies and run on virtually any Linux distribution.
 

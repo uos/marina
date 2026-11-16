@@ -1,4 +1,4 @@
-# CI Integration
+# CI integration
 
 Marina is designed to work headlessly in CI pipelines. Every registry type that requires credentials supports an `--auth-env` flag that names an environment variable holding the secret. No interactive prompts, no stored session files needed on the runner.
 
