@@ -96,6 +96,7 @@ inherits = "release"
 
 [package.metadata.deb]
 name = "marina"
+maintainer = "stelzo <stelzo@steado.de>"
 section = "science"
 priority = "optional"
 assets = [
