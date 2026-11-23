@@ -759,9 +759,9 @@ dependencies = [
 
 [[package]]
 name = "cloudini"
-version = "0.3.2"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "115564634aa75ccf8d128d319e9434fc6e437fa7000b98f87105cb7bc3164a7a"
+checksum = "bf82aa487f86ec2b0594a4a047705d7fdbc4afb1a49fc9307a5a73d4c005f668"
 dependencies = [
  "lz4_flex 0.13.1",
  "rkyv",
@@ -2975,7 +2975,7 @@ dependencies = [
 
 [[package]]
 name = "marina"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "anyhow",
  "arboard",
